@@ -10,3 +10,5 @@ __pycache__/
 my_disk.qcow2
 .codex/
 .qwen/
+AGENTS.md
+graphify-out
