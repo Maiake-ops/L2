@@ -516,6 +516,7 @@ static void reap_children(void)
     for (;;) {
         int st = 0;
         long pid = r_sys4(SYS_wait4, -1L, (long)&st, WNOHANG, 0);
+        if (pid == -EINTR) continue;
         if (pid <= 0) break;                            /* EAGAIN/ECHILD: none */
         unsigned hit = RCL_MAX_SVCS;
         for (unsigned i = 0; i < g_conf.nsvc; i++)
@@ -972,6 +973,8 @@ static void supervise(void)
         spawn_due();
 
         unsigned long wait = earliest_pending();
+        /* Without a self-pipe, a signal just before ppoll can lose its wakeup. */
+        if (g_sig_rd < 0 && (wait == 0 || wait > 1000)) wait = 1000;
         struct kts tv;
         if (wait == 0) {
             if (r_sys5(SYS_ppoll, (long)&pf, 1L, 0L, 0L, 0L) < 0) sleep_ms(50);

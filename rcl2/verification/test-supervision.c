@@ -18,6 +18,10 @@ static long fake_syscall(long, long, long, long, long, long, long);
 static unsigned long clock_ms = 1000;
 static long fork_result = 42;
 static long exited_pid;
+static int interrupt_wait;
+static unsigned polls;
+
+#define CHECK(condition) do { if (!(condition)) finish(1); } while (0)
 
 static long fake_syscall(long nr, long a, long b, long c,
                          long d, long e, long f)
@@ -33,16 +37,37 @@ static long fake_syscall(long nr, long a, long b, long c,
     case SYS_fork: return fork_result;
     case SYS_write: return c;
     case SYS_wait4: {
+        if (interrupt_wait) { interrupt_wait = 0; return -EINTR; }
         long pid = exited_pid;
         exited_pid = 0;
         *(int *)b = 127 << 8;
         return pid;
     }
+    case SYS_ppoll: {
+        struct pollfdx *pf = (struct pollfdx *)a;
+        struct kts *timeout = (struct kts *)c;
+        if (polls++ == 0) {
+            CHECK(pf->fd == 3 && timeout == 0);
+            g_sig_rd = -1;
+            return 0;
+        }
+        CHECK(pf->fd == -1 && timeout != 0);
+        CHECK(timeout->tv_sec == 1 && timeout->tv_nsec == 0);
+        if (polls == 2) {
+            exited_pid = g_pid[0];
+            clock_ms += 10;
+        } else if (polls == 3) {
+            CHECK(g_pid[0] == 0 && g_backoff[0] == SB_CEIL_MS);
+            clock_ms = g_next[0];
+        } else {
+            CHECK(g_pid[0] == fork_result && g_next[0] == 0);
+            finish(0);
+        }
+        return 0;
+    }
     default: finish(2);
     }
 }
-
-#define CHECK(condition) do { if (!(condition)) finish(1); } while (0)
 
 static void crash_after(unsigned long duration, int expected_delay)
 {
@@ -62,6 +87,8 @@ void rcl_enter(unsigned long *sp)
     g_conf.svcs[0].mode = RCL_MODE_RESPAWN;
     svc_state_clear();
     svc_spawn(0);
+    /* A signal interrupting wait4 must not leave the exit queued. */
+    interrupt_wait = 1;
     const int delays[] = {1000, 2000, 4000, 8000, 16000, 30000, 30000};
     for (unsigned i = 0; i < sizeof(delays) / sizeof(delays[0]); i++) {
         crash_after(10, delays[i]);
@@ -105,5 +132,11 @@ void rcl_enter(unsigned long *sp)
     exited_pid = g_pid[0];
     reap_children();
     CHECK(g_pid[0] == 0 && g_next[0] == 0);
-    finish(0);
+    /* Losing the wakeup pipe must bound both idle and backoff waits. */
+    g_closing = 0;
+    svc_state_clear();
+    svc_spawn(0);
+    g_backoff[0] = SB_CEIL_MS;
+    g_sig_rd = 3;
+    supervise();
 }

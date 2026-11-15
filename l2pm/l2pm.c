@@ -20,8 +20,19 @@
  * Environment:
  *   L2PM_ROOT       prefix for tests, e.g. L2PM_ROOT=/tmp/l2-test
  *   L2PM_RECIPES    recipe directory (default <root>/l2/recipes)
+ *   L2PM_RECIPE_REPO      remote recipe repository: a git URL (cloned into
+ *                   <root>/l2/var/recipe-repo) or a raw base URL serving
+ *                   <base>/<name>.recipe.  Local recipes take precedence.
+ *   L2PM_RECIPE_REPO_REF  commit hash pinning the git recipe repository
  *   SOURCE_DATE_EPOCH   fixed timestamp for reproducible archives
  *   JOBS            build parallelism (default 8)
+ *
+ * Recipes run in four steps: 1 repo (git source clone/checkout), 2 fetch +
+ * extract, 3 compile, 4 install into $DESTDIR.  Legacy recipes with a single
+ * build= command keep working (build = compile+install combined).  Remote
+ * recipes execute shell code: they are shown and must be explicitly trusted
+ * (confirmation or --trust); trusted content hashes are remembered under
+ * <root>/l2/var/trusted-recipes.
  */
 
 #define _GNU_SOURCE
@@ -150,6 +161,9 @@ static int rm_rf(const char *path)
     struct stat st;
     if (lstat(path, &st) != 0) return errno == ENOENT ? 0 : -1;
     if (S_ISDIR(st.st_mode)) {
+        /* Read-only directories (packages may ship mode 0555 dirs) must
+         * still be removable by their owner during gc/failed installs. */
+        chmod(path, 0700);
         DIR *d = opendir(path);
         if (d) {
             struct dirent *e;
@@ -184,6 +198,10 @@ static int write_file(const char *path, const void *buf, size_t n)
     return close(fd);
 }
 
+/* Upper bound for metadata files (db entries, .l2pm/info, /proc files).
+ * Keeps a hostile or corrupt file from exhausting memory. */
+#define READ_SMALL_MAX (1024 * 1024)
+
 static char *read_small(const char *path)
 {
     FILE *f = fopen(path, "rb");
@@ -197,6 +215,7 @@ static char *read_small(const char *path)
         }
         size_t r = fread(buf + len, 1, 4096, f);
         len += r;
+        if (len > READ_SMALL_MAX) { fclose(f); free(buf); return NULL; }
         if (r < 4096) break;
     }
     fclose(f);
@@ -428,24 +447,8 @@ static int tar_add_file(int fd, const char *base, const char *rel, long long epo
         return -1;
     }
 
-    unsigned char hdr[512];
-    memset(hdr, 0, sizeof(hdr));
-    memcpy(hdr + 0, nm, 100);
-    put_octal((char *)hdr + 100, 8, st.st_mode & 07777);
-    put_octal((char *)hdr + 108, 8, 0);
-    put_octal((char *)hdr + 116, 8, 0);
-    long long sz = S_ISREG(st.st_mode) ? (long long)st.st_size : 0;
-    if (S_ISLNK(st.st_mode)) sz = (long long)st.st_size;
-    put_octal((char *)hdr + 124, 12, (unsigned long long)sz);
-    put_octal((char *)hdr + 136, 12, (unsigned long long)epoch);
-    memset(hdr + 148, ' ', 8);
-    hdr[156] = S_ISDIR(st.st_mode) ? '5' : S_ISLNK(st.st_mode) ? '2' : '0';
-    memcpy(hdr + 257, "ustar", 5);
-    memcpy(hdr + 263, "00", 2);
-    memcpy(hdr + 265, "root", 4);
-    memcpy(hdr + 297, "root", 4);
-    memcpy(hdr + 345, pre, 155);
-
+    /* Read the symlink target first so the header size and the payload
+     * always agree (and no uninitialized bytes reach the archive). */
     char *link = NULL;
     if (S_ISLNK(st.st_mode)) {
         link = xmalloc((size_t)st.st_size + 1);
@@ -456,8 +459,33 @@ static int tar_add_file(int fd, const char *base, const char *rel, long long epo
             fprintf(stderr, "l2pm: symlink target too long: %s\n", full);
             free(link); free(full); return -1;
         }
-        memcpy(hdr + 157, link, strlen(link));
     }
+
+    long long sz = S_ISREG(st.st_mode) ? (long long)st.st_size
+                 : S_ISLNK(st.st_mode) ? (long long)strlen(link) : 0;
+    /* 11 octal digits is the ustar size field limit; put_octal would
+     * silently truncate anything larger and produce a corrupt archive. */
+    if (sz > 077777777777LL) {
+        fprintf(stderr, "l2pm: file too large for ustar: %s\n", full);
+        free(link); free(full); return -1;
+    }
+
+    unsigned char hdr[512];
+    memset(hdr, 0, sizeof(hdr));
+    memcpy(hdr + 0, nm, 100);
+    put_octal((char *)hdr + 100, 8, st.st_mode & 07777);
+    put_octal((char *)hdr + 108, 8, 0);
+    put_octal((char *)hdr + 116, 8, 0);
+    put_octal((char *)hdr + 124, 12, (unsigned long long)sz);
+    put_octal((char *)hdr + 136, 12, (unsigned long long)epoch);
+    memset(hdr + 148, ' ', 8);
+    hdr[156] = S_ISDIR(st.st_mode) ? '5' : S_ISLNK(st.st_mode) ? '2' : '0';
+    memcpy(hdr + 257, "ustar", 5);
+    memcpy(hdr + 263, "00", 2);
+    memcpy(hdr + 265, "root", 4);
+    memcpy(hdr + 297, "root", 4);
+    memcpy(hdr + 345, pre, 155);
+    if (link) memcpy(hdr + 157, link, strlen(link));
 
     unsigned sum = 0;
     for (int i = 0; i < 512; i++) sum += hdr[i];
@@ -519,6 +547,8 @@ static int tar_dir(const char *dir, const char *out, long long epoch)
 
 /* --------------------------------------------------------------- tar in */
 
+/* Entry names must be relative and must not contain ".." or "." components
+ * (a leading "./" is stripped by the caller, as tar commonly emits it). */
 static int safe_rel(const char *name)
 {
     if (!name[0] || name[0] == '/') return 0;
@@ -528,25 +558,182 @@ static int safe_rel(const char *name)
         const char *e = p;
         while (*e && *e != '/') e++;
         size_t n = (size_t)(e - p);
-        if (n == 2 && p[0] == '.' && p[1] == '.') return 0;
         if (n == 0) break;
+        if (n == 1 && p[0] == '.') return 0;
+        if (n == 2 && p[0] == '.' && p[1] == '.') return 0;
         p = e;
     }
     return 1;
 }
+
+/* Lexically check that `link`, resolved relative to directory `dir`
+ * ("" = archive root), stays inside the archive root.  Rejects absolute
+ * targets and any ".." that would escape.  No filesystem access: this is
+ * pure path arithmetic, so it cannot be fooled by existing symlinks. */
+static int link_inside(const char *dir, const char *link)
+{
+    if (!link[0] || link[0] == '/') return 0;
+    int depth = 0;
+    const char *parts[2] = { dir, link };
+    for (int k = 0; k < 2; k++) {
+        const char *p = parts[k];
+        while (*p) {
+            while (*p == '/') p++;
+            const char *e = p;
+            while (*e && *e != '/') e++;
+            size_t n = (size_t)(e - p);
+            if (n == 0) break;
+            if (n == 1 && p[0] == '.') { /* "." stays */ }
+            else if (n == 2 && p[0] == '.' && p[1] == '.') {
+                if (--depth < 0) return 0;
+            } else depth++;
+            p = e;
+        }
+    }
+    return 1;
+}
+
+/* Strict tar numeric field: octal with optional leading spaces and
+ * NUL/space padding, or GNU base-256 (positive form only).  Rejects
+ * garbage instead of silently misparsing it like strtoll would. */
+static int parse_tar_num(const unsigned char *p, size_t n, long long *out)
+{
+    if (n == 0) return -1;
+    if (p[0] & 0x80) {
+        if (p[0] != 0x80) return -1;   /* negative base-256: not meaningful */
+        unsigned long long v = 0;
+        for (size_t i = 1; i < n; i++) {
+            if (v > (ULLONG_MAX - p[i]) / 256) return -1;
+            v = v * 256 + p[i];
+        }
+        if (v > (unsigned long long)LLONG_MAX) return -1;
+        *out = (long long)v;
+        return 0;
+    }
+    size_t i = 0;
+    while (i < n && p[i] == ' ') i++;
+    long long v = 0;
+    for (; i < n && p[i] && p[i] != ' '; i++) {
+        if (p[i] < '0' || p[i] > '7') return -1;
+        if (v > (LLONG_MAX - (p[i] - '0')) / 8) return -1;
+        v = v * 8 + (p[i] - '0');
+    }
+    for (; i < n; i++)
+        if (p[i] && p[i] != ' ') return -1;
+    *out = v;                          /* empty field reads as 0 */
+    return 0;
+}
+
+/* Validate the header checksum (both the unsigned and the GNU signed
+ * convention) with the checksum field itself treated as spaces. */
+static int tar_hdr_checksum_ok(const unsigned char *h)
+{
+    long long want;
+    if (parse_tar_num(h + 148, 8, &want) != 0) return 0;
+    unsigned usum = 0;
+    long ssum = 0;
+    for (int i = 0; i < 512; i++) {
+        unsigned char c = (i >= 148 && i < 156) ? ' ' : h[i];
+        usum += c;
+        ssum += (signed char)c;
+    }
+    return want == (long long)usum || want == ssum;
+}
+
+/* Every parent of `out` below `dest` must be a real directory, never a
+ * symlink: this is what stops a previously extracted symlink from being
+ * used as a write-through tunnel out of dest.  Missing parents are created
+ * (tar archives may list files before their directory entries). */
+static int ensure_parents(const char *dest, const char *out)
+{
+    size_t dn = strlen(dest);
+    char *tmp = xstrdup(out);
+    int rc = 0;
+    for (char *p = tmp + dn + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = 0;
+        struct stat st;
+        if (lstat(tmp, &st) != 0) {
+            if (errno != ENOENT || mkdir(tmp, 0755) != 0) { rc = -1; break; }
+        } else if (!S_ISDIR(st.st_mode)) {
+            fprintf(stderr, "l2pm: path component is not a directory: %s\n", tmp);
+            rc = -1; break;
+        }
+        *p = '/';
+    }
+    free(tmp);
+    return rc;
+}
+
+/* Directory modes are applied after the whole archive is extracted, so a
+ * read-only directory entry cannot block writing its children. */
+struct dirfix { char *path; mode_t mode; long long mt; };
 
 static int tar_extract(const char *tar, const char *dest)
 {
     FILE *f = fopen(tar, "rb");
     if (!f) { fprintf(stderr, "l2pm: cannot open %s: %s\n", tar, strerror(errno)); return -1; }
     if (mkdir_p(dest, 0755) != 0) { fclose(f); return -1; }
+    struct dirfix *df = NULL;
+    size_t dfn = 0, dfc = 0;
     int rc = 0;
     for (;;) {
         unsigned char hdr[512];
-        if (fread(hdr, 1, 512, f) != 512) { rc = -1; break; }
+        if (fread(hdr, 1, 512, f) != 512) {
+            fprintf(stderr, "l2pm: truncated tar header in %s\n", tar);
+            rc = -1; break;
+        }
         int zero = 1;
         for (int i = 0; i < 512; i++) if (hdr[i]) { zero = 0; break; }
-        if (zero) break;
+        if (zero) {
+            /* End of archive: expect a second zero block (or clean EOF). */
+            unsigned char z2[512];
+            size_t r = fread(z2, 1, 512, f);
+            if (r == 512) {
+                for (int i = 0; i < 512; i++)
+                    if (z2[i]) { fprintf(stderr, "l2pm: corrupt end-of-archive in %s\n", tar); rc = -1; break; }
+            } else if (r != 0) {
+                fprintf(stderr, "l2pm: truncated end-of-archive in %s\n", tar);
+                rc = -1;
+            }
+            break;
+        }
+        if (!tar_hdr_checksum_ok(hdr)) {
+            fprintf(stderr, "l2pm: bad tar header checksum in %s\n", tar);
+            rc = -1; break;
+        }
+        if (memcmp(hdr + 257, "ustar", 5) != 0) {
+            fprintf(stderr, "l2pm: not a ustar archive: %s\n", tar);
+            rc = -1; break;
+        }
+
+        long long size, mt, m;
+        if (parse_tar_num(hdr + 124, 12, &size) != 0 ||
+            parse_tar_num(hdr + 136, 12, &mt) != 0 ||
+            parse_tar_num(hdr + 100, 8, &m) != 0) {
+            fprintf(stderr, "l2pm: bad numeric field in tar header (%s)\n", tar);
+            rc = -1; break;
+        }
+        if (size < 0 || size > (1LL << 40)) {
+            fprintf(stderr, "l2pm: tar entry size out of range (%s)\n", tar);
+            rc = -1; break;
+        }
+        mode_t mode = (mode_t)m & 07777;
+        char type = (char)hdr[156];
+
+        /* Extended metadata (PAX 'x'/'g', GNU longname 'L'/'K'): consume
+         * the payload so the stream stays synchronized, then reject the
+         * archive cleanly.  l2pm's own archives are plain sorted ustar. */
+        if (type == 'x' || type == 'g' || type == 'L' || type == 'K') {
+            size_t pad = (size_t)((512 - (size % 512)) % 512);
+            if (fseeko(f, (off_t)size, SEEK_CUR) != 0 ||
+                (pad && fseeko(f, (off_t)pad, SEEK_CUR) != 0)) {
+                fprintf(stderr, "l2pm: truncated extended header in %s\n", tar);
+            } else {
+                fprintf(stderr, "l2pm: extended tar metadata (type '%c') is not supported\n", type);
+            }
+            rc = -1; break;
+        }
 
         char name[256], prefix[156], linkname[101];
         memcpy(name, hdr + 0, 100); name[100] = 0;
@@ -563,53 +750,90 @@ static int tar_extract(const char *tar, const char *dest)
             fprintf(stderr, "l2pm: unsafe archive path: %s\n", fullrel);
             rc = -1; break;
         }
-        char modebuf[16], sizebuf[16], mtbuf[16];
-        memcpy(modebuf, hdr + 100, 8); modebuf[8] = 0;
-        memcpy(sizebuf, hdr + 124, 12); sizebuf[12] = 0;
-        memcpy(mtbuf, hdr + 136, 12); mtbuf[12] = 0;
-        mode_t mode = (mode_t)strtoul(modebuf, NULL, 8) & 07777;
-        long long size = strtoll(sizebuf, NULL, 8);
-        long long mt = strtoll(mtbuf, NULL, 8);
-        char type = (char)hdr[156];
-        if (size < 0 || size > (1LL << 40)) { rc = -1; break; }
 
         char *out = fmt("%s/%s", dest, rel);
-        char *slash = strrchr(out, '/');
-        if (slash) { *slash = 0; mkdir_p(*out ? out : "/", 0755); *slash = '/'; }
+        if (ensure_parents(dest, out) != 0) { free(out); rc = -1; break; }
 
         if (type == '5') {
-            if (mkdir_p(out, mode ? mode : 0755) != 0) rc = -1;
+            struct stat st;
+            if (lstat(out, &st) == 0) {
+                if (!S_ISDIR(st.st_mode)) {
+                    if (unlink(out) != 0 || mkdir(out, 0755) != 0) rc = -1;
+                }
+            } else if (errno == ENOENT) {
+                if (mkdir(out, 0755) != 0) rc = -1;
+            } else rc = -1;
+            if (rc == 0) {
+                if (dfn == dfc) {
+                    dfc = dfc ? dfc * 2 : 64;
+                    df = xrealloc(df, dfc * sizeof(*df));
+                }
+                df[dfn].path = xstrdup(out);
+                df[dfn].mode = mode ? mode : 0755;
+                df[dfn].mt = mt;
+                dfn++;
+            }
         } else if (type == '2') {
-            unlink(out);
-            if (symlink(linkname, out) != 0) rc = -1;
+            /* Symlink: the target must stay inside the package root. */
+            char *dir = xstrdup(rel);
+            char *sl = strrchr(dir, '/');
+            if (sl) *sl = 0; else dir[0] = 0;
+            int ok = size == 0 && link_inside(dir, linkname);
+            free(dir);
+            if (!ok) {
+                fprintf(stderr, "l2pm: unsafe symlink target: %s -> %s\n", rel, linkname);
+                rc = -1;
+            } else {
+                unlink(out);
+                if (symlink(linkname, out) != 0) rc = -1;
+            }
         } else if (type == '1') {
+            /* Hardlink: target is archive-root-relative, must already exist
+             * as a regular file inside dest (tar order guarantees this). */
             char *target = fmt("%s/%s", dest, linkname);
-            unlink(out);
-            if (link(target, out) != 0) rc = -1;
+            struct stat st;
+            if (size != 0 || !link_inside("", linkname) ||
+                lstat(target, &st) != 0 || !S_ISREG(st.st_mode)) {
+                fprintf(stderr, "l2pm: unsafe or missing hardlink target: %s -> %s\n", rel, linkname);
+                rc = -1;
+            } else {
+                unlink(out);
+                if (link(target, out) != 0) rc = -1;
+            }
             free(target);
         } else if (type == '0' || type == 0) {
-            if (size > 0) {
-                FILE *o = fopen(out, "wb");
-                if (!o) rc = -1;
-                else {
-                    long long left = size;
-                    unsigned char buf[65536];
-                    while (left > 0) {
-                        size_t want = (size_t)(left < (long long)sizeof(buf) ? left : (long long)sizeof(buf));
-                        size_t r = fread(buf, 1, want, f);
-                        if (r != want) { rc = -1; break; }
-                        if (fwrite(buf, 1, r, o) != r) { rc = -1; break; }
-                        left -= (long long)r;
+            /* Regular file: never write through an existing symlink (the
+             * entry may be a duplicate name); O_NOFOLLOW plus unlink make
+             * the final component safe, fchmod avoids a chmod race. */
+            unlink(out);
+            int o = open(out, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC,
+                         mode ? mode : 0644);
+            if (o < 0) rc = -1;
+            else {
+                long long left = size;
+                unsigned char buf[65536];
+                while (left > 0) {
+                    size_t want = (size_t)(left < (long long)sizeof(buf) ? left : (long long)sizeof(buf));
+                    size_t r = fread(buf, 1, want, f);
+                    if (r != want) { rc = -1; break; }
+                    size_t off = 0;
+                    while (off < r) {
+                        ssize_t w = write(o, buf + off, r - off);
+                        if (w < 0) { if (errno == EINTR) continue; rc = -1; break; }
+                        off += (size_t)w;
                     }
-                    fclose(o);
+                    if (rc != 0) break;
+                    left -= (long long)r;
                 }
-                chmod(out, mode ? mode : 0644);
-            } else {
-                int o = open(out, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode ? mode : 0644);
-                if (o < 0) rc = -1; else close(o);
+                if (rc == 0 && fchmod(o, mode ? mode : 0644) != 0) rc = -1;
+                if (close(o) != 0 && rc == 0) rc = -1;
             }
-        } else if (type == 'x' || type == 'g' || type == 'L' || type == 'K') {
-            /* metadata header: skip its payload */
+            if (rc == 0 && mt >= 0) {
+                struct timespec ts[2];
+                ts[0].tv_sec = (time_t)mt; ts[0].tv_nsec = 0;
+                ts[1] = ts[0];
+                utimensat(AT_FDCWD, out, ts, AT_SYMLINK_NOFOLLOW);
+            }
         } else {
             fprintf(stderr, "l2pm: unsupported tar entry type '%c' (%s)\n", type, rel);
             rc = -1;
@@ -618,18 +842,23 @@ static int tar_extract(const char *tar, const char *dest)
         if (rc != 0) break;
 
         size_t pad = (size_t)((512 - (size % 512)) % 512);
-        if (pad && fseek(f, (long)pad, SEEK_CUR) != 0) { rc = -1; break; }
-        /* set mtime best effort (skip metadata pseudo entries and symlinks) */
-        if (type == '0' || type == '5') {
-            char *o = fmt("%s/%s", dest, rel);
-            struct timespec ts[2];
-            ts[0].tv_sec = (time_t)mt; ts[0].tv_nsec = 0;
-            ts[1] = ts[0];
-            utimensat(AT_FDCWD, o, ts, AT_SYMLINK_NOFOLLOW);
-            free(o);
-        }
+        if (pad && fseeko(f, (off_t)pad, SEEK_CUR) != 0) { rc = -1; break; }
     }
     fclose(f);
+    if (rc == 0) {
+        /* Apply directory modes deepest-first (best effort mtime). */
+        for (size_t i = dfn; i > 0; i--) {
+            if (chmod(df[i-1].path, df[i-1].mode) != 0) rc = -1;
+            if (df[i-1].mt >= 0) {
+                struct timespec ts[2];
+                ts[0].tv_sec = (time_t)df[i-1].mt; ts[0].tv_nsec = 0;
+                ts[1] = ts[0];
+                utimensat(AT_FDCWD, df[i-1].path, ts, AT_SYMLINK_NOFOLLOW);
+            }
+        }
+    }
+    for (size_t i = 0; i < dfn; i++) free(df[i].path);
+    free(df);
     return rc;
 }
 
@@ -645,6 +874,12 @@ struct recipe {
     char build[16384];
     char deps[1024];
     long long epoch;
+    /* 4-step pipeline: repo (git source) / compile / install.
+     * Legacy recipes use build= alone (compile+install combined). */
+    char repo[MAXPATH];
+    char ref[128];
+    char compile[16384];
+    char install[16384];
 };
 
 static int parse_recipe(const char *path, struct recipe *r)
@@ -679,6 +914,10 @@ static int parse_recipe(const char *path, struct recipe *r)
         else if (!strcmp(k, "build")) snprintf(r->build, sizeof(r->build), "%s", v);
         else if (!strcmp(k, "deps")) snprintf(r->deps, sizeof(r->deps), "%s", v);
         else if (!strcmp(k, "epoch")) r->epoch = strtoll(v, NULL, 10);
+        else if (!strcmp(k, "repo")) snprintf(r->repo, sizeof(r->repo), "%s", v);
+        else if (!strcmp(k, "ref")) snprintf(r->ref, sizeof(r->ref), "%s", v);
+        else if (!strcmp(k, "compile")) snprintf(r->compile, sizeof(r->compile), "%s", v);
+        else if (!strcmp(k, "install")) snprintf(r->install, sizeof(r->install), "%s", v);
     }
     free(line);
     fclose(f);
@@ -686,6 +925,28 @@ static int parse_recipe(const char *path, struct recipe *r)
         fprintf(stderr, "l2pm: recipe %s needs valid name/version\n", path);
         return -1;
     }
+    if (r->repo[0] && r->source[0]) {
+        fprintf(stderr, "l2pm: recipe %s: use either source= or repo=, not both\n", path);
+        return -1;
+    }
+    if (r->repo[0] && !r->ref[0]) {
+        fprintf(stderr, "l2pm: recipe %s: repo= needs ref= (pinned commit hash)\n", path);
+        return -1;
+    }
+    if (!r->repo[0] && r->ref[0]) {
+        fprintf(stderr, "l2pm: recipe %s: ref= requires repo=\n", path);
+        return -1;
+    }
+    if ((r->compile[0] || r->install[0]) && r->build[0]) {
+        fprintf(stderr, "l2pm: recipe %s: use either build= or compile=/install=, not both\n", path);
+        return -1;
+    }
+    if (r->compile[0] && !r->install[0]) {
+        fprintf(stderr, "l2pm: recipe %s: compile= requires install=\n", path);
+        return -1;
+    }
+    if (r->repo[0] && r->sha256[0])
+        fprintf(stderr, "l2pm: warning: sha256= ignored for repo= sources (the commit hash is the pin)\n");
     return 0;
 }
 
@@ -864,6 +1125,95 @@ static char *find_src_root(const char *dir, const struct recipe *r)
     return xstrdup(dir);
 }
 
+/* ------------------------------------------------------- git sources */
+
+/* A ref reaches the shell via git checkout: allow only the git ref charset
+ * and never a leading '-' (option injection) or ".." (path traversal). */
+static int valid_ref(const char *s)
+{
+    if (!s || !*s || s[0] == '-' || strstr(s, "..")) return 0;
+    for (const char *p = s; *p; p++)
+        if (!isalnum((unsigned char)*p) && !strchr("._/-", *p)) return 0;
+    return 1;
+}
+
+static int is_commit_hash(const char *s)
+{
+    if (strlen(s) != 40) return 0;
+    for (int i = 0; i < 40; i++)
+        if (!isxdigit((unsigned char)s[i])) return 0;
+    return 1;
+}
+
+static int git_available(void)
+{
+    return run_shell("command -v git >/dev/null 2>&1", NULL, 1) == 0;
+}
+
+/* Step 1 (repo) for package sources: clone/update a cached clone, check out
+ * the pinned ref, export the worktree without .git and normalize mtimes to
+ * the recipe epoch so the build stays deterministic.  The commit hash is
+ * the pin (it replaces the tarball sha256). */
+static int fetch_repo(const struct recipe *r, const char *cache, const char *srcdir)
+{
+    if (!git_available()) {
+        fprintf(stderr, "l2pm: git is required for repo= sources (l2 deps install)\n");
+        return -1;
+    }
+    if (!valid_ref(r->ref)) {
+        fprintf(stderr, "l2pm: bad git ref: %s\n", r->ref);
+        return -1;
+    }
+    if (!is_commit_hash(r->ref))
+        fprintf(stderr, "l2pm: warning: ref '%s' is not a commit hash; the build is NOT reproducible\n", r->ref);
+
+    char *parent = fmt("%s/git", cache);
+    mkdir_p(parent, 0755);
+    free(parent);
+    char *gdir = fmt("%s/git/%s", cache, r->name);
+    struct stat st;
+    if (stat(gdir, &st) != 0) {
+        char *cmd = fmt("git clone --quiet %s %s", shq(r->repo), shq(gdir));
+        int rc = run_shell(cmd, NULL, 0);
+        free(cmd);
+        if (rc != 0) {
+            fprintf(stderr, "l2pm: git clone failed: %s\n", r->repo);
+            free(gdir);
+            return -1;
+        }
+    } else {
+        /* Best effort: a cached clone keeps working offline. */
+        if (run_shell("git fetch --quiet origin", gdir, 1) != 0)
+            fprintf(stderr, "l2pm: git fetch failed; using the cached clone (offline?)\n");
+    }
+    char *cmd = fmt("git checkout --quiet --detach %s", shq(r->ref));
+    int rc = run_shell(cmd, gdir, 0);
+    free(cmd);
+    if (rc != 0) {
+        fprintf(stderr, "l2pm: git checkout of ref '%s' failed\n", r->ref);
+        free(gdir);
+        return -1;
+    }
+    /* Export the worktree; .git must not leak into the package. */
+    if (copy_tree(gdir, srcdir) != 0) {
+        fprintf(stderr, "l2pm: cannot export git worktree\n");
+        free(gdir);
+        return -1;
+    }
+    char *gitmeta = fmt("%s/.git", srcdir);
+    rm_rf(gitmeta);
+    free(gitmeta);
+    cmd = fmt("find %s -exec touch -h -d @%lld {} +", shq(srcdir), r->epoch);
+    rc = run_shell(cmd, NULL, 1);
+    free(cmd);
+    free(gdir);
+    if (rc != 0) {
+        fprintf(stderr, "l2pm: mtime normalization failed\n");
+        return -1;
+    }
+    return 0;
+}
+
 static int build_once(const struct recipe *r, const char *outtar)
 {
     char *buildroot = l2path("build/%s-%s-%ld", r->name, r->version, (long)getpid());
@@ -877,7 +1227,18 @@ static int build_once(const struct recipe *r, const char *outtar)
         return -1;
     }
 
-    if (fetch_source(r, cache, src) != 0) {
+    /* [1/4] repo + [2/4] fetch/extract */
+    int rc = 0;
+    if (r->repo[0]) {
+        fprintf(stderr, "l2pm: [1/4] repo: git %s @ %s\n", r->repo, r->ref);
+        if (fetch_repo(r, cache, src) != 0) rc = -1;
+        if (rc == 0) fprintf(stderr, "l2pm: [2/4] fetch: worktree exported (mtimes normalized)\n");
+    } else {
+        fprintf(stderr, "l2pm: [1/4] repo: local recipe\n");
+        fprintf(stderr, "l2pm: [2/4] fetch: %s\n", r->source[0] ? r->source : "(no source)");
+        if (fetch_source(r, cache, src) != 0) rc = -1;
+    }
+    if (rc != 0) {
         fprintf(stderr, "l2pm: source fetch failed for %s\n", r->name);
         free(buildroot); free(stage); free(src); free(cache);
         return -1;
@@ -900,11 +1261,25 @@ static int build_once(const struct recipe *r, const char *outtar)
     (void)stagevar; (void)srcvar;
     umask(022);
 
-    int rc = 0;
-    if (r->build[0]) {
-        fprintf(stderr, "l2pm: building %s %s\n", r->name, r->version);
+    /* [3/4] compile + [4/4] install (phased), or the legacy combined build= */
+    if (r->compile[0] || r->install[0]) {
+        if (r->compile[0]) {
+            fprintf(stderr, "l2pm: [3/4] compile: %s %s\n", r->name, r->version);
+            rc = run_shell(r->compile, srcroot, 0);
+            if (rc != 0) fprintf(stderr, "l2pm: compile command failed (%d)\n", rc);
+        } else {
+            fprintf(stderr, "l2pm: [3/4] compile: (none)\n");
+        }
+        if (rc == 0) {
+            fprintf(stderr, "l2pm: [4/4] install: staging into %s\n", stage);
+            rc = run_shell(r->install, srcroot, 0);
+            if (rc != 0) fprintf(stderr, "l2pm: install command failed (%d)\n", rc);
+        }
+    } else if (r->build[0]) {
+        fprintf(stderr, "l2pm: [3/4] build (legacy compile+install): %s %s\n", r->name, r->version);
         rc = run_shell(r->build, srcroot, 0);
         if (rc != 0) fprintf(stderr, "l2pm: build command failed (%d)\n", rc);
+        else fprintf(stderr, "l2pm: [4/4] install: (included in legacy build)\n");
     }
     if (rc == 0) {
         char *infodir = fmt("%s/.l2pm", stage);
@@ -1083,10 +1458,185 @@ static int rebuild_profile(const char *profile)
 
 /* ------------------------------------------------------------- commands */
 
-static char *resolve_recipe(const char *arg)
+/* ------------------------------------------- remote recipe repository */
+
+/* Trust store: sha256 of every recipe the user explicitly trusted.  A
+ * fetched recipe executes arbitrary shell, so a new (or changed) remote
+ * recipe is shown and must be confirmed before it runs; local recipes
+ * (L2PM_RECIPES, CWD) are the user's own files and need no gate. */
+static int recipe_trusted(const char *hash)
+{
+    char *p = l2path("var/trusted-recipes");
+    char *txt = read_small(p);
+    free(p);
+    if (!txt) return 0;
+    int found = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(txt, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        if (!strncmp(line, hash, 64) && (line[64] == ' ' || line[64] == 0)) { found = 1; break; }
+    }
+    free(txt);
+    return found;
+}
+
+static void recipe_trust_add(const char *hash, const char *path)
+{
+    char *p = l2path("var/trusted-recipes");
+    FILE *f = fopen(p, "a");
+    if (f) { fprintf(f, "%s  %s\n", hash, path); fclose(f); }
+    else fprintf(stderr, "l2pm: warning: cannot record trusted recipe: %s\n", strerror(errno));
+    free(p);
+}
+
+static int trust_gate(const char *path, int remote, int trust_flag)
+{
+    if (!remote) return 0;
+    char hash[65];
+    if (hash_file(path, hash) != 0) return -1;
+    if (recipe_trusted(hash)) return 0;
+    if (trust_flag) {
+        recipe_trust_add(hash, path);
+        fprintf(stderr, "l2pm: trusted recipe recorded (--trust): %s\n", path);
+        return 0;
+    }
+    fprintf(stderr, "l2pm: recipe fetched from a remote repository; it will run shell commands:\n");
+    char *txt = read_small(path);
+    if (txt) { fprintf(stderr, "---- %s ----\n%s\n---- end ----\n", path, txt); free(txt); }
+    if (!isatty(0)) {
+        fprintf(stderr, "l2pm: refusing to execute an untrusted remote recipe; "
+                        "review it and re-run with --trust\n");
+        return -1;
+    }
+    fprintf(stderr, "l2pm: trust and execute this recipe? [y/N] ");
+    fflush(stderr);
+    char buf[64];
+    if (!fgets(buf, sizeof(buf), stdin)) return -1;
+    char *a = trim(buf);
+    if (!strcmp(a, "y") || !strcmp(a, "yes")) {
+        recipe_trust_add(hash, path);
+        return 0;
+    }
+    fprintf(stderr, "l2pm: recipe not trusted; aborting\n");
+    return -1;
+}
+
+static int is_git_repo_url(const char *s)
+{
+    return !strncmp(s, "git://", 6) || !strncmp(s, "git@", 4) ||
+           !strncmp(s, "ssh://", 6) ||
+           (strlen(s) > 4 && !strcmp(s + strlen(s) - 4, ".git"));
+}
+
+/* Fetch <name>.recipe from L2PM_RECIPE_REPO into the local cache.
+ * Two transports, auto-detected:
+ *   - git URL: clone/pull <root>/l2/var/recipe-repo, optionally pinned by
+ *     L2PM_RECIPE_REPO_REF=<commit>; the cached clone works offline.
+ *   - any other URL: raw base, download <base>/<name>.recipe (curl/wget);
+ *     the cached copy works offline.  Trust-on-first-use pins the exact
+ *     content via the trust store.
+ * Returns a malloc'd cache path, or NULL when unavailable. */
+static char *recipe_repo_fetch(const char *name)
+{
+    const char *base = getenv("L2PM_RECIPE_REPO");
+    if (!base || !*base || !valid_name(name)) return NULL;
+    char *cachedir = l2path("cache/recipes");
+    mkdir_p(cachedir, 0755);
+    char *dest = fmt("%s/%s.recipe", cachedir, name);
+    free(cachedir);
+
+    if (is_git_repo_url(base)) {
+        if (!git_available()) {
+            fprintf(stderr, "l2pm: git is required for a git recipe repository (l2 deps install)\n");
+            free(dest);
+            return NULL;
+        }
+        char *repo = l2path("var/recipe-repo");
+        struct stat st;
+        if (stat(repo, &st) != 0) {
+            char *cmd = fmt("git clone --quiet %s %s", shq(base), shq(repo));
+            int rc = run_shell(cmd, NULL, 0);
+            free(cmd);
+            if (rc != 0) {
+                fprintf(stderr, "l2pm: cannot clone recipe repository %s\n", base);
+                free(repo); free(dest);
+                return NULL;
+            }
+        } else if (run_shell("git fetch --quiet origin", repo, 1) != 0) {
+            fprintf(stderr, "l2pm: recipe repo fetch failed; using the cached clone (offline?)\n");
+        }
+        const char *ref = getenv("L2PM_RECIPE_REPO_REF");
+        if (ref && *ref) {
+            if (!valid_ref(ref)) {
+                fprintf(stderr, "l2pm: bad L2PM_RECIPE_REPO_REF: %s\n", ref);
+                free(repo); free(dest);
+                return NULL;
+            }
+            char *cmd = fmt("git checkout --quiet --detach %s", shq(ref));
+            int rc = run_shell(cmd, repo, 0);
+            free(cmd);
+            if (rc != 0) {
+                fprintf(stderr, "l2pm: recipe repo checkout of '%s' failed\n", ref);
+                free(repo); free(dest);
+                return NULL;
+            }
+        } else {
+            fprintf(stderr, "l2pm: warning: recipe repo not pinned; set L2PM_RECIPE_REPO_REF=<commit> for reproducibility\n");
+            /* Follow the remote default branch tip (fetch only moves the
+             * remote-tracking refs, not the working tree).  Offline this
+             * stays at the last fetched tip, which is what we want. */
+            if (run_shell("git checkout --quiet --detach origin/HEAD", repo, 1) != 0)
+                fprintf(stderr, "l2pm: warning: cannot update recipe repo tip; using the cached checkout\n");
+        }
+        char *src = fmt("%s/%s.recipe", repo, name);
+        int have = access(src, R_OK) == 0;
+        if (have) {
+            char *cp = fmt("cp %s %s", shq(src), shq(dest));
+            int rc = run_shell(cp, NULL, 1);
+            free(cp);
+            have = rc == 0;
+        }
+        free(src);
+        free(repo);
+        if (have) return dest;
+        free(dest);
+        return NULL;
+    }
+
+    /* raw base URL */
+    char *url = fmt("%s/%s.recipe", base, name);
+    char *part = fmt("%s.part", dest);
+    char *q = shq(url), *qp = shq(part);
+    char *cmd = fmt("curl -fsSL --connect-timeout 20 -o %s %s || wget -q -O %s %s", qp, q, qp, q);
+    int rc = run_shell(cmd, NULL, 1);
+    free(cmd); free(q); free(qp);
+    if (rc == 0 && rename(part, dest) == 0) {
+        free(part); free(url);
+        return dest;
+    }
+    unlink(part);
+    free(part); free(url);
+    if (access(dest, R_OK) == 0) {
+        fprintf(stderr, "l2pm: recipe download failed; using the cached copy (offline?)\n");
+        return dest;
+    }
+    free(dest);
+    return NULL;
+}
+
+/* Resolve a recipe argument.  Local locations always win; a bare name that
+ * is not found locally is looked up in L2PM_RECIPE_REPO (if set), and
+ * *remote is set so the caller can apply the trust gate. */
+static char *resolve_recipe(const char *arg, int *remote)
 {
     struct stat st;
-    if (stat(arg, &st) == 0 && S_ISREG(st.st_mode)) return xstrdup(arg);
+    *remote = 0;
+    /* An explicit path or a *.recipe file is used as-is.  A bare name is a
+     * recipe NAME: it must not be shadowed by an unrelated file in the CWD
+     * (e.g. the l2fetch script next to the recipes). */
+    size_t al = strlen(arg);
+    int is_path = strchr(arg, '/') != NULL ||
+                  (al >= 7 && !strcmp(arg + al - 7, ".recipe"));
+    if (is_path && stat(arg, &st) == 0 && S_ISREG(st.st_mode)) return xstrdup(arg);
     const char *env = getenv("L2PM_RECIPES");
     char *p;
     if (env && *env) {
@@ -1106,27 +1656,32 @@ static char *resolve_recipe(const char *arg)
     p = fmt("%s.recipe", arg);
     if (stat(p, &st) == 0 && S_ISREG(st.st_mode)) return p;
     free(p);
+    p = recipe_repo_fetch(arg);
+    if (p) { *remote = 1; return p; }
     return NULL;
 }
 
 static int cmd_build(int argc, char **argv)
 {
     const char *arg = NULL, *out = NULL;
-    int check = 0;
+    int check = 0, trust = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--check")) check = 1;
+        else if (!strcmp(argv[i], "--trust")) trust = 1;
         else if (!strcmp(argv[i], "-o") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "--output") && i + 1 < argc) out = argv[++i];
         else if (!arg) arg = argv[i];
         else die("build: unexpected argument %s", argv[i]);
     }
     if (!arg) die("build: missing recipe");
-    char *recipe_path = resolve_recipe(arg);
+    int remote = 0;
+    char *recipe_path = resolve_recipe(arg, &remote);
     if (!recipe_path) die("build: recipe not found: %s", arg);
     struct recipe r;
-    if (parse_recipe(recipe_path, &r) != 0) return 1;
+    if (parse_recipe(recipe_path, &r) != 0) { free(recipe_path); return 1; }
+    ensure_layout();   /* trust store lives under var/ */
+    if (trust_gate(recipe_path, remote, trust) != 0) { free(recipe_path); return 1; }
     free(recipe_path);
-    ensure_layout();
 
     char *tar1;
     if (out) tar1 = xstrdup(out);
@@ -1162,10 +1717,14 @@ static int cmd_build(int argc, char **argv)
 static int install_tar(const char *file, const char *profile)
 {
     ensure_layout();
+    /* Hash the whole archive before anything is extracted. */
     char hash[65];
     if (hash_file(file, hash) != 0) { fprintf(stderr, "l2pm: cannot hash %s\n", file); return 1; }
-    char *tmp = l2path("tmp/install-%ld", (long)getpid());
-    rm_rf(tmp);
+    char *tmp = l2path("tmp/install-XXXXXX");
+    if (!mkdtemp(tmp)) {
+        fprintf(stderr, "l2pm: cannot create install dir: %s\n", strerror(errno));
+        free(tmp); return 1;
+    }
     if (tar_extract(file, tmp) != 0) { rm_rf(tmp); free(tmp); return 1; }
     char name[128], ver[128], deps[1024];
     if (read_info(tmp, name, sizeof(name), ver, sizeof(ver), deps, sizeof(deps)) != 0) {
@@ -1175,6 +1734,10 @@ static int install_tar(const char *file, const char *profile)
     char *store = store_path_for(hash, name, ver);
     struct stat st;
     if (lstat(store, &st) == 0) {
+        if (!S_ISDIR(st.st_mode)) {
+            fprintf(stderr, "l2pm: store path exists but is not a directory: %s\n", store);
+            rm_rf(tmp); free(tmp); free(store); return 1;
+        }
         rm_rf(tmp);
     } else {
         /* Extract to a sibling temp and rename, so a failed extraction
@@ -1213,18 +1776,22 @@ static int cmd_install(int argc, char **argv)
 static int cmd_add(int argc, char **argv)
 {
     const char *arg = NULL, *profile = "default";
+    int trust = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile = argv[++i];
+        else if (!strcmp(argv[i], "--trust")) trust = 1;
         else if (!arg) arg = argv[i];
         else die("add: unexpected argument %s", argv[i]);
     }
     if (!arg) die("add: missing recipe");
-    char *recipe_path = resolve_recipe(arg);
+    int remote = 0;
+    char *recipe_path = resolve_recipe(arg, &remote);
     if (!recipe_path) die("add: recipe not found: %s", arg);
     struct recipe r;
     if (parse_recipe(recipe_path, &r) != 0) { free(recipe_path); return 1; }
+    ensure_layout();   /* trust store lives under var/ */
+    if (trust_gate(recipe_path, remote, trust) != 0) { free(recipe_path); return 1; }
     free(recipe_path);
-    ensure_layout();
     char *cache = l2path("cache");
     char *tar = fmt("%s/%s-%s.l2p", cache, r.name, r.version);
     free(cache);
@@ -1439,13 +2006,17 @@ static void usage(void)
     fprintf(stderr,
         "l2pm %s - L2 package manager\n"
         "usage:\n"
-        "  l2pm build <recipe> [-o file.l2p] [--check]\n"
-        "  l2pm add <recipe> [--profile default]\n"
+        "  l2pm build <recipe> [-o file.l2p] [--check] [--trust]\n"
+        "  l2pm add <recipe> [--profile default] [--trust]\n"
         "  l2pm install <file.l2p> [--profile default]\n"
         "  l2pm remove <name> [--profile default]\n"
         "  l2pm list | info <name> | verify | gc | search [text]\n"
         "  l2pm hash <file> | tar <dir> <out> [--epoch N]\n"
         "  l2pm selftest\n"
+        "recipe steps: 1 repo (git source clone)  2 fetch/extract  3 compile  4 install\n"
+        "  keys: source/sha256 or repo/ref (pinned commit); build= (legacy) or\n"
+        "        compile= + install=; remote recipes need --trust or confirmation\n"
+        "env: L2PM_RECIPE_REPO=<git url | raw base url>  L2PM_RECIPE_REPO_REF=<commit>\n"
         "store: %s/l2/store   profile: %s/l2/var/profiles/default\n",
         L2PM_VERSION, root_prefix(), root_prefix());
 }

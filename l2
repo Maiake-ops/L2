@@ -92,9 +92,10 @@ install_gum_release() {
     tmp=$(mktemp -d)
     say "installing gum from $url"
     if curl -fsSL "$url" | tar -xz -C "$tmp"; then
-        run_priv install -m 0755 "$tmp/gum" /usr/local/bin/gum || true
-        rm -rf "$tmp"
-        return 0
+        if run_priv install -m 0755 "$tmp/gum" /usr/local/bin/gum; then
+            rm -rf "$tmp"
+            return 0
+        fi
     fi
     rm -rf "$tmp"
     return 1

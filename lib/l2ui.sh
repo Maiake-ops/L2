@@ -332,7 +332,9 @@ job_begin() {
                     _now=$(date +%s); _el=$((_now - UI_JOB_T0))
                     _last=""
                     if [ -n "$_log" ] && [ -f "$_log" ]; then
-                        _last=$(tail -n 1 "$_log" 2>/dev/null | tr -cd '[:print:]' | cut -c1-$((_cols - ${#UI_JOB_TITLE} - 18)))
+                        _cw=$((_cols - ${#UI_JOB_TITLE} - 18))
+                        [ "$_cw" -lt 1 ] && _cw=1
+                        _last=$(tail -n 1 "$_log" 2>/dev/null | tr -cd '[:print:]' | cut -c1-"$_cw")
                     fi
                     printf '\r\033[K  %s %s %s %s' "$(paint $C_PNK "$_f")" "$UI_JOB_TITLE" \
                         "$(paint $C_DIM "$(ui_secs "$_el")")" "$(paint $C_DIM "$_last")" >&2
