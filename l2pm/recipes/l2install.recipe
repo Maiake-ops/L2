@@ -1,0 +1,5 @@
+name = l2install
+version = 0.1.0
+epoch = 1767225600
+source = ../../l2install
+build = mkdir -p "$DESTDIR/usr/bin" && install -m 0755 l2install "$DESTDIR/usr/bin/l2install"

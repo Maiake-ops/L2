@@ -1,0 +1,1906 @@
+#!/usr/bin/env bash
+# l2 - the L2 distro builder and TUI.
+#
+# One entry point for:
+#   - per-distro build dependency installation (Debian, Arch, Gentoo, NixOS,
+#     Alpine, Fedora, Void)
+#   - source download and pinned, reproducible component builds
+#       linux (latest stable, locked), musl, dash, busybox, rcl2, l2pm
+#   - a usable tiny rootfs, gzip initramfs, and BIOS ISO under 10 MiB
+#   - l2pm (content-addressed package manager), l2fetch and l2install
+#
+# Every compiler invocation uses -j8 -l6 by default (JOBS=8, L2_LOAD=6):
+# at most 8 jobs, and no new job while the load average is >= 6, so a shared
+# machine stays responsive.  Set JOBS=... / L2_LOAD=... to change it.
+#
+# The script is bash on the build host.  The installed system itself uses
+# dash (POSIX sh) + busybox (core tools) and does not carry bash.
+
+set -Eeuo pipefail
+shopt -s nullglob
+
+APP_VERSION="0.4.0"
+SELF=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")
+L2_ROOT=${L2_ROOT:-$(CDPATH= cd -- "$(dirname -- "$SELF")" && pwd)}
+BUILD=${L2_BUILD_DIR:-$L2_ROOT/build}
+SRC=$BUILD/src
+OUT=$BUILD/out
+SYSROOT=$BUILD/sysroot
+ROOTFS=$BUILD/rootfs
+LOGS=$BUILD/logs
+CACHE=$BUILD/cache
+ISO_DIR=$BUILD/iso
+LOCK=$L2_ROOT/sources.lock
+JOBS=${JOBS:-8}
+LOAD=${L2_LOAD:-6}
+L2_ISO_LIMIT_MB=${L2_ISO_LIMIT_MB:-10}
+L2_ALLOW_BIG_ISO=${L2_ALLOW_BIG_ISO:-0}
+WIFI_DIR=$BUILD/wifi
+EPOCH=${SOURCE_DATE_EPOCH:-}
+PREFIX=${PREFIX:-/usr/local}
+DISTRO=""
+YES=0
+MUSL_CC=""
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# shared UI (gum + plain fallbacks, job ticker, palette)
+# shellcheck disable=SC1091
+. "$L2_ROOT/lib/l2ui.sh"
+
+# --------------------------------------------------------------- distro
+detect_distro() {
+    [ -n "$DISTRO" ] && return 0
+    local id="" like=""
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        id=${ID:-}
+        like=${ID_LIKE:-}
+    fi
+    case " $id $like " in
+        *" nixos "*)  DISTRO=nixos ;;
+        *" gentoo "*) DISTRO=gentoo ;;
+        *" arch "*|*" manjaro "*) DISTRO=arch ;;
+        *" debian "*|*" ubuntu "*) DISTRO=debian ;;
+        *" alpine "*) DISTRO=alpine ;;
+        *" fedora "*|*" rhel "*|*" centos "*) DISTRO=fedora ;;
+        *" void "*)   DISTRO=void ;;
+        *)            DISTRO=unknown ;;
+    esac
+}
+
+nix_cmd() {
+    if nix profile add --help >/dev/null 2>&1; then
+        nix --extra-experimental-features "nix-command flakes" profile add "nixpkgs#$1"
+    else
+        nix --extra-experimental-features "nix-command flakes" profile install "nixpkgs#$1"
+    fi
+}
+
+install_gum_release() {
+    local arch url tmp
+    case "$(uname -m)" in
+        x86_64|amd64) arch=x86_64 ;;
+        aarch64|arm64) arch=arm64 ;;
+        *) warn "no prebuilt gum for $(uname -m)"; return 1 ;;
+    esac
+    have curl || die "curl is required to install gum"
+    url=$(curl -fsSL https://api.github.com/repos/charmbracelet/gum/releases/latest \
+        | grep -o "https://[^\"]*Linux_${arch}\\.tar\\.gz" | head -1 || true)
+    [ -n "$url" ] || { warn "could not find a gum release URL"; return 1; }
+    tmp=$(mktemp -d)
+    say "installing gum from $url"
+    if curl -fsSL "$url" | tar -xz -C "$tmp"; then
+        run_priv install -m 0755 "$tmp/gum" /usr/local/bin/gum || true
+        rm -rf "$tmp"
+        return 0
+    fi
+    rm -rf "$tmp"
+    return 1
+}
+
+install_gum() {
+    if have gum; then return 0; fi
+    detect_distro
+    say "gum is not installed; attempting to install it" >&2
+    case "$DISTRO" in
+        arch)   run_priv pacman -S --needed --noconfirm gum || install_gum_release ;;
+        nixos)  nix_cmd gum || install_gum_release ;;
+        gentoo) run_priv emerge -n app-misc/gum || install_gum_release ;;
+        debian) run_priv apt-get install -y gum || install_gum_release ;;
+        fedora) run_priv dnf install -y gum || install_gum_release ;;
+        alpine) run_priv apk add gum || install_gum_release ;;
+        void)   run_priv xbps-install -Sy gum || install_gum_release ;;
+        *)      install_gum_release || true ;;
+    esac
+    have gum || warn "gum still unavailable; using the plain prompt fallback"
+}
+
+# --------------------------------------------------------------- deps
+run_priv() {
+    if [ "$(id -u)" -eq 0 ]; then "$@"
+    elif have sudo; then sudo "$@"
+    else die "need root or sudo for: $*"
+    fi
+}
+
+APT_PKGS=(build-essential clang lld llvm musl-tools bc bison flex libelf-dev libssl-dev
+          cpio xz-utils xorriso mtools qemu-system-x86 git curl ca-certificates rsync pkg-config
+          file kmod busybox-static nasm llvm dosfstools gdisk parted rustc cargo gzip tar python3 bzip2 perl)
+ARCH_PKGS=(base-devel clang lld llvm musl bc bison flex libelf openssl cpio xz libisoburn
+           mtools nasm qemu-system-x86 git curl ca-certificates rsync pkg-config file kmod
+           busybox dosfstools gptfdisk parted rust gzip tar python3 bzip2 perl)
+GENTOO_PKGS=(sys-devel/clang sys-devel/lld sys-devel/llvm sys-libs/musl sys-devel/bc
+             sys-devel/bison sys-devel/flex dev-libs/elfutils dev-libs/openssl app-arch/cpio
+             app-arch/xz-utils sys-fs/xorriso app-emulation/mtools app-emulation/qemu
+             dev-vcs/git net-misc/curl app-admin/rsync dev-util/pkgconf sys-apps/file sys-apps/kmod
+             sys-apps/busybox dev-lang/nasm sys-fs/dosfstools sys-apps/gptfdisk
+             sys-apps/parted dev-lang/rust dev-lang/python app-arch/bzip2 dev-lang/perl)
+NIX_PKGS=(gnumake gcc clang lld llvm rustc cargo musl bc bison flex elfutils.dev openssl.dev pkg-config cpio
+          xz xorriso mtools nasm qemu git curl cacert rsync file kmod busybox
+          dosfstools gptfdisk parted gzip gnutar gnum4 gum python3 bzip2 perl)
+ALPINE_PKGS=(build-base clang lld llvm musl-dev bc bison flex elfutils-dev openssl-dev
+             cpio xz xorriso mtools nasm qemu-system-x86_64 git curl ca-certificates rsync
+             pkgconf file kmod busybox dosfstools gptfdisk parted rust cargo gzip tar python3 bzip2 perl)
+FEDORA_PKGS=("@development-tools" clang lld llvm musl-gcc bc bison flex elfutils-libelf-devel
+             openssl-devel cpio xz xorriso mtools nasm qemu-system-x86 git curl ca-certificates
+             rsync pkgconf file kmod busybox dosfstools gdisk parted
+             rust cargo gzip tar python3 bzip2 perl perl-FindBin perl-IPC-Cmd perl-File-Compare perl-File-Copy)
+
+deps_install() {
+    detect_distro
+    step "Installing build dependencies for $DISTRO"
+    case "$DISTRO" in
+        debian)
+            run_priv apt-get update
+            run_priv env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${APT_PKGS[@]}"
+            ;;
+        arch)
+            run_priv pacman -Sy --needed --noconfirm "${ARCH_PKGS[@]}"
+            ;;
+        gentoo)
+            run_priv emerge --ask=n --noreplace "${GENTOO_PKGS[@]}"
+            ;;
+        nixos)
+            local p
+            for p in "${NIX_PKGS[@]}"; do nix_cmd "$p" || warn "nix package $p was not installed"; done
+            ;;
+        alpine)
+            run_priv apk add --no-cache "${ALPINE_PKGS[@]}"
+            ;;
+        fedora)
+            run_priv dnf install -y "${FEDORA_PKGS[@]}"
+            ;;
+        void)
+            run_priv xbps-install -Sy build-essential clang lld musl-devel bc bison flex
+            run_priv xbps-install -Sy libelf-devel openssl-devel cpio xz xorriso mtools
+            run_priv xbps-install -Sy qemu git curl rsync file kmod busybox nasm llvm lld
+            run_priv xbps-install -Sy dosfstools gptfdisk parted rust cargo gzip tar python3 bzip2 perl
+            ;;
+        *)
+            warn "unknown distribution; install these manually:"
+            printf '  %s\n' "clang lld llvm rustc make bc bison flex libelf openssl cpio xz xorriso mtools nasm qemu git curl rsync file kmod busybox dosfstools gdisk parted musl"
+            return 1
+            ;;
+    esac
+    have gum || install_gum || true
+    deps_check || true
+}
+
+deps_check() {
+    local tools=(curl git tar gzip xz bzip2 cpio make cc clang rustc ld.lld llvm-objcopy
+                 bc bison flex nasm xorriso mtools sgdisk parted mkfs.ext4 mkfs.fat
+                 sha256sum strip depmod python3 perl qemu-system-x86_64)
+    local t missing=0 n=0
+    printf '\n'
+    for t in "${tools[@]}"; do
+        if have "$t"; then printf '  %s' "$(ui_state ok "$(printf '%-18s' "$t")")"
+        else printf '  %s' "$(ui_state err "$(printf '%-18s' "$t")")"; missing=$((missing + 1)); fi
+        n=$((n + 1)); [ $((n % 3)) -eq 0 ] && printf '\n'
+    done
+    printf '\n'
+    [ "$missing" -gt 0 ] && warn "$missing tool(s) missing: l2 deps install"
+    return "$missing"
+}
+
+# --------------------------------------------------------------- lock
+lock_get() {
+    [ -r "$LOCK" ] || return 1
+    awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$LOCK"
+}
+
+lock_set() {
+    local k=$1 v=$2 tmp
+    tmp=$(mktemp)
+    if [ -r "$LOCK" ]; then
+        awk -F= -v k="$k" -v v="$v" '
+            BEGIN { done = 0 }
+            $1 == k { print k "=" v; done = 1; next }
+            { print }
+            END { if (!done) print k "=" v }
+        ' "$LOCK" > "$tmp"
+    else
+        printf '%s=%s\n' "$k" "$v" > "$tmp"
+    fi
+    mv "$tmp" "$LOCK"
+}
+
+init_epoch() {
+    if [ -z "$EPOCH" ]; then EPOCH=$(lock_get epoch || true); fi
+    [ -n "$EPOCH" ] || EPOCH=1767225600
+    export SOURCE_DATE_EPOCH="$EPOCH"
+    export TZ=UTC LC_ALL=C LANG=C
+    umask 022
+}
+
+sha256_of() {
+    local f=$1
+    if have sha256sum; then sha256sum "$f" | cut -d' ' -f1
+    elif have shasum; then shasum -a 256 "$f" | cut -d' ' -f1
+    elif have openssl; then openssl dgst -sha256 "$f" | sed 's/.* //'
+    else die "no sha256 tool (sha256sum/shasum/openssl)"; fi
+}
+
+verify_sha() {
+    local f=$1 want=$2 got
+    [ -n "$want" ] || return 0
+    [ -f "$f" ] || return 1
+    got=$(sha256_of "$f")
+    if [ "$got" != "$want" ]; then
+        die "sha256 mismatch for $f
+  expected $want
+  got      $got"
+    fi
+}
+
+download() {
+    local url=$1 dest=$2 want=$3 title=${4:-download}
+    mkdir -p "$(dirname "$dest")"
+    if [ -f "$dest" ] && { [ -z "$want" ] || [ "$(sha256_of "$dest")" = "$want" ]; }; then
+        say "$title: cached"
+        return 0
+    fi
+    step "$title"
+    rm -f "$dest.part"
+    if have curl; then
+        ui_spin "$title" curl -fL --retry 3 --connect-timeout 20 -o "$dest.part" "$url"
+    elif have wget; then
+        ui_spin "$title" wget -O "$dest.part" "$url"
+    else
+        die "curl or wget is required"
+    fi
+    mv "$dest.part" "$dest"
+    if [ -n "$want" ]; then verify_sha "$dest" "$want"; else
+        warn "no pinned sha256 for $dest"
+    fi
+}
+
+latest_kernel() {
+    curl -fsSL --max-time 30 https://www.kernel.org/releases.json \
+        | awk -F'"' '/"moniker": "stable"/ { s = 1 } s && /"version"/ { print $4; exit }'
+}
+
+latest_musl() {
+    curl -fsSL --max-time 30 https://musl.libc.org/releases.html \
+        | grep -o 'musl-[0-9][0-9.]*\.tar\.gz' | sort -V | tail -1 \
+        | sed 's/^musl-//; s/\.tar\.gz$//'
+}
+
+latest_dash() {
+    curl -fsSL --max-time 30 http://gondor.apana.org.au/~herbert/dash/files/ \
+        | grep -o 'dash-[0-9][0-9.]*\.tar\.gz' | sort -V | tail -1 \
+        | sed 's/^dash-//; s/\.tar\.gz$//'
+}
+
+latest_limine() {
+    git ls-remote --tags https://github.com/limine-bootloader/limine.git 2>/dev/null \
+        | sed 's#.*refs/tags/##' | grep -E '^v[0-9]+(\.[0-9]+)+$' \
+        | sed 's/^v//' | sort -V | tail -1
+}
+
+update_sources() {
+    init_epoch
+    have curl || die "curl is required"
+    step "Resolving latest stable sources"
+    local k m d lm ksum mfile
+    k=$(latest_kernel)
+    m=$(latest_musl)
+    d=$(latest_dash)
+    lm=$(latest_limine)
+    [ -n "$k" ] || die "cannot resolve latest kernel"
+    [ -n "$m" ] || die "cannot resolve latest musl"
+    [ -n "$d" ] || die "cannot resolve latest dash"
+    [ -n "$lm" ] || die "cannot resolve latest limine release"
+
+    ksum=$(curl -fsSL --max-time 30 "https://cdn.kernel.org/pub/linux/kernel/v${k%%.*}.x/sha256sums.asc" \
+        | awk -v f="linux-$k.tar.xz" '$2 == f { print $1; exit }')
+    [ -n "$ksum" ] || warn "no kernel sha256 published for $k"
+
+    mkdir -p "$CACHE"
+    mfile=$CACHE/musl-$m.tar.gz
+    download "https://musl.libc.org/releases/musl-$m.tar.gz" "$mfile" "" "musl $m"
+    local msum; msum=$(sha256_of "$mfile")
+    local dfile=$CACHE/dash-$d.tar.gz
+    download "http://gondor.apana.org.au/~herbert/dash/files/dash-$d.tar.gz" "$dfile" "" "dash $d"
+    local dsum; dsum=$(sha256_of "$dfile")
+    local lmfile=$CACHE/limine-$lm.tar.gz
+    download "https://codeberg.org/Limine/Limine/releases/download/v$lm/limine-$lm.tar.gz" \
+        "$lmfile" "" "limine $lm"
+    local lmsum; lmsum=$(sha256_of "$lmfile")
+
+    lock_set kernel_version "$k"
+    lock_set kernel_sha256 "$ksum"
+    lock_set musl_version "$m"
+    lock_set musl_sha256 "$msum"
+    lock_set dash_version "$d"
+    lock_set dash_sha256 "$dsum"
+    lock_set limine_version "$lm"
+    lock_set limine_source "https://codeberg.org/Limine/Limine/releases/download/v$lm/limine-$lm.tar.gz"
+    lock_set limine_sha256 "$lmsum"
+    printf '\n%s\n' "updated $LOCK"
+    printf '  kernel  %s\n  musl    %s\n  dash    %s\n  limine  %s\n' \
+        "$k" "$m" "$d" "$lm"
+}
+
+# --------------------------------------------------------------- musl
+build_musl() {
+    init_epoch
+    local ver tarball sha dir log
+    ver=${MUSL_VERSION:-$(lock_get musl_version || true)}
+    [ -n "$ver" ] || ver=$(latest_musl)
+    sha=$(lock_get musl_sha256 || true)
+    if [ "${1:-}" != "--force" ] && [ -f "$SYSROOT/lib/libc.a" ]; then
+        say "musl $ver already installed in $SYSROOT"
+    else
+        tarball=$CACHE/musl-$ver.tar.gz
+        download "https://musl.libc.org/releases/musl-$ver.tar.gz" "$tarball" "$sha" "musl $ver source"
+        dir=$SRC/musl-$ver
+        rm -rf "$dir"
+        mkdir -p "$SRC"
+        tar -xf "$tarball" -C "$SRC"
+        log=$LOGS/musl.log
+        job_begin "Building musl $ver (-j$JOBS -l$LOAD)" "$log"
+        if ! (
+            cd "$dir"
+            ./configure --prefix="$SYSROOT" --disable-shared --enable-static \
+                CC="${HOST_CC:-cc}" CFLAGS="-Os -ffile-prefix-map=$PWD=. -fdebug-prefix-map=$PWD=."
+            make -j"$JOBS" -l"$LOAD"
+            make install
+        ) >"$log" 2>&1; then
+            job_end 1; ui_logtail "$log" 60
+            die "musl build failed (log: $log)"
+        fi
+        job_end 0
+    fi
+    make_musl_wrapper "$ver"
+}
+
+make_musl_wrapper() {
+    local ver=$1 specs=$SYSROOT/lib/musl-gcc.specs wrapper=$BUILD/bin/musl-gcc
+    mkdir -p "$BUILD/bin"
+    if [ ! -f "$SYSROOT/lib/libc.a" ]; then
+        MUSL_CC="${HOST_CC:-cc}"
+        warn "musl sysroot missing; using $MUSL_CC (static glibc fallback)"
+        return 0
+    fi
+    # specs generation ships with musl; no musl-gcc package needed.
+    if [ -f "$SRC/musl-$ver/tools/musl-gcc.specs.sh" ]; then
+        sh "$SRC/musl-$ver/tools/musl-gcc.specs.sh" \
+            "$SYSROOT/include" "$SYSROOT/lib" /lib/ld-musl-x86_64.so.1 > "$specs"
+    else
+        warn "musl specs generator missing; trying system musl-gcc"
+        if have musl-gcc; then MUSL_CC=$(command -v musl-gcc); return 0; fi
+        MUSL_CC="${HOST_CC:-cc}"
+        return 0
+    fi
+    # Nix's gcc wrapper injects -latomic_asneeded; an empty archive satisfies
+    # the driver without pulling any code into the static binary.
+    printf '!<arch>\n' > "$SYSROOT/lib/libatomic_asneeded.a"
+    cat > "$wrapper" <<EOF
+#!/bin/sh
+exec "${HOST_CC:-cc}" -specs "$specs" "\$@"
+EOF
+    chmod 0755 "$wrapper"
+    # smoke test: a static musl binary must link and run
+    local t=$BUILD/musl-smoke
+    printf '#include <stdio.h>\nint main(void){puts("musl");return 0;}\n' > "$t.c"
+    if "$wrapper" -static -Os -o "$t" "$t.c" >/dev/null 2>&1 && "$t" >/dev/null 2>&1; then
+        MUSL_CC=$wrapper
+        say "musl toolchain ready: $MUSL_CC"
+    else
+        MUSL_CC="${HOST_CC:-cc}"
+        warn "generated musl wrapper failed its smoke test; falling back to $MUSL_CC"
+    fi
+}
+
+musl_cc() {
+    if [ -n "$MUSL_CC" ]; then printf '%s' "$MUSL_CC"
+    elif [ -x "$BUILD/bin/musl-gcc" ]; then printf '%s' "$BUILD/bin/musl-gcc"
+    elif have musl-gcc; then command -v musl-gcc
+    else printf '%s' "${HOST_CC:-cc}"; fi
+}
+
+with_musl() {
+    local cc; cc=$(musl_cc)
+    # Add static explicitly: the wrapper is a normal gcc driver.
+    if [ "$cc" = "${HOST_CC:-cc}" ]; then
+        warn "building with the host libc (musl unavailable)"
+    fi
+    printf '%s' "$cc"
+}
+
+# --------------------------------------------------------------- kernel
+# Local, user-editable kernel overrides live in config/kernel.local and are
+# merged AFTER config/kernel.fragment, so `l2 kernel` (menu or `set`) changes
+# the build without touching the shipped fragment.
+KLOCAL=$L2_ROOT/config/kernel.local
+
+klocal_set() {   # CONFIG_FOO=value
+    local sym=${1%%=*}
+    [ -f "$KLOCAL" ] || printf '# L2 local kernel overrides (managed by `l2 kernel`)\n' > "$KLOCAL"
+    sed -i "/^${sym}=/d;/^# ${sym} is not set/d" "$KLOCAL"
+    printf '%s\n' "$1" >> "$KLOCAL"
+}
+
+kfam_syms() {
+    case "$1" in
+        intel)    echo "CONFIG_IWLWIFI CONFIG_IWLDVM CONFIG_IWLMVM" ;;
+        mediatek) echo "CONFIG_MT7921E CONFIG_MT7921U CONFIG_MT7925E" ;;
+        realtek)  echo "CONFIG_RTW88 CONFIG_RTW89 CONFIG_RTL8XXXU" ;;
+        atheros)  echo "CONFIG_ATH9K CONFIG_ATH9K_HTC CONFIG_ATH10K CONFIG_ATH11K CONFIG_ATH12K" ;;
+        broadcom) echo "CONFIG_BRCMFMAC" ;;
+    esac
+}
+
+kernel_menu() {
+    local c
+    while :; do
+        c=$(ui_menu "Kernel settings (saved in config/kernel.local)" \
+            "wifi|Wi-Fi driver families (modules, zero idle RAM until used)" \
+            "feat|Optional features (IPv6, USB ethernet, VM guest tweaks)" \
+            "cpus|Maximum CPUs (NR_CPUS, per-CPU kernel memory)" \
+            "raw|Set any CONFIG_ symbol by hand" \
+            "show|Show current overrides" \
+            "reset|Remove all overrides" \
+            "back|Back") || return 0
+        case "$c" in
+            wifi)
+                local sel f s
+                sel=$(YES=0 ui_multi "Keep these Wi-Fi families (unselected are removed)" \
+                    intel mediatek realtek atheros broadcom) || continue
+                for f in intel mediatek realtek atheros broadcom; do
+                    for s in $(kfam_syms "$f"); do
+                        if printf '%s\n' "$sel" | grep -qx "$f"; then klocal_set "$s=m"; else klocal_set "$s=n"; fi
+                    done
+                done
+                ok "saved; rebuild with: l2 build kernel" ;;
+            feat)
+                local sel
+                sel=$(YES=0 ui_multi "Enable" ipv6 usb-ethernet vm-guest) || continue
+                printf '%s\n' "$sel" | grep -qx ipv6 && klocal_set CONFIG_IPV6=y || klocal_set CONFIG_IPV6=n
+                if printf '%s\n' "$sel" | grep -qx usb-ethernet; then
+                    klocal_set CONFIG_USB_RTL8152=y; klocal_set CONFIG_USB_NET_CDC_NCM=y; klocal_set CONFIG_USB_NET_CDCETHER=y
+                else
+                    klocal_set CONFIG_USB_RTL8152=n; klocal_set CONFIG_USB_NET_CDC_NCM=n; klocal_set CONFIG_USB_NET_CDCETHER=n
+                fi
+                if printf '%s\n' "$sel" | grep -qx vm-guest; then
+                    klocal_set CONFIG_HYPERVISOR_GUEST=y; klocal_set CONFIG_PARAVIRT=y; klocal_set CONFIG_KVM_GUEST=y
+                fi
+                ok "saved; rebuild with: l2 build kernel" ;;
+            cpus)
+                local n; n=$(ui_input "NR_CPUS (1-512, default 8)" "8" "8") || continue
+                case "$n" in ''|*[!0-9]*) warn "not a number" ;; *) klocal_set "CONFIG_NR_CPUS=$n"; ok "NR_CPUS=$n" ;; esac ;;
+            raw)
+                local v; v=$(ui_input "CONFIG_SYMBOL=value (y, m, n or a number)" "CONFIG_HZ_250=y") || continue
+                case "$v" in CONFIG_*=*) klocal_set "$v"; ok "saved $v" ;; *) warn "expected CONFIG_NAME=value" ;; esac ;;
+            show) if [ -s "$KLOCAL" ]; then sed 's/^/  /' "$KLOCAL"; else note "no overrides"; fi ;;
+            reset) rm -f "$KLOCAL"; ok "overrides removed" ;;
+            back) return 0 ;;
+        esac
+    done
+}
+
+kernel_cmd() {   # l2 kernel [menu|set CONFIG_X=v|show|reset]
+    case "${1:-menu}" in
+        menu) kernel_menu ;;
+        set)  shift; [ $# -gt 0 ] || die "usage: l2 kernel set CONFIG_X=value ..."
+              for a in "$@"; do case "$a" in CONFIG_*=*) klocal_set "$a" ;; *) die "bad symbol: $a" ;; esac; done ;;
+        show) [ -s "$KLOCAL" ] && cat "$KLOCAL" || echo "(no overrides)" ;;
+        reset) rm -f "$KLOCAL" ;;
+        *) die "usage: l2 kernel [menu|set CONFIG_X=v|show|reset]" ;;
+    esac
+}
+
+ensure_kernel_src() {
+    local ver=$1 major=${1%%.*} tarball=$CACHE/linux-$1.tar.xz
+    download "https://cdn.kernel.org/pub/linux/kernel/v${major}.x/linux-$ver.tar.xz" \
+        "$tarball" "$(lock_get kernel_sha256 || true)" "linux $ver source"
+    if [ ! -f "$SRC/linux-$ver/Makefile" ]; then
+        mkdir -p "$SRC"; step "Extracting linux $ver"; tar -xf "$tarball" -C "$SRC"
+    fi
+}
+
+# kernel uAPI headers for musl-built userland (busybox, libnl, wpa_supplicant)
+build_headers() {
+    init_epoch
+    local ver; ver=${KERNEL_VERSION:-$(lock_get kernel_version || true)}
+    [ -f "$SYSROOT/include/linux/nl80211.h" ] && [ "${1:-}" != --force ] && return 0
+    ensure_kernel_src "$ver"
+    local log=$LOGS/headers.log
+    job_begin "Installing kernel headers" "$log"
+    if ! ( cd "$SRC/linux-$ver" && make -s headers_install INSTALL_HDR_PATH="$SYSROOT" ) >"$log" 2>&1; then
+        job_end 1; ui_logtail "$log"; die "headers_install failed"
+    fi
+    job_end 0
+}
+
+build_kernel() {
+    init_epoch
+    if [ "$DISTRO" = nixos ]; then
+        local nd
+        for nd in "$HOME/.nix-profile" /run/current-system/sw; do
+            [ -d "$nd/include" ] && CPATH="$nd/include${CPATH:+:$CPATH}"
+            [ -d "$nd/lib" ] && LIBRARY_PATH="$nd/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+            [ -d "$nd/lib/pkgconfig" ] && PKG_CONFIG_PATH="$nd/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+            [ -d "$nd/share/pkgconfig" ] && PKG_CONFIG_PATH="$nd/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+        done
+        export CPATH LIBRARY_PATH PKG_CONFIG_PATH
+    fi
+    local ver dir log stamp krel
+    ver=${KERNEL_VERSION:-$(lock_get kernel_version || true)}
+    [ -n "$ver" ] || ver=$(latest_kernel)
+    ensure_kernel_src "$ver"
+    dir=$SRC/linux-$ver
+    rm -rf "$dir"; mkdir -p "$SRC"
+    step "Extracting linux $ver"
+    tar -xf "$CACHE/linux-$ver.tar.xz" -C "$SRC"
+    log=$LOGS/kernel.log
+    stamp=$(date -u -d "@$EPOCH" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '2026-01-01 00:00:00')
+    local frags=("$L2_ROOT/config/kernel.fragment")
+    [ -s "$KLOCAL" ] && frags+=("$KLOCAL")
+    [ -s "$KLOCAL" ] && say "applying local overrides: $KLOCAL"
+    job_begin "Configuring linux $ver (tinyconfig + L2 fragment)" "$log"
+    if ! (
+        cd "$dir"
+        export KBUILD_BUILD_TIMESTAMP="$stamp" KBUILD_BUILD_USER=l2 KBUILD_BUILD_HOST=l2 KBUILD_BUILD_VERSION=1
+        make tinyconfig
+        scripts/kconfig/merge_config.sh -m .config "${frags[@]}" >/dev/null 2>&1 \
+            || cat "${frags[@]}" >> .config
+        make olddefconfig
+        scripts/config --set-str LOCALVERSION "-l2" 2>/dev/null || true
+    ) >"$log" 2>&1; then job_end 1; ui_logtail "$log" 60; die "kernel configure failed (log: $log)"; fi
+    job_end 0
+    # symbols that did not survive olddefconfig (renamed, missing dependency)
+    local dropped=$LOGS/kernel-dropped.txt s v want got
+    : > "$dropped"
+    while IFS='=' read -r s v; do
+        case "$s" in CONFIG_*) ;; *) continue ;; esac
+        [ "$v" = n ] && continue
+        got=$(sed -n "s/^$s=//p" "$dir/.config")
+        [ "$got" = "$v" ] || printf '%s=%s (got %s)\n' "$s" "$v" "${got:-absent}" >> "$dropped"
+    done < <(cat "${frags[@]}")
+    if [ -s "$dropped" ]; then
+        warn "$(wc -l < "$dropped") fragment symbols were dropped or changed by this kernel (see $dropped)"
+        head -n 6 "$dropped" | sed 's/^/    /' >&2
+    fi
+    job_begin "Building linux $ver (-j$JOBS -l$LOAD bzImage + modules)" "$log"
+    if ! (
+        cd "$dir"
+        export KBUILD_BUILD_TIMESTAMP="$stamp" KBUILD_BUILD_USER=l2 KBUILD_BUILD_HOST=l2 KBUILD_BUILD_VERSION=1
+        make -j"$JOBS" -l"$LOAD" bzImage
+        make -j"$JOBS" -l"$LOAD" modules
+        make -s headers_install INSTALL_HDR_PATH="$SYSROOT"
+    ) >>"$log" 2>&1; then job_end 1; ui_logtail "$log" 80; die "kernel build failed (log: $log)"; fi
+    [ -f "$dir/arch/x86/boot/bzImage" ] || { job_end 1; die "kernel image missing after build"; }
+    job_end 0 "$(ui_size "$(stat -c%s "$dir/arch/x86/boot/bzImage")")"
+    mkdir -p "$OUT"
+    install -m 0644 "$dir/arch/x86/boot/bzImage" "$OUT/vmlinuz-l2"
+    install -m 0644 "$dir/arch/x86/boot/bzImage" "$OUT/vmlinuz-$ver-l2"
+    cp "$dir/.config" "$OUT/kernel.config"
+    # loadable modules (wifi) into a staging root, stripped, with dependency maps
+    krel=$(cd "$dir" && make -s kernelrelease)
+    printf '%s\n' "$krel" > "$OUT/kernelrelease"
+    rm -rf "$BUILD/modroot"
+    if grep -q '^CONFIG_MODULES=y' "$dir/.config"; then
+        ( cd "$dir" && make -s modules_install INSTALL_MOD_PATH="$BUILD/modroot" INSTALL_MOD_STRIP=1 ) >>"$log" 2>&1 \
+            || die "modules_install failed (log: $log)"
+        rm -f "$BUILD/modroot/lib/modules/$krel/build" "$BUILD/modroot/lib/modules/$krel/source"
+        if have depmod; then depmod -b "$BUILD/modroot" "$krel" 2>>"$log" || warn "depmod failed"
+        else warn "depmod (kmod) not found: modprobe will not resolve module dependencies"; fi
+        say "modules: $(find "$BUILD/modroot/lib/modules/$krel" -name '*.ko' | wc -l) built, $(du -sk "$BUILD/modroot" | awk '{print $1}') KiB"
+    fi
+    say "kernel $krel: $OUT/vmlinuz-l2"
+}
+
+# --------------------------------------------------------------- dash
+build_dash() {
+    init_epoch
+    local ver sha tarball dir log
+    ver=$(lock_get dash_version || true)
+    [ -n "$ver" ] || ver=$(latest_dash)
+    sha=$(lock_get dash_sha256 || true)
+    tarball=$CACHE/dash-$ver.tar.gz
+    download "http://gondor.apana.org.au/~herbert/dash/files/dash-$ver.tar.gz" \
+        "$tarball" "$sha" "dash $ver source"
+    dir=$SRC/dash-$ver
+    rm -rf "$dir"
+    mkdir -p "$SRC"
+    tar -xf "$tarball" -C "$SRC"
+    log=$LOGS/dash.log
+    job_begin "Building dash $ver (-j$JOBS -l$LOAD)" "$log"
+    local cc; cc=$(with_musl)
+    if ! (
+        cd "$dir"
+        ./configure --prefix=/usr --bindir=/bin --sysconfdir=/etc --localstatedir=/var \
+            CC="$cc" CFLAGS="-static -Os -ffile-prefix-map=$PWD=. -fdebug-prefix-map=$PWD=." \
+            LDFLAGS="-static"
+        make -j"$JOBS" -l"$LOAD"
+    ) >"$log" 2>&1; then
+        job_end 1; ui_logtail "$log" 60
+        die "dash build failed (log: $log)"
+    fi
+    job_end 0
+    install -m 0755 "$dir/src/dash" "$OUT/dash"
+    say "dash: $OUT/dash ($(stat -c%s "$OUT/dash") bytes)"
+}
+
+# --------------------------------------------------------------- rcl2
+build_rcl2() {
+    init_epoch
+    local log=$LOGS/rcl2.log
+    have clang || die "clang is required for rcl2"
+    have rustc || die "rustc is required for rcl2"
+    have ld.lld || die "ld.lld is required for rcl2"
+    job_begin "Building rcl2 init (-j$JOBS -l$LOAD)" "$log"
+    if ! (
+        cd "$L2_ROOT/rcl2"
+        make clean >/dev/null 2>&1 || true
+        make -j"$JOBS" -l"$LOAD" CLANG="${CLANG:-clang}" RUSTC="${RUSTC:-rustc}" LLD="${LLD:-ld.lld}" \
+            STRIP="${RCL2_STRIP:-strip}" OBJSIZE="${RCL2_OBJSIZE:-size}"
+    ) >"$log" 2>&1; then
+        job_end 1; ui_logtail "$log" 60
+        die "rcl2 build failed (log: $log)"
+    fi
+    job_end 0
+    install -m 0755 "$L2_ROOT/rcl2/build/rcl2" "$OUT/rcl2"
+    # selftest is safe as non-root; run it so a broken parser is caught now
+    "$OUT/rcl2" --selftest >/dev/null 2>&1 || warn "rcl2 --selftest reported a problem"
+    say "rcl2: $OUT/rcl2 ($(stat -c%s "$OUT/rcl2") bytes)"
+}
+
+# --------------------------------------------------------------- l2pm
+build_l2pm() {
+    init_epoch
+    local cc log=$LOGS/l2pm.log
+    cc=$(musl_cc)
+    job_begin "Building l2pm (static, -Os)" "$log"
+    if ! (
+        "$cc" -std=c11 -Os -static \
+            -ffile-prefix-map="$L2_ROOT/l2pm=/l2/src/l2pm" \
+            -fdebug-prefix-map="$L2_ROOT/l2pm=/l2/src/l2pm" \
+            -o "$OUT/l2pm" "$L2_ROOT/l2pm/l2pm.c"
+        strip -s "$OUT/l2pm" 2>/dev/null || true
+    ) >"$log" 2>&1; then
+        job_end 1; ui_logtail "$log" 60
+        die "l2pm build failed (log: $log)"
+    fi
+    job_end 0
+    local size; size=$(stat -c%s "$OUT/l2pm")
+    [ "$size" -lt $((10 * 1024 * 1024)) ] || die "l2pm exceeds the 10 MiB storage budget"
+    local sel; sel=$(L2PM_ROOT="$BUILD/pmroot" "$OUT/l2pm" selftest 2>&1) || {
+        printf '%s\n' "$sel" >&2; die "l2pm selftest failed"
+    }
+    local rss; rss=$(printf '%s\n' "$sel" | sed -n 's/^rss: \([0-9]*\) KiB.*/\1/p')
+    if [ -n "$rss" ] && [ "$rss" -gt 10240 ]; then
+        die "l2pm resident memory ${rss} KiB exceeds 10 MiB"
+    fi
+    say "l2pm: $size bytes, self-test RSS ${rss:-?} KiB"
+}
+
+# --------------------------------------------------------------- source helper
+# Pin-on-first-use for sources.lock entries that have no upstream hash list:
+# the first download records the sha256, every later build verifies it.
+fetch_src() {   # name url dest
+    local name=$1 url=$2 dest=$3 sha
+    sha=$(lock_get "${name}_sha256" || true)
+    download "$url" "$dest" "$sha" "$name source"
+    if [ -z "$sha" ]; then
+        sha=$(sha256_of "$dest")
+        lock_set "${name}_sha256" "$sha"
+        warn "pinned ${name} sha256 on first download: $sha (compare with upstream once)"
+    fi
+}
+
+unpack_src() {  # tarball dir-name
+    local d=$SRC/$2
+    rm -rf "$d"; mkdir -p "$SRC"
+    tar -xf "$1" -C "$SRC"
+    printf '%s' "$d"
+}
+
+# --------------------------------------------------------------- busybox
+# busybox is the L2 toolset: every core utility plus DHCP, ip, module tools,
+# mount and fdisk.  dash is /bin/sh; busybox's own shells stay off.
+# Symbol names are busybox 1.36.1's (arch=BB_ARCH, egrep/fgrep are applets,
+# fractional sleep=FEATURE_FANCY_SLEEP; there is no vmstat applet).
+BB_APPLETS="AWK BASENAME BB_ARCH BLKID CAL CAT CHGRP CHMOD CHOWN CHROOT CLEAR CMP COMM CP CPIO CUT
+    DATE DD DEPMOD DF DIRNAME DMESG DU ECHO EGREP ENV EXPAND EXPR FACTOR FALSE FDISK FGREP FIND
+    FOLD FREE GREP GUNZIP GZIP HEAD HEXDUMP HOSTNAME ID INSMOD INSTALL IP KILL KILLALL LESS LINK
+    LN LS LSMOD MD5SUM MKDIR MKFIFO MKNOD MKTEMP MODPROBE MORE MOUNT MV NICE NOHUP OD PASTE PIDOF
+    PRINTF PS PWD READLINK REALPATH RENICE RM RMDIR RMMOD SED SEQ SHA1SUM SHA256SUM SHA512SUM
+    SHUF SLEEP SORT STAT STTY SYNC TAIL TAR TEE TEST TIME TIMEOUT TOP TOUCH TR TRUE TTY UMOUNT
+    UNAME UNEXPAND UNIQ UPTIME VI W WATCH WC WHICH WHOAMI XARGS XXD YES ZCAT
+    UDHCPC ADDUSER ADDGROUP PASSWD SU LOGIN GETTY CHVT SETSID CTTYHACK
+    FEATURE_IP_ADDRESS FEATURE_IP_LINK FEATURE_IP_ROUTE
+    FEATURE_MODUTILS_ALIAS FEATURE_MOUNT_FLAGS FEATURE_MOUNT_FSTAB FEATURE_MOUNT_LOOP
+    FEATURE_FDISK_WRITABLE FEATURE_FANCY_SLEEP FEATURE_GREP_CONTEXT FEATURE_UTMP
+    FEATURE_PS_WIDE FEATURE_PS_LONG FEATURE_TOP_CPU_USAGE_PERCENTAGE FEATURE_SEAMLESS_GZ
+    FEATURE_TAR_CREATE FEATURE_TAR_AUTODETECT"
+build_busybox() {
+    init_epoch; build_headers
+    local ver url dir log cc a
+    ver=$(lock_get busybox_version || true); [ -n "$ver" ] || ver=1.36.1
+    url=$(lock_get busybox_source || true); [ -n "$url" ] || url=https://busybox.net/downloads/busybox-$ver.tar.bz2
+    fetch_src busybox "$url" "$CACHE/busybox-$ver.tar.bz2"
+    dir=$(unpack_src "$CACHE/busybox-$ver.tar.bz2" "busybox-$ver")
+    log=$LOGS/busybox.log; cc=$(with_musl)
+    job_begin "Building busybox $ver (core toolset + udhcpc ip modprobe mount fdisk)" "$log"
+    if ! (
+        cd "$dir"
+        make allnoconfig
+        # busybox kconfig IGNORES duplicate assignments, so appending over the
+        # allnoconfig lines silently loses them.  Replace each line in place;
+        # only symbols absent from .config are appended.
+        while IFS= read -r line; do
+            sym=${line%%=*}
+            if grep -q "^$sym=" .config; then
+                sed -i "s|^$sym=.*|$line|" .config
+            elif grep -q "^# $sym is not set" .config; then
+                sed -i "s|^# $sym is not set|$line|" .config
+            else
+                printf '%s\n' "$line" >> .config
+            fi
+        done <<CFG
+CONFIG_BUSYBOX=y
+CONFIG_STATIC=y
+CONFIG_LFS=y
+CONFIG_LONG_OPTS=y
+CONFIG_FEATURE_VERBOSE_USAGE=n
+CONFIG_SH_IS_NONE=y
+CONFIG_SH_IS_ASH=n
+CONFIG_SH_IS_HUSH=n
+CONFIG_FEATURE_SUID=y
+CONFIG_FEATURE_SHADOWPASSWDS=y
+CONFIG_USE_BB_PWD_GRP=y
+CONFIG_USE_BB_SHADOW=y
+CONFIG_USE_BB_CRYPT=y
+CONFIG_USE_BB_CRYPT_SHA=y
+CONFIG_FEATURE_DEFAULT_PASSWD_ALGO="sha512"
+CONFIG_LAST_ID=60000
+CONFIG_FIRST_SYSTEM_ID=100
+CONFIG_LAST_SYSTEM_ID=999
+$(for a in $BB_APPLETS; do printf 'CONFIG_%s=y\n' "$a"; done)
+CFG
+        yes "" | make oldconfig >/dev/null
+        missing=""
+        for a in $BB_APPLETS; do
+            grep -q "^CONFIG_$a=y" .config || missing="$missing $a"
+        done
+        [ -z "$missing" ] || { echo "busybox: dropped by oldconfig:$missing" >&2; exit 1; }
+        make -j"$JOBS" -l"$LOAD" CC="$cc" HOSTCC="${HOST_CC:-cc}" SKIP_STRIP=y \
+            EXTRA_CFLAGS="-Os -ffile-prefix-map=$PWD=." LDFLAGS=-static busybox
+    ) >"$log" 2>&1; then job_end 1; ui_logtail "$log" 60; die "busybox build failed (log: $log)"; fi
+    install -m 0755 "$dir/busybox" "$OUT/busybox"
+    have strip && strip -s "$OUT/busybox" 2>/dev/null || true
+    "$OUT/busybox" --list > "$OUT/busybox.applets" 2>/dev/null || true
+    # the toolset must actually be in the binary, not just in .config
+    for a in ls cat cp mv rm mkdir grep sed awk find mount udhcpc ip modprobe fdisk blkid vi less tar cpio; do
+        grep -qx "$a" "$OUT/busybox.applets" || die "busybox binary is missing the '$a' applet"
+    done
+    job_end 0 "$(ui_size "$(stat -c%s "$OUT/busybox")")"
+}
+
+# --------------------------------------------------------------- libnl + wpa
+build_libnl() {
+    init_epoch; build_headers
+    local ver url dir log cc
+    ver=$(lock_get libnl_version || true); [ -n "$ver" ] || ver=3.11.0
+    url=$(lock_get libnl_source || true)
+    [ -n "$url" ] || url=https://github.com/thom311/libnl/releases/download/libnl${ver//./_}/libnl-$ver.tar.gz
+    fetch_src libnl "$url" "$CACHE/libnl-$ver.tar.gz"
+    dir=$(unpack_src "$CACHE/libnl-$ver.tar.gz" "libnl-$ver")
+    log=$LOGS/libnl.log; cc=$(with_musl)
+    job_begin "Building libnl $ver (static)" "$log"
+    if ! (
+        cd "$dir"
+        ./configure --prefix="$SYSROOT" --disable-shared --enable-static --disable-cli \
+            --disable-debug CC="$cc" CFLAGS="-Os"
+        make -j"$JOBS" -l"$LOAD"
+        make install
+    ) >"$log" 2>&1; then job_end 1; ui_logtail "$log" 60; die "libnl build failed (log: $log)"; fi
+    job_end 0
+}
+
+build_wpa() {
+    init_epoch; build_libnl; build_openssl
+    local ver url dir log cc
+    ver=$(lock_get wpa_version || true); [ -n "$ver" ] || ver=2.11
+    url=$(lock_get wpa_source || true); [ -n "$url" ] || url=https://w1.fi/releases/wpa_supplicant-$ver.tar.gz
+    fetch_src wpa "$url" "$CACHE/wpa_supplicant-$ver.tar.gz"
+    dir=$(unpack_src "$CACHE/wpa_supplicant-$ver.tar.gz" "wpa_supplicant-$ver")
+    log=$LOGS/wpa.log; cc=$(with_musl)
+    job_begin "Building wpa_supplicant $ver (WPA2/WPA3-PSK, OpenSSL crypto)" "$log"
+    if ! (
+        cd "$dir/wpa_supplicant"
+        # SAE/WPA3 (dragonfly) needs the crypto_bignum API, which only the
+        # OpenSSL/wolfSSL backends implement - the internal crypto does not.
+        # So build against the L2 OpenSSL installed in the sysroot.
+        cat > .config <<CFG
+CONFIG_DRIVER_NL80211=y
+CONFIG_LIBNL32=y
+CONFIG_CTRL_IFACE=y
+CONFIG_BACKEND=file
+CONFIG_IEEE80211W=y
+CONFIG_IEEE80211N=y
+CONFIG_IEEE80211AC=y
+CONFIG_IEEE80211AX=y
+CONFIG_SAE=y
+CONFIG_OWE=y
+CONFIG_TLS=openssl
+CONFIG_NO_ROAMING=y
+CFG
+        export PKG_CONFIG_LIBDIR="$SYSROOT/lib/pkgconfig" PKG_CONFIG_PATH="$SYSROOT/lib/pkgconfig"
+        make -j"$JOBS" -l"$LOAD" CC="$cc" PKG_CONFIG="pkg-config --static" \
+            EXTRA_CFLAGS="-Os -I$SYSROOT/include -ffile-prefix-map=$PWD=." \
+            LDFLAGS="-static -L$SYSROOT/lib" \
+            wpa_supplicant wpa_cli
+    ) >"$log" 2>&1; then job_end 1; ui_logtail "$log" 60; die "wpa_supplicant build failed (log: $log)"; fi
+    install -m 0755 "$dir/wpa_supplicant/wpa_supplicant" "$OUT/wpa_supplicant"
+    install -m 0755 "$dir/wpa_supplicant/wpa_cli" "$OUT/wpa_cli"
+    have strip && strip -s "$OUT/wpa_supplicant" "$OUT/wpa_cli" 2>/dev/null || true
+    job_end 0 "$(ui_size "$(stat -c%s "$OUT/wpa_supplicant")")"
+}
+
+build_l2wifi() {
+    init_epoch
+    local cc log=$LOGS/l2wifi.log
+    cc=$(musl_cc)
+    job_begin "Building l2wifi (static C)" "$log"
+    if ! ( "$cc" -std=c11 -Os -static -Wno-format-truncation \
+            -o "$OUT/l2wifi" "$L2_ROOT/l2wifi/l2wifi.c" && strip -s "$OUT/l2wifi" 2>/dev/null; ) >"$log" 2>&1; then
+        job_end 1; ui_logtail "$log"; die "l2wifi build failed"
+    fi
+    job_end 0 "$(ui_size "$(stat -c%s "$OUT/l2wifi")")"
+}
+
+# --------------------------------------------------------------- openssl
+# Size-trimmed static OpenSSL (musl, no shared libs, no legacy/engines/DTLS/
+# SSLv3/old ciphers/CMS/OCSP/...).  It is NOT put in the RAM-resident initramfs:
+# the finished pack (build/ssl) rides on the boot medium (l2/ssl) like the wifi
+# pack, and /bin/openssl (a 600-byte dash launcher) runs it from there, so idle
+# RAM does not change.  On an installed disk the pack is copied onto the root.
+#   L2_SSL=core|wifi|off     where the pack goes on the ISOs   (default core)
+#   L2_SSL_EMBED=1           put it in the initramfs too (costs RAM = binary size)
+#   L2_OPENSSL_ASM=1         enable x86_64 asm (AES-NI/SHA; faster, ~+150 KiB)
+#   L2_SSL_CA=1|/path.pem    ship a CA bundle (host bundle, or the given file)
+# Options that a given OpenSSL version does not know are skipped, not fatal.
+# NOTE: the legacy provider + old ciphers/digests (md4/rc4/des/...) stay ENABLED:
+# wpa_supplicant's crypto_openssl.c references them (SAE/WPA3 build), even though
+# WPA2/WPA3-PSK itself only uses AES/SHA/HMAC/ECC.  They live on the medium, not
+# in RAM, so they do not cost idle memory.
+OPENSSL_NO="shared dso engine comp ssl3 ssl3-method tls1 tls1-method tls1_1 tls1_1-method
+    dtls dtls1 dtls1-method dtls1_2 dtls1_2-method weak-ssl-ciphers deprecated tests docs afalgeng
+    async threads srp psk ocsp cms ct ts srtp sctp rfc3779 nextprotoneg ec2m
+    camellia seed aria sm2 sm3 sm4 whirlpool rmd160 siphash blake2 ocb siv quic
+    ktls uplink cmp crmf trace ssl-trace secure-memory tfo unit-test fuzz-afl fuzz-libfuzzer
+    external-tests acvp-tests buildtest-c++ ec_nistp_64_gcc_128"
+build_openssl() {
+    init_epoch; build_headers
+    # Idempotent: wpa_supplicant also builds against this, so do not rebuild if
+    # the binary and the sysroot dev files are already present.
+    if [ -x "$OUT/openssl" ] && [ -f "$SYSROOT/lib/libcrypto.a" ] && [ "${1:-}" != "--force" ]; then
+        say "openssl: already built; skipping (rm $OUT/openssl to rebuild)"
+        return 0
+    fi
+    local ver url dir log cc o opts="" sha up ca
+    ver=${OPENSSL_VERSION:-$(lock_get openssl_version || true)}; [ -n "$ver" ] || ver=3.5.4
+    url=$(lock_get openssl_source || true)
+    [ -n "$url" ] || url=https://github.com/openssl/openssl/releases/download/openssl-$ver/openssl-$ver.tar.gz
+    # upstream publishes <tarball>.sha256: use it as the pin on first download
+    if [ -z "$(lock_get openssl_sha256 || true)" ] && have curl; then
+        up=$(curl -fsSL --max-time 30 "$url.sha256" 2>/dev/null | awk 'NR==1 { print $1 }' || true)
+        if [ "${#up}" -eq 64 ]; then lock_set openssl_sha256 "$up"; fi
+    fi
+    fetch_src openssl "$url" "$CACHE/openssl-$ver.tar.gz"
+    dir=$(unpack_src "$CACHE/openssl-$ver.tar.gz" "openssl-$ver")
+    log=$LOGS/openssl.log; cc=$(with_musl)
+    have perl || die "perl is required to configure OpenSSL (l2 deps install)"
+    # Only pass no-<feature> options this release can actually disable.
+    # Configure's @disablables list plus the tls/dtls protocol variants it adds
+    # at runtime is authoritative; a loose grep also matches internal-only
+    # aliases (e.g. crmf) and makes Configure die with "Unsupported options".
+    local disablables p
+    disablables=$(awk '/^my @disablables = \(/,/^[ \t]*\);/' "$dir/Configure" \
+        | grep -o '"[^"]*"' | tr -d '"')
+    for p in $(sed -n 's/^my @tls = qw(\(.*\));/\1/p;s/^my @dtls = qw(\(.*\));/\1/p' "$dir/Configure"); do
+        disablables="$disablables
+$p"
+        [ "$p" = tls1_3 ] || disablables="$disablables
+$p-method"
+    done
+    for o in $OPENSSL_NO; do
+        printf '%s\n' "$disablables" | grep -qx "$o" && opts="$opts no-$o"
+    done
+    [ "${L2_OPENSSL_ASM:-0}" = 1 ] || opts="$opts no-asm"
+    job_begin "Building openssl $ver (static, trimmed, -Os)" "$log"
+    if ! (
+        cd "$dir"
+        CC="$cc" ./Configure linux-x86_64 --prefix=/usr --openssldir=/etc/ssl --libdir=lib $opts \
+            -static -Os -ffunction-sections -fdata-sections -Wl,--gc-sections \
+            -ffile-prefix-map="$PWD"=. -fdebug-prefix-map="$PWD"=.
+        make -j"$JOBS" -l"$LOAD" build_sw
+    ) >"$log" 2>&1; then job_end 1; ui_logtail "$log" 60; die "openssl build failed (log: $log)"; fi
+    [ -x "$dir/apps/openssl" ] || die "openssl binary missing after build (log: $log)"
+    install -m 0755 "$dir/apps/openssl" "$OUT/openssl"
+    have strip && strip -s "$OUT/openssl" 2>/dev/null || true
+    # Install the dev files (headers + static libs) into the sysroot so other
+    # components can build against this OpenSSL.  wpa_supplicant's SAE/WPA3
+    # needs OpenSSL's crypto_bignum API, which the internal crypto lacks.
+    mkdir -p "$SYSROOT/include" "$SYSROOT/lib"
+    cp -a "$dir/include/openssl" "$SYSROOT/include/"
+    install -m 0644 "$dir/libcrypto.a" "$dir/libssl.a" "$SYSROOT/lib/"
+    # pack layout == layout on the ISO (l2/ssl) and on an installed root
+    local w=$BUILD/ssl
+    rm -rf "$w"; mkdir -p "$w/bin" "$w/etc/ssl"
+    install -m 0755 "$OUT/openssl" "$w/bin/openssl"
+    install -m 0644 "$L2_ROOT/config/openssl.cnf" "$w/etc/ssl/openssl.cnf"
+    ca=${L2_SSL_CA:-0}
+    case "$ca" in
+        0|'') ;;
+        1) ca=/etc/ssl/certs/ca-certificates.crt
+           [ -r "$ca" ] || ca=/etc/ssl/cert.pem ;;
+    esac
+    if [ "$ca" != 0 ] && [ -n "$ca" ]; then
+        if [ -r "$ca" ]; then install -m 0644 "$ca" "$w/etc/ssl/cert.pem"
+        else warn "L2_SSL_CA: $ca not readable; shipping no CA bundle"; fi
+    fi
+    find "$w" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
+    job_end 0 "$(ui_size "$(stat -c%s "$OUT/openssl")")"
+    say "ssl pack: $(du -sk "$w" | awk '{print $1}') KiB on the medium, 0 KiB resident (run from l2/ssl)"
+}
+
+# --------------------------------------------------------------- firmware
+# Wi-Fi firmware is selected per family from config/wifi-firmware.list.
+#   L2_WIFI_FAMILIES="mt7921 iwlwifi ..."   (default: all)
+#   L2_FIRMWARE_SRC=/lib/firmware           use an existing firmware tree
+#   L2_FW_COMPRESS=0                        keep files uncompressed
+ALL_FAMILIES="core mt7921 iwlwifi rtw88 rtw89 rtlwifi ath9k ath10k ath11k ath12k brcm"
+latest_firmware() {
+    curl -fsSL --max-time 30 https://cdn.kernel.org/pub/linux/kernel/firmware/ \
+        | grep -o 'linux-firmware-[0-9]\{8\}\.tar\.xz' | sort -u | tail -1 \
+        | sed 's/^linux-firmware-//; s/\.tar\.xz$//'
+}
+
+build_firmware() {
+    init_epoch
+    local fams=${L2_WIFI_FAMILIES:-$ALL_FAMILIES} src=${L2_FIRMWARE_SRC:-} root dest=$BUILD/firmware log=$LOGS/firmware.log
+    case " $fams " in *" core "*) ;; *) fams="core $fams" ;; esac
+    if [ -z "$src" ]; then
+        local ver; ver=$(lock_get firmware_version || true)
+        [ -n "$ver" ] || { ver=$(latest_firmware); [ -n "$ver" ] || die "cannot resolve linux-firmware (set L2_FIRMWARE_SRC=/lib/firmware to use a local tree)"; lock_set firmware_version "$ver"; }
+        fetch_src firmware "https://cdn.kernel.org/pub/linux/kernel/firmware/linux-firmware-$ver.tar.xz" \
+            "$CACHE/linux-firmware-$ver.tar.xz"
+        root=$SRC/linux-firmware-$ver
+        if [ ! -d "$root" ]; then
+            job_begin "Unpacking linux-firmware $ver (large, one time)" ""
+            tar -xf "$CACHE/linux-firmware-$ver.tar.xz" -C "$SRC" || { job_end 1; die "unpack failed"; }
+            job_end 0
+        fi
+    else
+        root=$src
+        [ -d "$root" ] || die "L2_FIRMWARE_SRC=$root is not a directory"
+    fi
+    rm -rf "$dest"; mkdir -p "$dest"
+    local fam glob f n=0 rel
+    shopt -s nullglob
+    while IFS='|' read -r fam glob; do
+        case "$fam" in ''|'#'*) continue ;; esac
+        case " $fams " in *" $fam "*) ;; *) continue ;; esac
+        for f in "$root"/$glob "$root"/$glob.xz "$root"/$glob.zst; do
+            [ -f "$f" ] || continue
+            rel=${f#"$root"/}; mkdir -p "$dest/$(dirname "$rel")"
+            cp -L "$f" "$dest/$rel"; n=$((n + 1))
+        done
+    done < "$L2_ROOT/config/wifi-firmware.list"
+    shopt -u nullglob
+    # iwlwifi ships many API revisions: keep the two newest per family
+    local pref
+    for pref in $(cd "$dest" && ls iwlwifi-*.ucode* 2>/dev/null | sed 's/-[0-9]*\.ucode.*$//' | sort -u); do
+        ( cd "$dest" && ls "$pref"-[0-9]*.ucode* | sort -V | head -n -2 | xargs -r rm -f )
+    done
+    # xz-compress (kernel FW_LOADER_COMPRESS_XZ); regulatory.db must stay plain
+    if [ "${L2_FW_COMPRESS:-1}" = 1 ] && have xz; then
+        find "$dest" -type f ! -name 'regulatory.db*' ! -name '*.xz' ! -name '*.zst' \
+            -exec xz -9e --check=crc32 -f {} + 2>>"$log" || warn "some firmware could not be compressed"
+    fi
+    find "$dest" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
+    [ "$n" -gt 0 ] || warn "no firmware matched in $root (families: $fams)"
+    say "firmware: $n files, $(du -sk "$dest" | awk '{print $1}') KiB  ($fams)"
+}
+
+# --------------------------------------------------------------- wifi pack
+# modules + firmware + wpa tools, laid out exactly as they sit on the ISO
+# (l2/wifi) and on an installed root (merge with cp -a).
+build_wifipack() {
+    init_epoch
+    local krel w=$BUILD/wifi
+    krel=$(cat "$OUT/kernelrelease" 2>/dev/null) || die "kernel not built (no kernelrelease)"
+    [ -d "$BUILD/modroot/lib/modules/$krel" ] || die "no modules built (CONFIG_MODULES?) - run: l2 build kernel"
+    rm -rf "$w"; mkdir -p "$w/bin" "$w/lib/modules" "$w/lib/firmware"
+    cp -a "$BUILD/modroot/lib/modules/$krel" "$w/lib/modules/"
+    [ -d "$BUILD/firmware" ] && cp -a "$BUILD/firmware/." "$w/lib/firmware/" || warn "no firmware tree (l2 build firmware): chips that need firmware will not work"
+    local b
+    for b in wpa_supplicant wpa_cli; do
+        [ -x "$OUT/$b" ] && install -m 0755 "$OUT/$b" "$w/bin/$b" || warn "$b missing (l2 build wpa)"
+    done
+    find "$w" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
+    say "wifi pack: $(du -sk "$w" | awk '{print $1}') KiB  (modules + firmware + wpa)"
+}
+
+# --------------------------------------------------------------- hw pack
+# On-demand hardware drivers (I2C HID touchpads, exFAT, old USB, ACPI video).
+# Kept OUT of the RAM-resident initramfs and shipped on the medium (l2/hw) /
+# installed root, so they cost nothing at idle.  The wifi pack is a superset.
+HW_MODULE_DIRS="drivers/i2c drivers/hid drivers/usb/host drivers/acpi drivers/platform fs/exfat drivers/net/ethernet drivers/net/usb"
+build_hwpack() {
+    init_epoch
+    local krel w=$BUILD/hw d
+    krel=$(cat "$OUT/kernelrelease" 2>/dev/null) || die "kernel not built (no kernelrelease)"
+    [ -d "$BUILD/modroot/lib/modules/$krel" ] || die "no modules built - run: l2 build kernel"
+    rm -rf "$w"; mkdir -p "$w/lib/modules/$krel/kernel"
+    local msrc=$BUILD/modroot/lib/modules/$krel mdst=$w/lib/modules/$krel
+    for d in $HW_MODULE_DIRS; do
+        if [ -d "$msrc/kernel/$d" ]; then
+            mkdir -p "$mdst/kernel/$(dirname "$d")"
+            cp -a "$msrc/kernel/$d" "$mdst/kernel/$d"
+        fi
+    done
+    cp -a "$msrc"/modules.builtin "$msrc"/modules.order "$mdst/" 2>/dev/null || true
+    have depmod && depmod -b "$w" "$krel" 2>/dev/null || true
+    find "$w" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
+    say "hw pack: $(du -sk "$w" | awk '{print $1}') KiB  (on-demand hardware drivers)"
+}
+
+# --------------------------------------------------------------- install tools
+# Tools `l2install disk` needs when it runs INSIDE the booted live system:
+# a GPT partitioner, ext4/FAT formatters and the limine BIOS installer.  They
+# ship on the boot medium (l2/install) like the hw/ssl packs and cost zero
+# idle RAM; l2install puts the pack's bin/ on PATH when it detects the live
+# medium.  On a normal host the installer keeps using the host tools.
+#
+# The partitioner is l2gpt (our own C, sgdisk-compatible CLI): gdisk itself
+# is C++ and a static musl build would need a musl-targeted libstdc++ (the
+# host one is ABI-bound to glibc locale internals) at ~1 MiB.  l2gpt's GPT
+# output is byte-identical to sgdisk's for the layouts L2 creates.
+
+build_l2gpt() {
+    init_epoch
+    local cc log=$LOGS/l2gpt.log
+    cc=$(musl_cc)
+    job_begin "Building l2gpt (static C, sgdisk-compatible)" "$log"
+    if ! ( "$cc" -std=c11 -Os -static -Wall -Wextra \
+            -ffile-prefix-map="$L2_ROOT/l2gpt=/l2/src/l2gpt" \
+            -fdebug-prefix-map="$L2_ROOT/l2gpt=/l2/src/l2gpt" \
+            -o "$OUT/l2gpt" "$L2_ROOT/l2gpt/l2gpt.c" && strip -s "$OUT/l2gpt" 2>/dev/null; ) >"$log" 2>&1; then
+        job_end 1; ui_logtail "$log"; die "l2gpt build failed"
+    fi
+    job_end 0 "$(ui_size "$(stat -c%s "$OUT/l2gpt")")"
+}
+
+build_e2fsprogs() {
+    init_epoch; build_headers
+    # Idempotent: only mke2fs is needed (as mkfs.ext4 via argv[0]).
+    if [ -x "$OUT/mke2fs" ] && [ "${1:-}" != "--force" ]; then
+        say "e2fsprogs: already built; skipping (rm $OUT/mke2fs to rebuild)"
+        return 0
+    fi
+    local ver url dir log cc
+    ver=$(lock_get e2fsprogs_version || true); [ -n "$ver" ] || ver=1.47.4
+    url=$(lock_get e2fsprogs_source || true)
+    [ -n "$url" ] || url=https://www.kernel.org/pub/linux/kernel/people/tytso/e2fsprogs/v$ver/e2fsprogs-$ver.tar.gz
+    fetch_src e2fsprogs "$url" "$CACHE/e2fsprogs-$ver.tar.gz"
+    dir=$(unpack_src "$CACHE/e2fsprogs-$ver.tar.gz" "e2fsprogs-$ver")
+    log=$LOGS/e2fsprogs.log; cc=$(with_musl)
+    job_begin "Building e2fsprogs $ver mke2fs (static, trimmed)" "$log"
+    if ! (
+        cd "$dir"
+        ./configure --disable-nls --disable-fuse2fs --disable-uuidd --disable-debugfs \
+            --disable-imager --disable-resizer --disable-defrag --disable-tls --disable-mmp \
+            --disable-tdb --disable-bmap-stats --without-libarchive \
+            CC="$cc" CFLAGS="-Os -ffile-prefix-map=$PWD=." LDFLAGS="-static"
+        make -j"$JOBS" -l"$LOAD" libs
+        make -j"$JOBS" -l"$LOAD" -C misc mke2fs
+    ) >"$log" 2>&1; then job_end 1; ui_logtail "$log" 60; die "e2fsprogs build failed (log: $log)"; fi
+    install -m 0755 "$dir/misc/mke2fs" "$OUT/mke2fs"
+    have strip && strip -s "$OUT/mke2fs" 2>/dev/null || true
+    job_end 0 "$(ui_size "$(stat -c%s "$OUT/mke2fs")")"
+}
+
+build_dosfstools() {
+    init_epoch
+    if [ -x "$OUT/mkfs.fat" ] && [ "${1:-}" != "--force" ]; then
+        say "dosfstools: already built; skipping (rm $OUT/mkfs.fat to rebuild)"
+        return 0
+    fi
+    local ver url dir log cc
+    ver=$(lock_get dosfstools_version || true); [ -n "$ver" ] || ver=4.2
+    url=$(lock_get dosfstools_source || true)
+    [ -n "$url" ] || url=https://github.com/dosfstools/dosfstools/releases/download/v$ver/dosfstools-$ver.tar.gz
+    fetch_src dosfstools "$url" "$CACHE/dosfstools-$ver.tar.gz"
+    dir=$(unpack_src "$CACHE/dosfstools-$ver.tar.gz" "dosfstools-$ver")
+    log=$LOGS/dosfstools.log; cc=$(with_musl)
+    job_begin "Building dosfstools $ver mkfs.fat (static)" "$log"
+    if ! (
+        cd "$dir"
+        ./configure --without-udev CC="$cc" CFLAGS="-Os -ffile-prefix-map=$PWD=." LDFLAGS="-static"
+        make -j"$JOBS" -l"$LOAD" -C src mkfs.fat
+    ) >"$log" 2>&1; then job_end 1; ui_logtail "$log" 60; die "dosfstools build failed (log: $log)"; fi
+    install -m 0755 "$dir/src/mkfs.fat" "$OUT/mkfs.fat"
+    have strip && strip -s "$OUT/mkfs.fat" 2>/dev/null || true
+    job_end 0 "$(ui_size "$(stat -c%s "$OUT/mkfs.fat")")"
+}
+
+# The pack laid out exactly as it sits on the medium (l2/install).  Besides
+# the tools it carries the static limine host tool (the ISO only ships the
+# boot sectors, not the installer binary) and the config templates l2install
+# substitutes at install time.
+build_installpack() {
+    init_epoch
+    local w=$BUILD/installtools b ver ldir cc
+    for b in l2gpt mke2fs mkfs.fat; do
+        [ -x "$OUT/$b" ] || die "$OUT/$b missing; run: l2 build l2gpt e2fsprogs dosfstools"
+    done
+    ver=$(lock_get limine_version || true)
+    ldir=$SRC/limine-$ver/bin
+    [ -f "$ldir/limine.c" ] || die "limine sources missing; run: l2 build limine"
+    rm -rf "$w"; mkdir -p "$w/bin" "$w/etc"
+    install -m 0755 "$OUT/l2gpt" "$w/bin/sgdisk"
+    install -m 0755 "$OUT/mke2fs" "$w/bin/mke2fs"
+    ln -s mke2fs "$w/bin/mkfs.ext4"
+    install -m 0755 "$OUT/mkfs.fat" "$w/bin/mkfs.fat"
+    ln -s mkfs.fat "$w/bin/mkfs.vfat"
+    # static musl build of the limine host tool (the regular one is a host
+    # binary and cannot run inside the live system); bin/limine.c is the
+    # version-substituted, epoch-seeded source generated by build_limine.
+    cc=$(musl_cc)
+    "$cc" -std=c99 -Os -static -ffile-prefix-map="$ldir=." -o "$w/bin/limine" "$ldir/limine.c" \
+        || die "static limine host tool build failed"
+    strip -s "$w/bin/limine" 2>/dev/null || true
+    install -m 0644 "$L2_ROOT/config/cmdline" "$w/etc/cmdline"
+    install -m 0644 "$L2_ROOT/config/limine-installed.conf" "$w/etc/limine-installed.conf"
+    find "$w" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
+    say "install pack: $(du -sk "$w" | awk '{print $1}') KiB on the medium, 0 KiB resident (sgdisk mke2fs mkfs.fat limine)"
+}
+
+# X11 is built only when l2wm is requested. Keep target headers/libraries
+# isolated from the host (especially Nix/glibc pkg-config search paths).
+build_l2wm_x11() (
+    local cc=$1 prefix=$BUILD/l2wm-x11
+    local name version group archive dir log
+    [ -f "$prefix/.complete" ] && return 0
+    for name in pkg-config python3 rustc readelf; do
+        have "$name" || die "$name is required to build l2wm"
+    done
+    mkdir -p "$prefix" "$LOGS" "$CACHE" "$SRC"
+    export CC="$cc" CFLAGS="-Os"
+    # xproto.pc uses /usr/include, which pkg-config may filter as a system
+    # path even though the musl compiler cannot see our staged headers.
+    export CPPFLAGS="-I$prefix/usr/include"
+    export LDFLAGS="-static -L$prefix/usr/lib"
+    export PKG_CONFIG_PATH=
+    export PKG_CONFIG_LIBDIR="$prefix/usr/lib/pkgconfig:$prefix/usr/share/pkgconfig"
+    export PKG_CONFIG_SYSROOT_DIR="$prefix"
+    export PYTHON=python3
+    # Ordered: protocol headers, transport headers, generator, auth, XCB, Xlib.
+    for name in xorgproto xtrans xcb_proto xau xcb x11; do
+        case "$name" in
+            xorgproto) version=2025.1; group=proto; archive=xorgproto-$version ;;
+            xtrans) version=1.6.0; group=lib; archive=xtrans-$version ;;
+            xcb_proto) version=1.17.0; group=xcb; archive=xcb-proto-$version ;;
+            xau) version=1.0.12; group=lib; archive=libXau-$version ;;
+            xcb) version=1.17.0; group=xcb; archive=libxcb-$version ;;
+            x11) version=1.8.14; group=lib; archive=libX11-$version ;;
+        esac
+        local url="https://www.x.org/releases/individual/$group/$archive.tar.xz"
+        if [ "$group" = xcb ]; then url="https://xcb.freedesktop.org/dist/$archive.tar.xz"; fi
+        fetch_src "l2wm_$name" "$url" "$CACHE/$archive.tar.xz"
+        dir=$(unpack_src "$CACHE/$archive.tar.xz" "$archive")
+        log=$LOGS/l2wm-$name.log
+        local opts=()
+        case "$name" in
+            xorgproto) opts=(--disable-specs) ;;
+            xtrans) opts=(--disable-docs) ;;
+            xcb_proto) opts=(--disable-devel-docs) ;;
+            xau) opts=(--disable-shared --enable-static) ;;
+            xcb)
+                local py_dirs=("$prefix"/usr/lib/python*/site-packages "$prefix"/usr/lib/python*/dist-packages)
+                [ "${#py_dirs[@]}" -gt 0 ] || die "xcb-proto did not install its Python generator"
+                export PYTHONPATH="${py_dirs[0]}"
+                opts=(--disable-shared --enable-static --disable-devel-docs --disable-doxygen
+                      --disable-xdm-auth --without-launchd
+                      --with-xcb-proto-dir="$prefix/usr/share/xcb"
+                      --with-xcb-proto-python-dir="${py_dirs[0]}") ;;
+            x11) opts=(--disable-shared --enable-static --disable-specs --disable-xf86bigfont
+                       --disable-loadable-i18n --without-xmlto --without-fop
+                       # pkg-config variables are not rebased by PKG_CONFIG_SYSROOT_DIR.
+                       --with-keysymdefdir="$prefix/usr/include/X11") ;;
+        esac
+        step "Building l2wm dependency: $archive (log: $log)"
+        if ! (
+            set -e
+            cd "$dir"
+            ./configure --prefix=/usr --libdir=/usr/lib "${opts[@]}" || exit
+            make -j"$JOBS" -l"$LOAD" || exit
+            make DESTDIR="$prefix" install || exit
+            # Installed libtool metadata embeds /usr/lib dependency paths;
+            # use the staged static archives and pkg-config metadata instead.
+            rm -f "$prefix"/usr/lib/*.la
+        ) >"$log" 2>&1; then
+            ui_logtail "$log" 40
+            die "l2wm dependency $archive failed (log: $log)"
+        fi
+    done
+    touch "$prefix/.complete"
+)
+
+build_l2wm() {
+    local cc prefix=$BUILD/l2wm-x11
+    # A standalone menu selection must work before the rest of the distro.
+    if [ -z "${L2WM_CC:-}" ] && [ ! -f "$SYSROOT/lib/libc.a" ]; then build_musl; fi
+    cc=${L2WM_CC:-$(musl_cc)}
+    build_l2wm_x11 "$cc"
+    mkdir -p "$OUT"
+    make -C "$L2_ROOT/l2wm" clean
+    make -C "$L2_ROOT/l2wm" CC="$cc" \
+        CPPFLAGS="-I$prefix/usr/include" \
+        LDFLAGS="-static -L$prefix/usr/lib" \
+        LDLIBS="${L2WM_LIBS:--lX11 -lxcb -lXau -pthread}"
+    local binary="$L2_ROOT/l2wm/build/l2wm"
+    readelf -h "$binary" >/dev/null || die "l2wm is not a valid ELF binary"
+    if readelf -l "$binary" | grep -q INTERP || readelf -d "$binary" | grep -q NEEDED; then
+        die "l2wm must be statically linked for the minimal rootfs"
+    fi
+    install -m 0755 "$binary" "$OUT/l2wm"
+}
+
+# The desktop is a separate, larger image; the console ISO keeps its budget.
+# Import cached Xorg/xterm runtime files, or use a prepared rootfs overlay.
+install_desktop_runtime() {
+    if [ -n "${L2_DESKTOP_RUNTIME:-}" ]; then
+        [ -f "$L2_DESKTOP_RUNTIME/etc/l2/desktop-runtime.sh" ] \
+            || die "L2_DESKTOP_RUNTIME must contain etc/l2/desktop-runtime.sh"
+        cp -a "$L2_DESKTOP_RUNTIME/." "$ROOTFS/"
+    else
+        python3 "$L2_ROOT/tools/desktop-runtime.py" "$ROOTFS" \
+            || die "desktop runtime unavailable; provide L2_DESKTOP_RUNTIME or cached Nix Xorg, xterm, fbdev, evdev and fonts"
+    fi
+    local script
+    for script in l2desktop l2session l2user xterm; do
+        install -m 0755 "$L2_ROOT/l2wm/session/$script" "$ROOTFS/bin/$script"
+    done
+    "${L2WM_CC:-$(musl_cc)}" -Os -I"$BUILD/l2wm-x11/usr/include" \
+        "$L2_ROOT/tools/desktop-probe.c" -static -L"$BUILD/l2wm-x11/usr/lib" \
+        -lX11 -lxcb -lXau -pthread -o "$ROOTFS/bin/l2-xprobe"
+    chmod 4755 "$ROOTFS/bin/busybox"
+    sed -i 's|^service tty1 .*|service desktop respawn /bin/getty -n -l /bin/l2desktop 0 tty1 linux|' "$ROOTFS/etc/rcl2.conf"
+    printf '\nservice tty2 respawn /bin/getty 0 tty2 linux\n' >> "$ROOTFS/etc/rcl2.conf"
+    printf 'root:!:20454:0:99999:7:::\n' > "$ROOTFS/etc/shadow"
+    chmod 600 "$ROOTFS/etc/shadow"
+    printf '/bin/dash\n/bin/sh\n' > "$ROOTFS/etc/shells"
+    printf 'passwd: files\ngroup: files\nshadow: files\nhosts: files dns\n' > "$ROOTFS/etc/nsswitch.conf"
+    mkdir -p "$ROOTFS/home"
+    chmod 700 "$ROOTFS/root"
+}
+
+build_desktop() (
+    export L2_WITH_DESKTOP=1 L2_WITH_L2WM=1
+    if ! "$OUT/busybox" --list 2>/dev/null | grep -qx passwd; then build_busybox; fi
+    build_rootfs
+    build_initramfs
+    local wifi=0
+    [ ! -d "$BUILD/wifi" ] || wifi=1
+    _make_iso "$OUT/l2-desktop.iso" "${L2_DESKTOP_ISO_LIMIT_MB:-128}" desktop "$wifi"
+)
+
+# --------------------------------------------------------------- rootfs
+build_rootfs() {
+    init_epoch
+    local f
+    for f in dash rcl2 l2pm busybox l2wifi; do
+        [ -f "$OUT/$f" ] || die "$OUT/$f missing; build it first (l2 build $f)"
+    done
+    if [ "${L2_WITH_DESKTOP:-0}" = 1 ]; then L2_WITH_L2WM=1; fi
+    if [ "${L2_WITH_L2WM:-0}" = 1 ]; then build_l2wm; fi
+    step "Assembling rootfs"
+    rm -rf "$ROOTFS"
+    mkdir -p "$ROOTFS"/{bin,etc,proc,sys,dev,tmp,run,root,boot,media/l2,lib/modules} \
+             "$ROOTFS"/usr \
+             "$ROOTFS"/l2/{store,var/db/installed,var/profiles/default,cache,src,recipes,lib} \
+             "$ROOTFS"/etc/l2 \
+             "$ROOTFS"/l2/var/profiles/default/{bin,sbin,usr/bin,usr/sbin}
+    ln -s bin "$ROOTFS/sbin"
+    ln -s /l2/var/profiles/default/usr/bin "$ROOTFS/usr/bin"
+    ln -s /l2/var/profiles/default/usr/sbin "$ROOTFS/usr/sbin"
+
+    # busybox is the core toolset: symlink every applet it actually contains.
+    install -m 0755 "$OUT/busybox" "$ROOTFS/bin/busybox"
+    local applets
+    applets=$("$OUT/busybox" --list) || die "busybox --list failed"
+    [ -n "$applets" ] || die "busybox reports no applets"
+    for f in $applets; do
+        case "$f" in busybox|sh|init|poweroff|reboot|halt) continue ;; esac
+        ln -sf busybox "$ROOTFS/bin/$f"
+    done
+    # poweroff/reboot/halt talk to rcl2 (PID 1) with the signals it maps to a
+    # clean shutdown; busybox's own applets use a different signal mapping.
+    install -m 0755 "$L2_ROOT/overlay/bin/shutdown" "$ROOTFS/bin/shutdown"
+    for f in poweroff reboot halt; do ln -sf shutdown "$ROOTFS/bin/$f"; done
+    install -m 0755 "$OUT/dash" "$ROOTFS/bin/dash"
+    ln -sf dash "$ROOTFS/bin/sh"
+    install -m 0755 "$OUT/rcl2" "$ROOTFS/init"
+    install -m 0755 "$OUT/rcl2" "$ROOTFS/bin/rcl2"
+    install -m 0755 "$OUT/l2pm" "$ROOTFS/bin/l2pm"
+    install -m 0755 "$OUT/l2wifi" "$ROOTFS/bin/l2wifi"
+    if [ "${L2_WITH_L2WM:-0}" = 1 ]; then
+        install -m 0755 "$OUT/l2wm" "$ROOTFS/bin/l2wm"
+    fi
+    install -m 0755 "$L2_ROOT/l2fetch" "$ROOTFS/bin/l2fetch"
+    install -m 0755 "$L2_ROOT/l2install" "$ROOTFS/bin/l2install"
+    install -m 0644 "$L2_ROOT/lib/l2ui.sh" "$ROOTFS/l2/lib/l2ui.sh"
+    # scripts: l2net, udhcpc handler, serial getty, net.conf
+    cp -a "$L2_ROOT/overlay/." "$ROOTFS/"
+    # openssl normally stays on the boot medium (zero RAM); embed only on request
+    if [ "${L2_SSL_EMBED:-0}" = 1 ]; then
+        [ -d "$BUILD/ssl" ] || die "L2_SSL_EMBED=1 but no ssl pack (l2 build openssl)"
+        cp -a "$BUILD/ssl/." "$ROOTFS/"
+        warn "openssl embedded in the initramfs: costs $(ui_size "$(stat -c%s "$OUT/openssl")") of RAM"
+    fi
+
+    install -m 0644 "$L2_ROOT/config/rcl2.conf" "$ROOTFS/etc/rcl2.conf"
+    install -m 0644 "$L2_ROOT/config/os-release" "$ROOTFS/etc/os-release"
+    printf 'L2 %s\n' "$APP_VERSION" > "$ROOTFS/etc/l2/version"
+    # Hardware drivers are NOT put in the RAM-resident initramfs: they ship in
+    # the hw pack on the medium / installed root (see build_hwpack), so they
+    # cost nothing at idle.  Wifi drivers ship in the wifi pack.
+    cat > "$ROOTFS/etc/passwd" <<'PW'
+root:x:0:0:root:/root:/bin/dash
+PW
+    printf 'root:x:0:\n' > "$ROOTFS/etc/group"
+    printf 'L2\n' > "$ROOTFS/etc/hostname"
+    cat > "$ROOTFS/etc/profile" <<'PF'
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PS1='L2# '
+if [ "$(id -u)" != 0 ]; then PS1='L2$ '; fi
+if [ "${L2_DESKTOP_LOGIN:-0}" = 1 ]; then
+    unset L2_DESKTOP_LOGIN
+    exec /bin/l2session
+fi
+PF
+    if [ "${L2_WITH_DESKTOP:-0}" = 1 ]; then install_desktop_runtime; fi
+    cat > "$ROOTFS/etc/motd" <<'MT'
+
+  L2 - tiny Linux for tools
+  l2wifi         scan and connect to wifi
+  l2net status   network state
+  l2fetch        system summary
+  openssl        TLS/crypto tool (runs from the boot medium)
+  l2pm list      installed packages
+  l2install -h   install to disk
+
+MT
+    cp -a "$L2_ROOT"/l2pm/recipes/*.recipe "$ROOTFS/l2/recipes/" 2>/dev/null || true
+    if [ "$(id -u)" -eq 0 ]; then
+        mknod -m 600 "$ROOTFS/dev/console" c 5 1 2>/dev/null || true
+        mknod -m 666 "$ROOTFS/dev/null" c 1 3 2>/dev/null || true
+        mknod -m 666 "$ROOTFS/dev/zero" c 1 5 2>/dev/null || true
+    fi
+    find "$ROOTFS" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
+    say "rootfs: $(du -sk "$ROOTFS" | awk '{print $1}') KiB in $ROOTFS"
+}
+
+build_initramfs() {
+    init_epoch
+    [ -d "$ROOTFS/bin" ] || die "rootfs missing; run: l2 build rootfs"
+    have cpio || die "cpio is required"
+    have gzip || die "gzip is required"
+    step "Creating gzip initramfs"
+    local repro=""
+    if cpio --help 2>&1 | grep -q -- '--reproducible'; then repro="--reproducible"; fi
+    (
+        cd "$ROOTFS"
+        find . -print0 | LC_ALL=C sort -z \
+            | cpio --null -o --format=newc --owner=0:0 $repro 2>/dev/null \
+            | gzip -9 -n > "$OUT/initramfs-l2"
+    )
+    say "initramfs: $OUT/initramfs-l2 ($(stat -c%s "$OUT/initramfs-l2") bytes)"
+}
+
+# --------------------------------------------------------------- limine
+build_limine() {
+    init_epoch
+    local ver sha src_url tarball dir log
+    ver=$(lock_get limine_version || true)
+    src_url=$(lock_get limine_source || true)
+    sha=$(lock_get limine_sha256 || true)
+    [ -n "$ver" ] || ver=$(latest_limine)
+    [ -n "$ver" ] || die "sources.lock has no limine_version"
+    [ -n "$src_url" ] || src_url="https://codeberg.org/Limine/Limine/releases/download/v$ver/limine-$ver.tar.gz"
+    tarball=$CACHE/limine-$ver.tar.gz
+    download "$src_url" "$tarball" "$sha" "limine $ver source"
+    dir=$SRC/limine-$ver
+    rm -rf "$dir"
+    mkdir -p "$SRC"
+    tar -xf "$tarball" -C "$SRC"
+    # The host tool seeds the MBR disk ID with time(NULL); use the build epoch
+    # so `limine bios-install` does not make the ISO change on every run.
+    if [ -f "$dir/host/limine.c" ]; then
+        sed -i 's/srand(time(NULL));/srand(getenv("SOURCE_DATE_EPOCH") ? (unsigned)strtoul(getenv("SOURCE_DATE_EPOCH"), NULL, 10) : time(NULL));/' "$dir/host/limine.c"
+    fi
+    log=$LOGS/limine.log
+    local cct
+    if have gcc; then cct=$(command -v gcc)
+    elif have clang; then cct=$(command -v clang)
+    else die "gcc or clang is required to build limine"
+    fi
+    job_begin "Building limine $ver (BIOS + UEFI, -j$JOBS)" "$log"
+    if ! (
+        cd "$dir"
+        # Release tarballs ship a generated configure; no autotools needed.
+        # Limine wants LLVM binutils + ld.lld, and nasm for the BIOS port.
+        CC_FOR_TARGET="$cct" ./configure \
+            --prefix="$OUT/limine" \
+            --enable-bios --enable-bios-cd \
+            --enable-uefi-x86-64 --enable-uefi-cd
+        make -j"$JOBS" -l"$LOAD"
+        make install
+    ) >"$log" 2>&1; then
+        job_end 1; ui_logtail "$log" 60
+        die "limine build failed (log: $log)"
+    fi
+    job_end 0
+    local f
+    for f in bin/limine share/limine/limine-bios.sys share/limine/limine-bios-cd.bin \
+             share/limine/limine-uefi-cd.bin share/limine/BOOTX64.EFI; do
+        [ -f "$OUT/limine/$f" ] || die "limine build produced no $f"
+    done
+    say "limine: $OUT/limine/bin/limine ($(stat -c%s "$OUT/limine/bin/limine") bytes)"
+}
+
+# --------------------------------------------------------------- ISO
+cmdline_base() { tr -d '\n' < "$L2_ROOT/config/cmdline" 2>/dev/null || printf 'loglevel=4'; }
+
+# _make_iso OUT LIMIT_MB LABEL WITH_WIFI
+_make_iso() {
+    local out=$1 limit_mb=$2 label=$3 wifi=$4
+    [ -f "$OUT/vmlinuz-l2" ] || die "kernel missing; run: l2 build kernel"
+    [ -f "$OUT/initramfs-l2" ] || die "initramfs missing; run: l2 build initramfs"
+    [ -x "$OUT/limine/bin/limine" ] || die "limine missing; run: l2 build limine"
+    have xorriso || die "xorriso is required"
+    local lim=$OUT/limine/share/limine isod=$ISO_DIR.$label
+    rm -rf "$isod"; mkdir -p "$isod/boot/limine" "$isod/EFI/BOOT" "$isod/l2"
+    install -m 0644 "$OUT/vmlinuz-l2" "$isod/boot/vmlinuz"
+    install -m 0644 "$OUT/initramfs-l2" "$isod/boot/initramfs"
+    install -m 0644 "$lim/limine-bios.sys" "$isod/boot/limine/limine-bios.sys"
+    install -m 0644 "$lim/limine-bios-cd.bin" "$isod/boot/limine/limine-bios-cd.bin"
+    install -m 0644 "$lim/BOOTX64.EFI" "$isod/EFI/BOOT/BOOTX64.EFI"
+    sed "s|@CMDLINE@|$(cmdline_base)|g" "$L2_ROOT/config/limine.conf" > "$isod/boot/limine/limine.conf"
+    cp "$isod/boot/limine/limine.conf" "$isod/EFI/BOOT/limine.conf"
+    # EFI El Torito boot image.  OVMF only boots Limine's stock 2.8 MiB image
+    # (smaller/reformatted FAT images are rejected), so use it as-is.
+    local ueficd=$isod/boot/limine/limine-uefi-cd.bin
+    install -m 0644 "$lim/limine-uefi-cd.bin" "$ueficd"
+    printf 'L2 live medium %s\n' "$APP_VERSION" > "$isod/l2/L2-LIVE"
+    if [ "$wifi" = 1 ]; then
+        [ -d "$BUILD/wifi" ] || die "wifi pack missing; run: l2 build wifipack"
+        mkdir -p "$isod/l2/wifi"; cp -a "$BUILD/wifi/." "$isod/l2/wifi/"
+    elif [ -d "$BUILD/hw" ]; then
+        # core ISO: on-demand hardware drivers ride on the medium, not in RAM
+        mkdir -p "$isod/l2/hw"; cp -a "$BUILD/hw/." "$isod/l2/hw/"
+    fi
+    # disk-install tools (sgdisk/mke2fs/mkfs.fat/limine) ride on the medium so
+    # `l2install disk` works from inside the live system; zero idle RAM cost
+    if [ -d "$BUILD/installtools" ]; then
+        mkdir -p "$isod/l2/install"; cp -a "$BUILD/installtools/." "$isod/l2/install/"
+    else
+        warn "no install pack (l2 build installpack): l2install disk will not work from the live system"
+    fi
+    # OpenSSL (~3 MiB) rides on the medium.  Default is the wifi ISO so the core
+    # ISO stays under the 10 MiB budget (the UEFI boot image alone is 2.8 MiB).
+    # Set L2_SSL=core to also put it on the core ISO (needs L2_ALLOW_BIG_ISO=1).
+    local want_ssl=0
+    if [ -d "$BUILD/ssl" ]; then
+        case "${L2_SSL:-wifi}" in
+            core) want_ssl=1 ;;
+            wifi) [ "$wifi" = 1 ] && want_ssl=1 ;;
+            off) want_ssl=0 ;;
+        esac
+    fi
+    if [ "$want_ssl" = 1 ]; then mkdir -p "$isod/l2/ssl"; cp -a "$BUILD/ssl/." "$isod/l2/ssl/"; fi
+    find "$isod" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
+    mkdir -p "$(dirname "$out")"
+    local args=(-as mkisofs -iso-level 3 -full-iso9660-filenames -R -r -J -volid L2
+        -publisher "L2" -preparer "L2 reproducible build" -A "L2 $APP_VERSION"
+        -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table
+        --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image
+        --protective-msdos-label -o "$out")
+    job_begin "Creating $(basename "$out")" "$LOGS/iso.log"
+    if ! xorriso "${args[@]}" "$isod" >"$LOGS/iso.log" 2>&1; then job_end 1; ui_logtail "$LOGS/iso.log"; die "ISO build failed"; fi
+    if ! "$OUT/limine/bin/limine" bios-install "$out" >>"$LOGS/iso.log" 2>&1; then
+        job_end 1; ui_logtail "$LOGS/iso.log"; die "limine bios-install failed on $out"
+    fi
+    printf '\114\062\000\001' | dd of="$out" bs=1 seek=440 conv=notrunc 2>/dev/null
+    local size limit; size=$(stat -c%s "$out"); limit=$((limit_mb * 1024 * 1024))
+    job_end 0 "$(ui_size "$size") of $limit_mb MiB"
+    printf '  '; ui_bar "$size" "$limit" 28; printf '  %s / %s MiB\n' "$(ui_size "$size")" "$limit_mb"
+    if [ "$size" -gt "$limit" ]; then
+        if [ "$L2_ALLOW_BIG_ISO" = 1 ]; then warn "over the ${limit_mb} MiB budget (allowed by L2_ALLOW_BIG_ISO=1)"
+        else die "ISO is over the ${limit_mb} MiB budget; trim the kernel, set L2_SSL=wifi (openssl only on l2-wifi.iso) or L2_SSL=off, or L2_ALLOW_BIG_ISO=1"; fi
+    fi
+}
+
+build_iso() {
+    init_epoch
+    local out=${1:-$OUT/l2.iso}
+    step "Core ISO (kernel + initramfs + ssl pack on the medium, no wifi pack)"
+    _make_iso "$out" "$L2_ISO_LIMIT_MB" core 0
+    if [ -d "$BUILD/wifi" ] && [ -z "${1:-}" ]; then
+        step "Wi-Fi ISO (same RAM footprint; modules + firmware stay on the medium)"
+        _make_iso "$OUT/l2-wifi.iso" "${L2_WIFI_ISO_LIMIT_MB:-96}" wifi 1
+    fi
+}
+
+# --------------------------------------------------------------- build set
+build_one() {
+    case "$1" in
+        musl)       build_musl ;;
+        headers)    build_headers --force ;;
+        kernel|linux|linux-kernel) build_kernel ;;
+        dash)       build_dash ;;
+        busybox)    build_busybox ;;
+        rcl2)       build_rcl2 ;;
+        l2pm)       build_l2pm ;;
+        l2wifi)     build_l2wifi ;;
+        l2wm)       build_l2wm ;;
+        desktop)    build_desktop ;;
+        libnl)      build_libnl ;;
+        wpa|wpa_supplicant) build_wpa ;;
+        openssl|ssl) build_openssl ;;
+        firmware)   build_firmware ;;
+        wifipack)   build_wifipack ;;
+        hwpack)     build_hwpack ;;
+        l2gpt)      build_l2gpt ;;
+        e2fsprogs|mke2fs) build_e2fsprogs ;;
+        dosfstools|mkfs.fat) build_dosfstools ;;
+        installpack) build_installpack ;;
+        limine)     build_limine ;;
+        rootfs)     build_rootfs ;;
+        initramfs)  build_initramfs ;;
+        iso)        build_iso ;;
+        *) die "unknown component: $1" ;;
+    esac
+}
+
+ALL_COMPONENTS="musl kernel busybox dash rcl2 l2pm l2wifi openssl wpa firmware limine wifipack hwpack l2gpt e2fsprogs dosfstools installpack rootfs initramfs iso"
+
+build_all() {
+    mkdir -p "$SRC" "$OUT" "$LOGS" "$CACHE" "$BUILD/bin"
+    local c n=0 t=0 t0; t0=$(date +%s)
+    for c in $ALL_COMPONENTS; do t=$((t + 1)); done
+    for c in $ALL_COMPONENTS; do
+        n=$((n + 1))
+        step "[$n/$t] $c"
+        # wifi pieces are optional: a failed download must not block a bootable core ISO
+        case "$c" in
+            wpa|firmware|openssl)
+                ( build_one "$c" ) || warn "$c failed; continuing without it (core ISO still builds)" ;;
+            wifipack)
+                ( build_wifipack ) || warn "no wifi pack; building the core ISO only" ;;
+            *) build_one "$c" ;;
+        esac
+    done
+    ok "all done in $(ui_secs $(( $(date +%s) - t0 )))"
+}
+
+build_components() {
+    local sel
+    sel=$(ui_multi "Components to build (space selects, enter confirms)" ${ALL_COMPONENTS/ rootfs/ l2wm rootfs}) || return 0
+    [ -n "$sel" ] || return 0
+    local c
+    local L2_WITH_L2WM=${L2_WITH_L2WM:-0}
+    case " $sel " in *" l2wm "*) L2_WITH_L2WM=1 ;; esac
+    for c in $sel; do step "component: $c"; build_one "$c"; done
+}
+
+# --------------------------------------------------------------- package manager
+pm_bin() {
+    if [ -x "$OUT/l2pm" ]; then printf '%s' "$OUT/l2pm"
+    elif [ -x "$L2_ROOT/l2pm/l2pm" ]; then printf '%s' "$L2_ROOT/l2pm/l2pm"
+    else build_l2pm >/dev/null; printf '%s' "$OUT/l2pm"; fi
+}
+
+pm() {
+    local b; b=$(pm_bin)
+    local root=${L2PM_ROOT:-$BUILD/pmroot}
+    local cc=${CC:-$(musl_cc)}
+    L2PM_ROOT="$root" L2PM_RECIPES="$L2_ROOT/l2pm/recipes" CC="$cc" "$b" "$@"
+}
+
+pm_menu() {
+    while :; do
+        local c
+        c=$(ui_choose "l2pm - content-addressed packages" \
+            "Build a recipe (reproducibility check)" \
+            "Build + install a recipe" \
+            "Install a .l2p file" \
+            "List installed packages" \
+            "Verify the store" \
+            "Garbage collect" \
+            "l2pm self-test (RAM <10 MiB)" \
+            "Back") || return 0
+        case "$c" in
+            "Build a recipe"*)
+                local r; r=$(ui_input "Recipe name (in l2pm/recipes)" "l2pm")
+                [ -n "$r" ] && { local f=$r; [ -f "$r" ] || f=$L2_ROOT/l2pm/recipes/$r.recipe; pm build "$f" --check; } ;;
+            "Build + install"*)
+                local r; r=$(ui_input "Recipe name" "l2pm")
+                [ -n "$r" ] && { local f=$r; [ -f "$r" ] || f=$L2_ROOT/l2pm/recipes/$r.recipe; pm add "$f"; } ;;
+            "Install a .l2p"*)
+                local f; f=$(ui_input "Path to .l2p" "$OUT/l2pm-0.1.0.l2p")
+                [ -n "$f" ] && pm install "$f" ;;
+            "List installed"*) pm list ;;
+            "Verify"*) pm verify ;;
+            "Garbage collect"*) pm gc ;;
+            "l2pm self-test"*) pm selftest ;;
+            Back) return 0 ;;
+        esac
+    done
+}
+
+# --------------------------------------------------------------- dashboard
+ui_header() {
+    local kv; kv=$(lock_get kernel_version || echo "?")
+    if [ -t 1 ] && [ -z "${L2_NOCLEAR:-}" ]; then clear 2>/dev/null || true; fi
+    printf '\n'
+    ui_logo "L2  ·  tiny Linux builder" \
+        "v$APP_VERSION   musl · rcl2 · l2pm · limine" \
+        "host    $DISTRO · $(uname -m) · -j$JOBS" \
+        "kernel  $kv   ·   ISO gate ${L2_ISO_LIMIT_MB} MiB" \
+        "" "$(paint $C_DIM 'arrows move   enter selects   ctrl-c quits')"
+    printf '\n'
+}
+
+art_row() {  # label file
+    if [ -f "$2" ]; then printf '%s,built,%s,\n' "$1" "$(ui_size "$(stat -c%s "$2")")"
+    else printf '%s,missing,-,l2 build %s\n' "$1" "$1"; fi
+}
+
+dashboard() {
+    {
+        printf 'COMPONENT,STATE,SIZE,NEXT\n'
+        art_row musl "$SYSROOT/lib/libc.a"
+        art_row kernel "$OUT/vmlinuz-l2"
+        art_row busybox "$OUT/busybox"
+        art_row dash "$OUT/dash"
+        art_row rcl2 "$OUT/rcl2"
+        art_row l2pm "$OUT/l2pm"
+        art_row l2wifi "$OUT/l2wifi"
+        art_row wpa "$OUT/wpa_supplicant"
+        art_row openssl "$OUT/openssl"
+        art_row limine "$OUT/limine/bin/limine"
+        art_row initramfs "$OUT/initramfs-l2"
+        art_row iso "$OUT/l2.iso"
+        if [ -d "$BUILD/firmware" ]; then printf 'firmware,built,%s KiB,\n' "$(du -sk "$BUILD/firmware" | awk '{print $1}')"
+        else printf 'firmware,missing,-,l2 build firmware\n'; fi
+    } | ui_table
+    if [ -f "$OUT/l2.iso" ]; then
+        local s lim; s=$(stat -c%s "$OUT/l2.iso"); lim=$((L2_ISO_LIMIT_MB * 1024 * 1024))
+        printf '\n  %s ' "$(paint $C_DIM 'ISO budget')"; ui_bar "$s" "$lim" 30
+        printf '  %s / %s MiB\n' "$(ui_size "$s")" "$L2_ISO_LIMIT_MB"
+    fi
+    if [ -s "$KLOCAL" ]; then printf '  %s\n' "$(paint $C_DIM "kernel overrides active: $(grep -c '^CONFIG' "$KLOCAL") (l2 kernel show)")"; fi
+    printf '\n'
+}
+
+# --------------------------------------------------------------- tests
+ramtest() {
+    have python3 || die "python3 is required for the RAM test"
+    [ -f "$OUT/vmlinuz-l2" ] && [ -f "$OUT/initramfs-l2" ] || die "build the kernel and initramfs first"
+    # Prefer the real ISO for the sweep: QEMU's -kernel/-initrd path keeps the
+    # initrd in fw_cfg memory and reads ~1 MiB high.
+    local isoargs=()
+    [ -f "$OUT/l2.iso" ] && isoargs=(--iso "$OUT/l2.iso")
+    python3 "$L2_ROOT/tools/ramtest.py" --kernel "$OUT/vmlinuz-l2" --initrd "$OUT/initramfs-l2" \
+        --cmdline "$(cmdline_base)" "${isoargs[@]}" "$@"
+}
+
+bootiso() {
+    have python3 || die "python3 is required"
+    local iso=${1:-$OUT/l2.iso}; shift || true
+    [ -f "$iso" ] || die "$iso not found; run: l2 iso"
+    python3 "$L2_ROOT/tools/ramtest.py" --iso "$iso" "$@"
+}
+
+test_menu() {
+    local c
+    c=$(ui_menu "Tests (QEMU)" \
+        "ram|RAM sweep: idle memory at 256M 1G 4G 16G of RAM" \
+        "bios|Boot the ISO under BIOS and check the shell" \
+        "uefi|Boot the ISO under UEFI (needs OVMF)" \
+        "back|Back") || return 0
+    case "$c" in
+        ram) ramtest ;;
+        bios) bootiso "$OUT/l2.iso" ;;
+        uefi) bootiso "$OUT/l2.iso" --uefi ;;
+    esac
+}
+
+# --------------------------------------------------------------- doctor
+doctor() {
+    init_epoch; detect_distro
+    ui_header
+    ui_kv distro "$DISTRO"; ui_kv arch "$(uname -m)"; ui_kv "host kernel" "$(uname -r)"
+    ui_kv gum "$(have gum && gum --version | head -1 || echo missing)"; ui_kv jobs "$JOBS"
+    printf '\n'
+    deps_check || true
+    printf '\n'; dashboard
+    if [ -s "$LOGS/kernel-dropped.txt" ]; then
+        warn "kernel symbols dropped by olddefconfig (hardware support may be missing):"
+        sed 's/^/    /' "$LOGS/kernel-dropped.txt" >&2
+    fi
+    if [ -f "$OUT/kernel.config" ]; then
+        local sym miss=0
+        for sym in BLK_DEV_NVME SATA_AHCI USB_XHCI_HCD USB_HID KEYBOARD_ATKBD SERIO_I8042 FB_EFI EXT4_FS \
+                   BLK_DEV_SR ACPI SUSPEND CFG80211 MAC80211; do
+            if ! grep -Eq "^CONFIG_$sym=(y|m)" "$OUT/kernel.config"; then warn "CONFIG_$sym is not enabled in the built kernel"; miss=1; fi
+        done
+        if [ "$miss" = 0 ]; then ok "real-hardware essentials present (NVMe, AHCI, USB, HID, PS/2, EFI fb, ACPI poweroff, wifi core)"; fi
+    fi
+    if [ -x "$OUT/l2pm" ]; then printf '\n'; L2PM_ROOT="$BUILD/pmroot" "$OUT/l2pm" selftest 2>&1 | sed 's/^/  /'; fi
+}
+
+install_shared() {
+    [ -x "$L2_ROOT/l2install" ] || die "l2install missing"
+    "$L2_ROOT/l2install" shared
+}
+
+# --------------------------------------------------------------- menu
+menu() {
+    if [ "$USE_GUM" = 0 ] && [ -t 1 ] && [ -t 0 ] && [ -z "${L2_PLAIN:-}" ] && ! have gum; then
+        install_gum || true
+        if have gum; then USE_GUM=1; fi
+    fi
+    local c
+    while :; do
+        ui_header; dashboard
+        c=$(ui_menu "What now?" \
+            "all|Build everything and make the ISOs" \
+            "pick|Choose components to build" \
+            "kernel|Kernel settings (wifi families, features, CPUs)" \
+            "iso|Rebuild the ISOs only" \
+            "desktop|Build desktop ISO (l2wm, xterm, keyboard and mouse)" \
+            "test|Test in QEMU (RAM sweep, BIOS/UEFI boot)" \
+            "install|Install L2 to disk or a disk image" \
+            "pm|Package manager (l2pm)" \
+            "deps|Install build dependencies for this distro" \
+            "update|Update the source lock" \
+            "doctor|System doctor" \
+            "shared|Install l2pm / l2fetch / l2install on this machine" \
+            "quit|Quit") || return 0
+        case "$c" in
+            all)     ui_confirm "Download sources and build everything (compiles a kernel)?" && build_all ;;
+            pick)    build_components ;;
+            kernel)  kernel_menu ;;
+            iso)     build_iso ;;
+            desktop) build_desktop ;;
+            test)    test_menu ;;
+            install) "$L2_ROOT/l2install" menu ;;
+            pm)      pm_menu ;;
+            deps)    deps_install ;;
+            update)  ui_confirm "Download latest sources and update $LOCK?" && update_sources ;;
+            doctor)  doctor ;;
+            shared)  install_shared ;;
+            quit|"") return 0 ;;
+        esac
+        printf '\n'; ui_confirm "Back to the menu?" || return 0
+    done
+}
+
+# --------------------------------------------------------------- help
+usage() {
+    cat <<USAGE
+l2 $APP_VERSION - tiny Linux for tools (gum TUI + reproducible builder)
+
+Optional X11 WM: L2_WITH_L2WM=1 ./l2 build all (builds static X11 dependencies)
+Standalone component: ./l2 build l2wm
+Bootable X11 desktop with xterm: ./l2 build desktop (build/out/l2-desktop.iso)
+
+usage:
+  l2                          interactive menu
+  l2 deps [install|check]     distro dependency installer / checker
+  l2 build [all|COMP...]      components: musl headers kernel busybox dash
+                              rcl2 l2pm l2wifi libnl wpa openssl firmware wifipack limine
+                              l2gpt e2fsprogs dosfstools installpack rootfs initramfs iso
+  l2 kernel [menu|set CONFIG_X=v ...|show|reset]
+                              kernel settings (config/kernel.local)
+  l2 iso [out.iso]            core ISO (<${L2_ISO_LIMIT_MB} MiB) and, if a wifi pack exists, l2-wifi.iso
+  l2 ram [--sizes 256M,1G,16G] [--budget KiB]   idle-RAM sweep under QEMU
+  l2 bootiso [file.iso] [--uefi]                boot the ISO under QEMU and check the shell
+  l2 update                   lock latest kernel/musl/dash/limine
+  l2 pm ARGS...               run l2pm
+  l2 fetch                    run l2fetch
+  l2 shared                   install l2pm/l2fetch/l2install/l2wifi tools here
+  l2 install ARGS...          run l2install (disk|image|iso|shared|dir|menu)
+  l2 doctor                   tools, artifacts, kernel sanity, l2pm RAM
+  l2 clean                    remove build/ (asks first)
+  l2 version
+
+environment:
+  JOBS=8  L2_LOAD=6           parallelism per program (-j8 -l6)
+  KERNEL_VERSION / MUSL_VERSION   override the lock
+  L2_ISO_LIMIT_MB=10          core ISO size gate        L2_WIFI_ISO_LIMIT_MB=96
+  L2_WIFI_FAMILIES="mt7921 iwlwifi ..."   firmware families (config/wifi-firmware.list)
+  L2_FIRMWARE_SRC=/lib/firmware           reuse an existing firmware tree
+  L2_SSL=core|wifi|off        where the openssl pack goes (never in RAM)   L2_SSL_EMBED=1  put it in the initramfs
+  L2_SSL_CA=1|file.pem        ship a CA bundle    L2_OPENSSL_ASM=1  asm (faster, bigger)   OPENSSL_VERSION=x.y.z
+  L2_PLAIN=1  L2_ASCII=1  NO_COLOR=1      UI fallbacks
+  L2_BUILD_DIR=...  SOURCE_DATE_EPOCH=...  HOST_CC=cc
+  L2_DESKTOP_RUNTIME=...      prepared Xorg/xterm rootfs overlay (default: cached Nix runtime)
+  L2_DESKTOP_ISO_LIMIT_MB=128 desktop image size budget
+USAGE
+}
+
+clean() {
+    ui_confirm "Remove $BUILD (sources, binaries, ISOs)?" || return 0
+    rm -rf "$BUILD"; ok "removed $BUILD"
+}
+
+# --------------------------------------------------------------- main
+main() {
+    init_epoch
+    mkdir -p "$SRC" "$OUT" "$LOGS" "$CACHE" "$BUILD/bin"
+    detect_distro
+    trap 'job_kill; exit 130' INT TERM
+    trap 'job_kill' EXIT
+
+    local action=${1:-menu}
+    [ $# -gt 0 ] && shift || true
+    case "$action" in
+        menu)        menu ;;
+        deps)
+            case "${1:-check}" in
+                install|inst|i) deps_install ;;
+                check|status)   deps_check ;;
+                *) die "usage: l2 deps [install|check]" ;;
+            esac ;;
+        build)
+            if [ "${1:-all}" = all ]; then build_all
+            else local c; for c in "$@"; do build_one "$c"; done; fi ;;
+        kernel)      kernel_cmd "$@" ;;
+        iso)         build_iso "${1:-}" ;;
+        ram)         ramtest "$@" ;;
+        bootiso)     bootiso "$@" ;;
+        update)      update_sources ;;
+        pm)          pm "$@" ;;
+        fetch)       "$L2_ROOT/l2fetch" "$@" ;;
+        shared)      install_shared ;;
+        install)     exec "$L2_ROOT/l2install" "$@" ;;
+        doctor)      doctor ;;
+        clean)       clean ;;
+        version|--version|-V) echo "l2 $APP_VERSION" ;;
+        -h|--help|help) usage ;;
+        *) die "unknown command '$action' (try: l2 --help)" ;;
+    esac
+}
+
+main "$@"

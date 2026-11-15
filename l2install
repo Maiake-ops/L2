@@ -1,0 +1,561 @@
+#!/bin/sh
+# l2install - install L2 to a disk or disk image, or install the L2 tools.
+#
+#   l2install                       menu (pick a disk, review, confirm)
+#   l2install list                  show candidate disks
+#   l2install disk [/dev/sdX]       install (picker if no device given)
+#   l2install image out.img [SIZE]  build a bootable disk image (default 512M; needs root + loop)
+#   l2install iso [out.iso]         build the live ISO via ./l2
+#   l2install dir /mnt/target       copy only the rootfs (no bootloader)
+#   l2install shared                l2pm, l2fetch, l2install, l2wifi -> $PREFIX
+#
+# options (before the command):
+#   -y, --yes            no questions (still refuses mounted disks)
+#   -n, --dry-run        print every command, change nothing
+#   --firmware bios|uefi|auto      which firmware to target for the log/summary (both are installed)
+#   --hostname NAME      default L2
+#   --efi-size MiB       ESP size (default 128)
+#   --no-wifi            leave the wifi pack (modules, firmware, wpa_supplicant) out
+#   --no-ssl             leave the openssl pack out
+#   --efi-entry          also add a UEFI boot entry with efibootmgr
+#   --no-verify          skip the post-install checks
+#
+# POSIX sh.  `shared` works everywhere; `disk`/`image` need sgdisk, mkfs.fat,
+# mkfs.ext4, blkid, mount (a normal Linux host or live system) and are x86_64.
+# Inside the booted L2 live system the tools come from the l2/install pack on
+# the boot medium and the payloads from the medium itself (see setup_live).
+
+set -eu
+
+APP_VERSION="0.2.0"
+SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+: "${L2_SRC:=$SELF_DIR}"
+PREFIX=${PREFIX:-/usr/local}
+MNT=${MNT:-/mnt/l2}
+FIRMWARE=${L2INSTALL_FIRMWARE:-auto}
+YES=${L2INSTALL_YES:-0}
+DRY=0
+HOSTNAME_NEW=L2
+ESP_MB=128
+WITH_WIFI=1
+WITH_SSL=1
+EFI_ENTRY=0
+VERIFY=1
+LOG=${TMPDIR:-/tmp}/l2install.$$.log
+LOOPDEV=""
+
+# ---- shared UI; falls back to a minimal built-in one when the lib is absent
+for _l in "${L2_LIB:-}" "$SELF_DIR/lib/l2ui.sh" "$PREFIX/share/l2/l2ui.sh" /l2/lib/l2ui.sh /usr/share/l2/l2ui.sh; do
+    if [ -n "$_l" ] && [ -r "$_l" ]; then . "$_l"; _uilib=1; break; fi
+done
+if [ -z "${_uilib:-}" ]; then
+    USE_GUM=0; UI_COLOR=0
+    say()  { printf '  * %s\n' "$*" >&2; }
+    ok()   { printf '  + %s\n' "$*" >&2; }
+    note() { printf '    %s\n' "$*" >&2; }
+    warn() { printf '  ! %s\n' "$*" >&2; }
+    step() { printf '\n> %s\n' "$*" >&2; }
+    die()  { printf '  x %s\n' "$*" >&2; exit 1; }
+    ui_header_min() { printf '\n=== L2 installer ===\n'; }
+    ui_logo() { printf '  L2  %s\n' "$1"; }
+    ui_panel() { for _x in "$@"; do printf '  | %s\n' "$_x"; done; }
+    ui_kv() { printf '  %-12s %s\n' "$1" "$2"; }
+    ui_menu() { _h=$1; shift; _i=1; printf '\n  %s\n' "$_h" >&2
+        for _e in "$@"; do printf '   %2d %s\n' "$_i" "${_e#*|}" >&2; _i=$((_i+1)); done
+        printf '  > ' >&2; read -r _n || return 1; _i=1
+        for _e in "$@"; do [ "$_i" = "$_n" ] && { printf '%s\n' "${_e%%|*}"; return 0; }; _i=$((_i+1)); done; return 1; }
+    ui_confirm() { [ "$YES" = 1 ] && return 0; printf '  ? %s [y/N] ' "$1" >&2; read -r _a; case "$_a" in y|Y|yes) return 0;; *) return 1;; esac; }
+    ui_confirm_danger() { ui_confirm "$1"; }
+    ui_input() { printf '  ? %s%s: ' "$1" "${3:+ [$3]}" >&2; read -r _v; printf '%s\n' "${_v:-${3:-}}"; }
+    ui_table() { cat; }
+    ui_size() { printf '%s B' "$1"; }
+    ui_secs() { printf '%ss' "$1"; }
+    job_begin() { printf '  - %s ...\n' "$1" >&2; }
+    job_end() { :; }
+    job_kill() { :; }
+    ui_logtail() { tail -n "${2:-30}" "$1" >&2; }
+fi
+have() { command -v "$1" >/dev/null 2>&1; }
+need() { have "$1" || die "missing '$1' (run: $L2_SRC/l2 deps install)"; }
+
+as_root() {
+    if [ "$(id -u)" -eq 0 ]; then "$@"
+    elif have sudo; then sudo "$@"
+    else die "need root (or sudo) for: $*"; fi
+}
+
+# run a command, hide its output in the log, show the log tail on failure
+run() {
+    if [ "$DRY" = 1 ]; then printf '    + %s\n' "$*" >&2; return 0; fi
+    printf '+ %s\n' "$*" >> "$LOG"
+    if ! "$@" >> "$LOG" 2>&1; then
+        ui_logtail "$LOG" 25
+        die "command failed: $* (full log: $LOG)"
+    fi
+}
+
+STEP_N=0; STEP_T=0
+stage() { STEP_N=$((STEP_N + 1)); step "[$STEP_N/$STEP_T] $*"; }
+
+# ------------------------------------------------------------- payloads
+# Normally these point into the build tree next to this script.  When running
+# inside the booted live system there is no build tree; setup_live() below
+# mounts the boot medium and redirects them at it (L2_*_DIR overrides).
+rootfs_dir() { printf '%s' "${L2_ROOTFS_DIR:-$L2_SRC/build/rootfs}"; }
+out_dir()    { printf '%s' "${L2_OUT_DIR:-$L2_SRC/build/out}"; }
+wifi_dir()   { printf '%s' "${L2_WIFI_DIR:-$L2_SRC/build/wifi}"; }
+ssl_dir()    { printf '%s' "${L2_SSL_DIR:-$L2_SRC/build/ssl}"; }
+hw_dir()     { printf '%s' "${L2_HW_DIR:-$L2_SRC/build/hw}"; }
+config_dir() { printf '%s' "${L2_CONFIG_DIR:-$L2_SRC/config}"; }
+
+# ------------------------------------------------------- live system support
+# `l2install disk` from inside the booted L2 live image: the install tools
+# (sgdisk, mkfs.ext4, mkfs.fat, limine) ride on the medium in l2/install and
+# the payloads are the medium's boot files plus the initramfs (which IS the
+# rootfs).  Nothing here triggers on a normal host with a build tree.
+LIVE=0
+MEDIUM=${L2_MEDIA:-/media/l2}
+PAYLOAD=""
+
+find_medium() {
+    [ -f "$MEDIUM/l2/L2-LIVE" ] && return 0
+    mkdir -p "$MEDIUM" 2>/dev/null || true
+    for _d in ${L2_PACK_DEV:-} /dev/sr0 /dev/sr1 /dev/sd[a-z] /dev/sd[a-z][0-9] \
+              /dev/vd[a-z] /dev/vd[a-z][0-9] /dev/nvme[0-9]n[0-9] /dev/nvme[0-9]n[0-9]p[0-9]; do
+        [ -b "$_d" ] || continue
+        mount -t iso9660 -o ro "$_d" "$MEDIUM" 2>/dev/null || continue
+        [ -f "$MEDIUM/l2/L2-LIVE" ] && return 0
+        umount "$MEDIUM" 2>/dev/null
+    done
+    return 1
+}
+
+setup_live() {
+    # host with a build tree: keep using it, unchanged
+    [ -d "$(rootfs_dir)/bin" ] && [ -f "$(out_dir)/vmlinuz-l2" ] && return 0
+    find_medium || return 1
+    LIVE=1
+    _pack=$MEDIUM/l2/install
+    [ -x "$_pack/bin/sgdisk" ] || die "live medium has no install tools pack (rebuild: l2 build installpack && l2 iso)"
+    PATH="$_pack/bin:$PATH"; export PATH
+    # stage a build/out-shaped tree of symlinks into the medium + pack
+    PAYLOAD=$(mktemp -d "${TMPDIR:-/tmp}/l2install.XXXXXX")
+    mkdir -p "$PAYLOAD/out/limine/bin" "$PAYLOAD/out/limine/share/limine" "$PAYLOAD/rootfs"
+    ln -s "$MEDIUM/boot/vmlinuz" "$PAYLOAD/out/vmlinuz-l2"
+    ln -s "$MEDIUM/boot/initramfs" "$PAYLOAD/out/initramfs-l2"
+    ln -s "$_pack/bin/limine" "$PAYLOAD/out/limine/bin/limine"
+    ln -s "$MEDIUM/boot/limine/limine-bios.sys" "$PAYLOAD/out/limine/share/limine/limine-bios.sys"
+    ln -s "$MEDIUM/EFI/BOOT/BOOTX64.EFI" "$PAYLOAD/out/limine/share/limine/BOOTX64.EFI"
+    # pristine rootfs: the initramfs is the rootfs, extract it (cpio applet)
+    gzip -dc "$MEDIUM/boot/initramfs" | (cd "$PAYLOAD/rootfs" && cpio -idm --quiet) \
+        || die "cannot extract the rootfs from the medium's initramfs"
+    L2_ROOTFS_DIR=$PAYLOAD/rootfs
+    L2_OUT_DIR=$PAYLOAD/out
+    L2_CONFIG_DIR=$_pack/etc
+    [ -d "$MEDIUM/l2/wifi" ] && L2_WIFI_DIR=$MEDIUM/l2/wifi
+    [ -d "$MEDIUM/l2/ssl" ] && L2_SSL_DIR=$MEDIUM/l2/ssl
+    [ -d "$MEDIUM/l2/hw" ] && L2_HW_DIR=$MEDIUM/l2/hw
+    export L2_ROOTFS_DIR L2_OUT_DIR L2_CONFIG_DIR L2_WIFI_DIR L2_SSL_DIR L2_HW_DIR
+    ok "live system: using install tools and payloads from the boot medium ($MEDIUM)"
+}
+
+ensure_payload() {
+    _rf=$(rootfs_dir); _out=$(out_dir)
+    if [ -f "$_out/vmlinuz-l2" ] && [ -f "$_out/initramfs-l2" ] && [ -d "$_rf/bin" ] && [ -x "$_out/limine/bin/limine" ]; then
+        return 0
+    fi
+    [ -x "$L2_SRC/l2" ] || die "no L2 payloads in $L2_SRC/build and no l2 script (build on a host: ./l2 build all)"
+    say "build outputs are missing; running: l2 build all"
+    "$L2_SRC/l2" build all
+    [ -f "$_out/vmlinuz-l2" ] || die "kernel was not built"
+}
+
+# --------------------------------------------------------------- disks
+size_of() {  # device -> bytes
+    if have blockdev; then blockdev --getsize64 "$1" 2>/dev/null && return 0; fi
+    if [ -r "/sys/class/block/${1##*/}/size" ]; then
+        _s=$(cat "/sys/class/block/${1##*/}/size"); echo $((_s * 512)); return 0
+    fi
+    echo 0
+}
+
+disk_busy() {  # any partition (or the disk) mounted?
+    grep -q "^$1" /proc/mounts 2>/dev/null
+}
+
+# one line per candidate disk:  /dev/sda|238.5G|usb|removable|Model
+list_disks() {
+    if have lsblk; then
+        lsblk -dnpr -e 1,7,11 -o NAME,SIZE,TRAN,RM,MODEL 2>/dev/null | while read -r n s t r m; do
+            [ "$r" = 1 ] && r=removable || r=fixed
+            printf '%s|%s|%s|%s|%s\n' "$n" "$s" "${t:--}" "$r" "$(printf '%s' "$m" | tr '\\x20' ' ')"
+        done
+    else
+        for d in /sys/block/*; do
+            n=${d##*/}
+            case "$n" in loop*|ram*|zram*|sr*|fd*|dm-*) continue ;; esac
+            printf '/dev/%s|%s MiB|-|-|\n' "$n" $(( $(cat "$d/size") / 2048 ))
+        done
+    fi
+}
+
+cmd_list() {
+    printf 'DISK,SIZE,BUS,KIND\n' > "$LOG.tab"
+    list_disks | while IFS='|' read -r n s t r m; do
+        busy=""; disk_busy "$n" && busy=" (in use)"
+        printf '%s,%s,%s,%s%s %s\n' "$n" "$s" "$t" "$r" "$busy" "$m"
+    done >> "$LOG.tab"
+    ui_table < "$LOG.tab"; rm -f "$LOG.tab"
+}
+
+pick_disk() {
+    _items=""; _nl='
+'
+    _opts=$(list_disks)
+    [ -n "$_opts" ] || die "no disks found"
+    _list=""
+    while IFS='|' read -r n s t r m; do
+        _tag=""
+        disk_busy "$n" && _tag="  [IN USE - mounted]"
+        _list="$_list$n|$n   $s   $t   $r   $m$_tag$_nl"
+    done <<EOF
+$_opts
+EOF
+    # shellcheck disable=SC2086
+    IFS=$_nl; set -- $_list; unset IFS
+    ui_menu "Install L2 to which disk? (everything on it will be erased)" "$@" cancel\|Cancel
+}
+
+part_name() {
+    case "$1" in
+        *[0-9]) printf '%sp%s' "$1" "$2" ;;
+        *)      printf '%s%s' "$1" "$2" ;;
+    esac
+}
+
+cleanup() {
+    set +e
+    job_kill 2>/dev/null
+    mountpoint -q "$MNT/boot/efi" 2>/dev/null && umount "$MNT/boot/efi" 2>/dev/null
+    mountpoint -q "$MNT" 2>/dev/null && umount "$MNT" 2>/dev/null
+    [ -n "$LOOPDEV" ] && losetup -d "$LOOPDEV" 2>/dev/null
+    [ -n "$PAYLOAD" ] && rm -rf "$PAYLOAD" 2>/dev/null
+    return 0
+}
+
+# PARTUUID of partition $2 on disk $1.  util-linux blkid answers directly;
+# busybox blkid (live system) has no GPT support and prints filesystem tags
+# instead, so validate the shape and fall back to sgdisk's partition info.
+partuuid_of() {
+    _pu=$(blkid -s PARTUUID -o value "$(part_name "$1" "$2")" 2>/dev/null || true)
+    case "$_pu" in
+        ????????-????-????-????-????????????) ;;
+        *) _pu=$(sgdisk -i "$2" "$1" 2>/dev/null | sed -n 's/^Partition unique GUID: //p') ;;
+    esac
+    printf '%s' "$_pu" | tr 'A-Z' 'a-z'
+}
+
+preflight() {  # device
+    _dev=$1
+    [ "$(uname -m)" = x86_64 ] || die "disk install needs x86_64 (rcl2 and the L2 kernel are x86_64)"
+    [ "$DRY" = 1 ] || [ "$(id -u)" -eq 0 ] || die "run as root: sudo $0 disk $_dev"
+    for _t in sgdisk mkfs.ext4 mkfs.fat blkid mount umount; do
+        have "$_t" || { [ "$DRY" = 1 ] && warn "missing $_t (dry run continues)" || die "missing '$_t' (install gptfdisk, e2fsprogs, dosfstools, util-linux)"; }
+    done
+    [ -b "$_dev" ] || [ "$DRY" = 1 ] || die "$_dev is not a block device"
+    if [ "$DRY" != 1 ] && disk_busy "$_dev"; then
+        die "$_dev (or one of its partitions) is mounted; unmount it first. Refusing to continue."
+    fi
+    _sz=$(size_of "$_dev")
+    [ "$DRY" = 1 ] || [ "$_sz" -ge $(( (ESP_MB + 64) * 1048576 )) ] || die "$_dev is too small ($(ui_size "$_sz")); need at least $((ESP_MB + 64)) MiB"
+    if [ "$FIRMWARE" = auto ]; then
+        if [ -d /sys/firmware/efi ]; then FIRMWARE=uefi; else FIRMWARE=bios; fi
+    fi
+    ok "preflight: x86_64, $FIRMWARE host firmware, $_dev $(ui_size "${_sz:-0}")"
+}
+
+review_and_confirm() {
+    _dev=$1
+    ui_panel "L2 installer $APP_VERSION" \
+        "target    $_dev  ($(ui_size "$(size_of "$_dev")"))" \
+        "layout    GPT: 1 MiB BIOS boot + ${ESP_MB} MiB ESP (FAT32) + ext4 root (rest)" \
+        "boot      Limine, BIOS and UEFI (removable path EFI/BOOT/BOOTX64.EFI)" \
+        "hostname  $HOSTNAME_NEW" \
+        "wifi      $([ "$WITH_WIFI" = 1 ] && echo 'modules + firmware + wpa_supplicant included' || echo 'not included')" \
+        "kernel    root mounted directly by the kernel (no initramfs in RAM)"
+    [ "$YES" = 1 ] && return 0
+    ui_confirm_danger "Erase $_dev and install L2?" || die "aborted"
+    if [ "$USE_GUM" = 1 ]; then _t=$(gum input --header "Type the device name to confirm" --placeholder "$_dev")
+    else printf '  Type %s to confirm: ' "$_dev"; read -r _t; fi
+    [ "$_t" = "$_dev" ] || die "confirmation did not match; aborted"
+}
+
+copy_payload_to() {
+    _dest=$1; _rf=$(rootfs_dir); _out=$(out_dir)
+    [ -d "$_rf/bin" ] || die "rootfs missing in $_rf; run: $L2_SRC/l2 build all"
+    [ -f "$_out/vmlinuz-l2" ] || die "kernel missing in $_out"
+    run mkdir -p "$_dest"
+    run cp -a "$_rf/." "$_dest/"
+    if [ "$WITH_WIFI" = 1 ] && [ -d "$(wifi_dir)" ]; then
+        run cp -a "$(wifi_dir)/." "$_dest/"
+    elif [ -d "$(hw_dir)" ]; then
+        # on-demand hardware drivers (the wifi pack already supersedes these);
+        # also the fallback when no wifi pack is available (e.g. the core ISO)
+        run cp -a "$(hw_dir)/." "$_dest/"
+    elif [ "$WITH_WIFI" = 1 ]; then
+        warn "no wifi pack in $(wifi_dir) (l2 build wifipack); installing without wifi"
+    fi
+    if [ "$WITH_SSL" = 1 ] && [ -d "$(ssl_dir)" ]; then run cp -a "$(ssl_dir)/." "$_dest/"; fi
+    run mkdir -p "$_dest/boot" "$_dest/etc/l2" "$_dest/dev" "$_dest/run" "$_dest/tmp" "$_dest/proc" "$_dest/sys"
+    run install -m 0644 "$_out/vmlinuz-l2" "$_dest/boot/vmlinuz"
+    run install -m 0644 "$_out/initramfs-l2" "$_dest/boot/initramfs"
+    # device nodes the kernel needs before rcl2 mounts devtmpfs
+    if [ "$DRY" != 1 ] && [ "$(id -u)" -eq 0 ]; then
+        [ -e "$_dest/dev/console" ] || mknod -m 600 "$_dest/dev/console" c 5 1
+        [ -e "$_dest/dev/null" ] || mknod -m 666 "$_dest/dev/null" c 1 3
+        chown -R 0:0 "$_dest"
+        chmod 1777 "$_dest/tmp"
+        # chown clears setuid bits; passwd and su need this on desktop installs.
+        [ ! -f "$_dest/etc/l2/desktop-runtime.sh" ] || chmod 4755 "$_dest/bin/busybox"
+    fi
+    # Copy these after rootfs ownership normalization to retain home owners.
+    if [ "$LIVE" = 1 ] && [ -s /etc/l2/desktop-user ]; then
+        for _account_file in passwd shadow group gshadow; do
+            [ ! -f "/etc/$_account_file" ] || run cp -a "/etc/$_account_file" "$_dest/etc/"
+        done
+        run install -m 0600 /etc/l2/desktop-user "$_dest/etc/l2/desktop-user"
+        run cp -a /home/. "$_dest/home/"
+    fi
+    if [ "$DRY" != 1 ]; then
+        : > "$_dest/etc/l2/installed"
+        printf 'L2 %s\n' "$APP_VERSION" > "$_dest/etc/l2/version"
+        printf '%s\n' "$HOSTNAME_NEW" > "$_dest/etc/hostname"
+        sed -i "s/^hostname .*/hostname $HOSTNAME_NEW/" "$_dest/etc/rcl2.conf" 2>/dev/null || true
+        # carry saved wifi networks over from the running system
+        if [ "$WITH_WIFI" = 1 ] && [ -s /etc/l2/wpa_supplicant.conf ]; then
+            install -m 0600 /etc/l2/wpa_supplicant.conf "$_dest/etc/l2/wpa_supplicant.conf"
+            ok "copied saved wifi networks"
+        fi
+    fi
+}
+
+verify_install() {  # root mount, esp mount, esp dev, root dev
+    _fail=0
+    for _f in "$MNT/init" "$MNT/sbin/rcl2" "$MNT/etc/l2/installed" "$MNT/bin/dash" "$MNT/dev/console" \
+              "$MNT/boot/efi/boot/vmlinuz" "$MNT/boot/efi/boot/limine/limine.conf" \
+              "$MNT/boot/efi/boot/limine/limine-bios.sys" "$MNT/boot/efi/EFI/BOOT/BOOTX64.EFI"; do
+        [ -e "$_f" ] || { warn "missing after install: ${_f#"$MNT"}"; _fail=1; }
+    done
+    if have sha256sum; then
+        _a=$(sha256sum < "$(out_dir)/vmlinuz-l2"); _b=$(sha256sum < "$MNT/boot/efi/boot/vmlinuz")
+        [ "$_a" = "$_b" ] || { warn "kernel on the ESP differs from the build"; _fail=1; }
+    fi
+    grep -q "root=PARTUUID=$3" "$MNT/boot/efi/boot/limine/limine.conf" || { warn "limine.conf has the wrong root PARTUUID"; _fail=1; }
+    [ "$_fail" = 0 ] && ok "verified: kernel, bootloader, root and config are in place"
+    return "$_fail"
+}
+
+install_disk() {
+    _dev=${1:-}
+    [ -n "$_dev" ] || { _dev=$(pick_disk) || die "no disk selected"; [ "$_dev" = cancel ] && die "cancelled"; }
+    STEP_T=7; [ "$VERIFY" = 1 ] && STEP_T=8
+    setup_live || true
+    preflight "$_dev"
+    review_and_confirm "$_dev"
+    ensure_payload
+    _out=$(out_dir); _lim="$_out/limine/bin/limine"; _ls="$_out/limine/share/limine"
+    [ "$DRY" = 1 ] || [ -x "$_lim" ] || die "limine missing; run: $L2_SRC/l2 build limine"
+    : > "$LOG"; trap cleanup EXIT INT TERM
+
+    stage "unmount and partition $_dev"
+    run sgdisk --zap-all "$_dev"
+    run sgdisk -n 1:2048:+1M -t 1:ef02 -c 1:L2-BIOS "$_dev"
+    run sgdisk -n "2:0:+${ESP_MB}M" -t 2:ef00 -c 2:L2-ESP "$_dev"
+    run sgdisk -n 3:0:0 -t 3:8300 -c 3:L2-root "$_dev"
+    if [ "$DRY" != 1 ]; then
+        partprobe "$_dev" 2>/dev/null || true
+        have udevadm && udevadm settle 2>/dev/null || true
+        _n=0; while [ ! -b "$(part_name "$_dev" 3)" ] && [ "$_n" -lt 20 ]; do sleep 0.5 2>/dev/null || sleep 1; _n=$((_n+1)); done
+    fi
+    _esp=$(part_name "$_dev" 2); _root=$(part_name "$_dev" 3)
+
+    stage "create filesystems"
+    run mkfs.fat -F32 -n L2ESP "$_esp"
+    # Tiny root: no journal, no reserved blocks, few inodes -> minimal overhead
+    # so the whole installed system stays within the 10 MiB storage budget.
+    run mkfs.ext4 -q -F -O ^has_journal -m 0 -N 8192 -L L2 "$_root"
+
+    stage "mount"
+    run mkdir -p "$MNT"
+    run mount "$_root" "$MNT"
+    run mkdir -p "$MNT/boot/efi"
+    run mount "$_esp" "$MNT/boot/efi"
+
+    stage "copy system ($(if [ "$WITH_WIFI" = 1 ]; then echo 'with wifi pack'; else echo 'no wifi'; fi))"
+    copy_payload_to "$MNT"
+    # The kernel/initramfs live on the ESP (that is what Limine boots); do not
+    # also keep a copy under the root's /boot, to save storage.
+    if [ "$DRY" != 1 ]; then rm -f "$MNT/boot/vmlinuz" "$MNT/boot/initramfs"; fi
+
+    stage "fstab and boot configuration"
+    if [ "$DRY" != 1 ]; then
+        _pu=$(partuuid_of "$_dev" 3); [ -n "$_pu" ] || die "cannot read PARTUUID of $_root"
+        _epu=$(partuuid_of "$_dev" 2)
+        { printf '# /etc/fstab - generated by l2install\n'
+          printf 'PARTUUID=%s / ext4 rw,relatime 0 1\n' "$_pu"
+          printf 'PARTUUID=%s /boot/efi vfat umask=0077 0 2\n' "$_epu"; } > "$MNT/etc/fstab"
+        _cmd=$(tr -d '\n' < "$(config_dir)/cmdline" 2>/dev/null || echo loglevel=4)
+        mkdir -p "$MNT/boot/efi/boot/limine" "$MNT/boot/efi/EFI/BOOT"
+        sed -e "s/@ROOT_PARTUUID@/$_pu/g" -e "s|@CMDLINE@|$_cmd|g" "$(config_dir)/limine-installed.conf" \
+            > "$MNT/boot/efi/boot/limine/limine.conf"
+        cp "$MNT/boot/efi/boot/limine/limine.conf" "$MNT/boot/efi/EFI/BOOT/limine.conf"
+        install -m 0644 "$_out/vmlinuz-l2" "$MNT/boot/efi/boot/vmlinuz"
+        install -m 0644 "$_out/initramfs-l2" "$MNT/boot/efi/boot/initramfs"
+        install -m 0644 "$_ls/limine-bios.sys" "$MNT/boot/efi/boot/limine/limine-bios.sys"
+        install -m 0644 "$_ls/BOOTX64.EFI" "$MNT/boot/efi/EFI/BOOT/BOOTX64.EFI"
+        install -m 0755 "$_lim" "$MNT/bin/limine"
+    else
+        _pu=DRYRUN-PARTUUID; printf '    + write fstab, limine.conf (root=PARTUUID=...), copy kernel/initramfs/limine to the ESP\n' >&2
+    fi
+
+    stage "install the BIOS boot sector (limine) on $_dev"
+    run "$_lim" bios-install "$_dev" 1
+    if [ "$EFI_ENTRY" = 1 ]; then
+        if have efibootmgr && [ -d /sys/firmware/efi ]; then
+            run efibootmgr -c -d "$_dev" -p 2 -L "L2" -l '\EFI\BOOT\BOOTX64.EFI'
+        else warn "--efi-entry needs efibootmgr and a UEFI-booted host; the removable path still boots"; fi
+    fi
+
+    stage "flush and unmount"
+    if [ "$DRY" != 1 ]; then sync; fi
+
+    if [ "$VERIFY" = 1 ]; then
+        stage "verify"
+        if [ "$DRY" = 1 ]; then note "(skipped in dry run)"; else verify_install "$MNT" "$_esp" "$_pu" || warn "verification found problems; see messages above"; fi
+    fi
+    cleanup; trap - EXIT INT TERM
+    [ "$DRY" = 1 ] || rm -f "$LOG"
+    {
+        printf 'PART,SIZE,FS,ROLE\n'
+        printf '%s,1 MiB,-,BIOS boot (limine stage 2)\n' "$(part_name "$_dev" 1)"
+        printf '%s,%s MiB,FAT32,ESP: kernel + limine + rescue initramfs\n' "$_esp" "$ESP_MB"
+        printf '%s,rest,ext4,L2 root (no initramfs at runtime)\n' "$_root"
+    } | ui_table
+    ok "installed L2 on $_dev. Remove the install medium and reboot."
+    note "Secure Boot must be off (Limine here is unsigned). Boot menu has: L2, recovery shell, RAM-only rescue."
+}
+
+# disk image for QEMU or dd to a stick
+install_image() {
+    _img=${1:-}; _size=${2:-512M}
+    [ -n "$_img" ] || die "usage: l2install image out.img [SIZE]"
+    [ "$DRY" = 1 ] || [ "$(id -u)" -eq 0 ] || die "image needs root for loop devices: sudo $0 image $_img"
+    need truncate
+    if [ "$DRY" = 1 ]; then
+        printf '    + truncate -s %s %s\n    + losetup -fP --show %s\n    (then the normal disk install on the loop device)\n' "$_size" "$_img" "$_img" >&2
+        STEP_T=1; return 0
+    fi
+    run truncate -s "$_size" "$_img"
+    LOOPDEV=$(losetup -fP --show "$_img") || die "losetup failed"
+    say "image $_img -> $LOOPDEV"
+    YES=1; install_disk "$LOOPDEV"
+    ok "boot it with: qemu-system-x86_64 -m 256 -drive file=$_img,format=raw -nographic"
+}
+
+install_iso() {
+    [ -x "$L2_SRC/l2" ] || die "l2 script not found next to l2install"
+    ensure_payload
+    if [ -n "${1:-}" ]; then "$L2_SRC/l2" iso "$1"; else "$L2_SRC/l2" iso; fi
+}
+
+install_dir() {
+    _dest=${1:-}
+    [ -n "$_dest" ] || die "usage: l2install dir /mnt/target"
+    trap 'if [ -n "$PAYLOAD" ]; then rm -rf "$PAYLOAD"; fi' EXIT
+    setup_live || true
+    ensure_payload
+    STEP_T=1
+    copy_payload_to "$_dest"
+    ok "rootfs copied to $_dest"
+    warn "no bootloader installed; use your own loader or run: l2install disk"
+}
+
+install_shared() {
+    _parent=${PREFIX%/*}
+    if [ "$(id -u)" -eq 0 ] || { [ -n "$_parent" ] && [ -w "$_parent" ]; }; then
+        priv() { "$@"; }
+    else
+        priv() { as_root "$@"; }
+    fi
+    say "installing L2 tools into $PREFIX"
+    _out=$(out_dir)
+    if [ ! -x "$_out/l2pm" ] && [ ! -x "$L2_SRC/l2pm/l2pm" ] && [ -x "$L2_SRC/l2" ]; then "$L2_SRC/l2" build l2pm; fi
+    _l2pm=$_out/l2pm; [ -x "$_l2pm" ] || _l2pm=$L2_SRC/l2pm/l2pm
+    [ -x "$_l2pm" ] || die "l2pm binary missing; run: $L2_SRC/l2 build l2pm"
+    priv mkdir -p "$PREFIX/bin" "$PREFIX/share/l2/recipes"
+    priv install -m 0755 "$_l2pm" "$PREFIX/bin/l2pm"
+    priv install -m 0755 "$L2_SRC/l2fetch" "$PREFIX/bin/l2fetch"
+    priv install -m 0755 "$L2_SRC/l2install" "$PREFIX/bin/l2install"
+    [ -r "$L2_SRC/lib/l2ui.sh" ] && priv install -m 0644 "$L2_SRC/lib/l2ui.sh" "$PREFIX/share/l2/l2ui.sh"
+    [ -x "$_out/l2wifi" ] && priv install -m 0755 "$_out/l2wifi" "$PREFIX/bin/l2wifi"
+    for r in "$L2_SRC"/l2pm/recipes/*.recipe; do
+        [ -f "$r" ] && priv install -m 0644 "$r" "$PREFIX/share/l2/recipes/"
+    done
+    ok "done. try: l2fetch ; l2pm --help"
+    [ "$PREFIX/bin" = /usr/local/bin ] || warn "add $PREFIX/bin to PATH"
+}
+
+menu() {
+    ui_logo "L2 installer $APP_VERSION" "tiny x86_64 Linux for tools" "" "" "" ""
+    _c=$(ui_menu "What do you want to do?" \
+        "disk|Install L2 to a disk (erases it)" \
+        "image|Build a bootable disk image (QEMU / dd)" \
+        "list|Show disks" \
+        "iso|Build the live ISO" \
+        "shared|Install l2pm / l2fetch / l2wifi on this machine" \
+        "quit|Quit") || return 0
+    case "$_c" in
+        disk)  install_disk "" ;;
+        image) _f=$(ui_input "Image file" "l2-disk.img" "l2-disk.img"); _s=$(ui_input "Size" "512M" "512M"); install_image "$_f" "$_s" ;;
+        list)  cmd_list ;;
+        iso)   install_iso "" ;;
+        shared) install_shared ;;
+    esac
+}
+
+usage() { sed -n '2,/^# POSIX sh/p' "$0" | sed 's/^# \{0,1\}//' | sed '$d'; }
+
+# ---------------------------------------------------------------- options
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -y|--yes) YES=1 ;;
+        -n|--dry-run) DRY=1 ;;
+        --firmware) FIRMWARE=${2:?}; shift ;;
+        --hostname) HOSTNAME_NEW=${2:?}; shift ;;
+        --efi-size) ESP_MB=${2:?}; shift ;;
+        --no-wifi) WITH_WIFI=0 ;;
+        --no-ssl) WITH_SSL=0 ;;
+        --efi-entry) EFI_ENTRY=1 ;;
+        --no-verify) VERIFY=0 ;;
+        --version) echo "l2install $APP_VERSION"; exit 0 ;;
+        -h|--help) usage; exit 0 ;;
+        *) break ;;
+    esac
+    shift
+done
+case "$HOSTNAME_NEW" in ''|*[!A-Za-z0-9-]*) die "bad hostname: $HOSTNAME_NEW" ;; esac
+case "$ESP_MB" in ''|*[!0-9]*) die "bad --efi-size" ;; esac
+[ "$ESP_MB" -ge 64 ] || die "--efi-size must be at least 64 MiB (FAT32 minimum)"
+
+cmd=${1:-menu}; [ $# -gt 0 ] && shift || true
+case "$cmd" in
+    menu)         menu ;;
+    list)         cmd_list ;;
+    disk)         install_disk "${1:-}" ;;
+    image)        install_image "${1:-}" "${2:-512M}" ;;
+    iso)          install_iso "${1:-}" ;;
+    dir)          install_dir "${1:-}" ;;
+    shared|tools) install_shared ;;
+    help)         usage ;;
+    *) die "unknown command: $cmd (try --help)" ;;
+esac

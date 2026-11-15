@@ -1,0 +1,309 @@
+# L2 kernel fragment.
+#
+# Applied on top of `make tinyconfig` by scripts/kconfig/merge_config.sh.
+# Goals, in this order:
+#   1. boots on real x86_64 laptops/desktops/servers (BIOS and UEFI), from
+#      SATA, NVMe, USB sticks and virtio, with a PS/2, USB or I2C-less keyboard
+#   2. idle RAM that does not grow with installed RAM (see the "memory" block
+#      and config/cmdline), well under 10 MiB at the console
+#   3. wifi without paying for it at idle: cfg80211/mac80211 and every wifi
+#      driver are MODULES, loaded by l2net only when the hardware is present
+#   4. small: the core image stays well under the 10 MiB ISO gate
+#
+# Every symbol is re-validated by `make olddefconfig`: a symbol that changed
+# name in a newer kernel is dropped instead of failing the build.  `l2 doctor`
+# prints the dropped ones so a silent loss of NVMe/HID/wifi is visible.
+
+CONFIG_64BIT=y
+CONFIG_X86_64=y
+CONFIG_SMP=y
+# 4 keeps per-CPU memory/kworkers small for the RAM budget while still bringing
+# up most real machines; raise via `l2 kernel set CONFIG_NR_CPUS=n` if needed.
+CONFIG_NR_CPUS=4
+CONFIG_HZ_100=y
+CONFIG_NO_HZ_IDLE=y
+CONFIG_HIGH_RES_TIMERS=y
+# Preemption: PREEMPT_NONE on older kernels; 6.13+ x86_64 cannot select it
+# (ARCH_NO_PREEMPT) and uses the low-overhead PREEMPT_LAZY model instead.
+# Both are listed; olddefconfig keeps whichever this kernel offers.
+CONFIG_PREEMPT_NONE=y
+CONFIG_PREEMPT_LAZY=y
+
+# ------------------------------------------------------------------ memory
+# EXPERT unlocks the footprint knobs.  SLUB_TINY drops per-CPU slab partial
+# lists; BASE_SMALL shrinks pid/uid/futex hash tables; the printk ring is
+# 16 KiB instead of 128 KiB.  NUMA, THP, KSM, compaction and swap stay off.
+CONFIG_EXPERT=y
+CONFIG_SLUB_TINY=y
+CONFIG_BASE_SMALL=y
+CONFIG_LOG_BUF_SHIFT=14
+CONFIG_NUMA=n
+CONFIG_TRANSPARENT_HUGEPAGE=n
+CONFIG_KSM=n
+CONFIG_COMPACTION=n
+CONFIG_SWAP=n
+CONFIG_DEFERRED_STRUCT_PAGE_INIT=y
+CONFIG_CC_OPTIMIZE_FOR_SIZE=y
+
+CONFIG_PRINTK=y
+CONFIG_BLOCK=y
+CONFIG_MULTIUSER=y
+CONFIG_FILE_LOCKING=y
+CONFIG_POSIX_TIMERS=y
+CONFIG_FUTEX=y
+CONFIG_EPOLL=y
+CONFIG_SIGNALFD=y
+CONFIG_TIMERFD=y
+CONFIG_EVENTFD=y
+CONFIG_SHMEM=y
+CONFIG_AIO=y
+CONFIG_TMPFS=y
+CONFIG_PRINTK_TIME=y
+CONFIG_BUG=y
+
+# boot / initramfs
+CONFIG_BLK_DEV_INITRD=y
+CONFIG_RD_GZIP=y
+CONFIG_RD_XZ=y
+CONFIG_DEVTMPFS=y
+CONFIG_DEVTMPFS_MOUNT=n
+CONFIG_PROC_FS=y
+CONFIG_SYSFS=y
+
+# userspace ABI
+CONFIG_BINFMT_ELF=y
+CONFIG_BINFMT_SCRIPT=y
+CONFIG_UNIX98_PTYS=y
+CONFIG_TTY=y
+CONFIG_VT=y
+CONFIG_VT_CONSOLE=y
+CONFIG_SERIAL_8250=y
+CONFIG_SERIAL_8250_CONSOLE=y
+CONFIG_SERIAL_8250_PCI=y
+
+# ------------------------------------------------------ keyboards (real HW)
+# PS/2 (every laptop's built-in keyboard), USB HID, and generic HID.
+CONFIG_INPUT=y
+CONFIG_INPUT_KEYBOARD=y
+CONFIG_KEYBOARD_ATKBD=y
+CONFIG_SERIO=y
+CONFIG_SERIO_I8042=y
+CONFIG_SERIO_LIBPS2=y
+CONFIG_INPUT_EVDEV=y
+CONFIG_INPUT_MOUSE=y
+CONFIG_MOUSE_PS2=y
+CONFIG_HID_SUPPORT=y
+CONFIG_HID=y
+CONFIG_HID_GENERIC=y
+CONFIG_USB_HID=y
+
+# ----------------------------------------------------------------- display
+# VESA for BIOS boots, efifb for UEFI GOP.  The font is explicit: without
+# one fbcon silently falls back to an unreadable default on hi-dpi panels.
+CONFIG_FB=y
+CONFIG_FB_VESA=y
+CONFIG_FB_EFI=y
+CONFIG_FRAMEBUFFER_CONSOLE=y
+CONFIG_FONTS=y
+CONFIG_FONT_8x16=y
+CONFIG_FONT_TER16x32=y
+
+# ------------------------------------------------------------------ storage
+CONFIG_BLK_DEV=y
+CONFIG_BLK_DEV_SD=y
+CONFIG_BLK_DEV_SR=y
+CONFIG_SCSI=y
+CONFIG_ATA=y
+CONFIG_ATA_SFF=y
+CONFIG_ATA_BMDMA=y
+CONFIG_ATA_PIIX=y
+CONFIG_ATA_GENERIC=y
+CONFIG_SATA_AHCI=y
+CONFIG_PCI=y
+CONFIG_PCI_MSI=y
+CONFIG_PCIEPORTBUS=y
+CONFIG_NVME_CORE=y
+CONFIG_BLK_DEV_NVME=y
+CONFIG_VIRTIO_MENU=y
+CONFIG_VIRTIO=y
+CONFIG_VIRTIO_PCI=y
+CONFIG_VIRTIO_BLK=y
+CONFIG_EXT4_FS=y
+CONFIG_EXT4_USE_FOR_EXT2=y
+CONFIG_MSDOS_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_NLS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
+CONFIG_ISO9660_FS=y
+CONFIG_JOLIET=y
+CONFIG_USB_SUPPORT=y
+CONFIG_USB=y
+CONFIG_USB_XHCI_HCD=y
+CONFIG_USB_XHCI_PCI=y
+CONFIG_USB_EHCI_HCD=y
+CONFIG_USB_EHCI_PCI=y
+CONFIG_USB_STORAGE=y
+CONFIG_USB_UAS=y
+# pre-xHCI host controllers (older desktops/laptops): modules, loaded only
+# when such a controller is present (xHCI/EHCI above cover most machines).
+CONFIG_USB_OHCI_HCD=m
+CONFIG_USB_OHCI_HCD_PCI=m
+CONFIG_USB_UHCI_HCD=m
+
+# ------------------------------------------- real-hardware input and ports
+# I2C HID covers the touchpad/keyboard/touchscreen on most modern laptops;
+# DesignWare is the I2C controller in Intel LPSS and AMD SoCs.  GPIO/pinctrl
+# provide the interrupt line those HID devices use.  I2C_CHARDEV exposes the
+# buses to userspace tools.  The controller/HID drivers are MODULES so they
+# cost nothing at idle on machines without them; the small cores stay built
+# in.  They ship in the initramfs / on the installed root and load on demand.
+CONFIG_I2C=y
+CONFIG_I2C_CHARDEV=y
+CONFIG_COMMON_CLK=y
+CONFIG_I2C_DESIGNWARE_CORE=m
+CONFIG_I2C_DESIGNWARE_PCI=m
+CONFIG_I2C_DESIGNWARE_PLATFORM=m
+CONFIG_I2C_HID=m
+CONFIG_I2C_HID_ACPI=m
+CONFIG_HID_MULTITOUCH=m
+CONFIG_GPIOLIB=y
+CONFIG_GPIO_ACPI=y
+CONFIG_PINCTRL=y
+CONFIG_PINCTRL_AMD=y
+
+# eMMC / SD card slots: built in so a machine can boot from eMMC/SD.
+CONFIG_MMC=y
+CONFIG_MMC_BLOCK=y
+CONFIG_MMC_SDHCI=y
+CONFIG_MMC_SDHCI_PCI=y
+CONFIG_MMC_SDHCI_ACPI=y
+
+# exFAT USB sticks (module, mounted on demand), UEFI variables from userspace
+CONFIG_EXFAT_FS=m
+CONFIG_NLS_UTF8=y
+CONFIG_EFIVAR_FS=y
+
+# LEDS_CLASS is a hard dependency of the rtl8xxxu USB wifi driver
+CONFIG_NEW_LEDS=y
+CONFIG_LEDS_CLASS=y
+
+# laptop panel brightness / video output switching: modules (ACPI_VIDEO needs
+# WMI on x86).  Backlight core stays built in as their dependency.
+CONFIG_BACKLIGHT_CLASS_DEVICE=y
+CONFIG_ACPI_WMI=m
+CONFIG_ACPI_VIDEO=m
+
+# ------------------------------------------------------------- power / ACPI
+# Poweroff on real firmware needs ACPI sleep-state support, which needs
+# SUSPEND.  Without it "reboot -p" can stop at "Power down" and never cut power.
+CONFIG_PM=y
+CONFIG_SUSPEND=y
+CONFIG_ACPI=y
+CONFIG_ACPI_BUTTON=y
+CONFIG_ACPI_AC=y
+CONFIG_ACPI_BATTERY=y
+CONFIG_ACPI_PROCESSOR=y
+CONFIG_CPU_IDLE=y
+CONFIG_INTEL_IDLE=y
+CONFIG_RTC_CLASS=y
+CONFIG_RTC_HCTOSYS=y
+CONFIG_RTC_DRV_CMOS=y
+CONFIG_EFI=y
+CONFIG_EFI_STUB=y
+CONFIG_RELOCATABLE=y
+
+# ---------------------------------------------------------------- networking
+CONFIG_NET=y
+CONFIG_INET=y
+CONFIG_UNIX=y
+CONFIG_PACKET=y
+CONFIG_NETDEVICES=y
+CONFIG_ETHERNET=y
+CONFIG_VIRTIO_NET=y
+# Physical NIC drivers are modules (hw pack): not loaded at idle when no NIC is
+# present, loaded by modalias when one is.  Keeps the idle RAM footprint small.
+CONFIG_NET_VENDOR_INTEL=y
+CONFIG_E1000=m
+CONFIG_E1000E=m
+CONFIG_IGC=m
+CONFIG_NET_VENDOR_REALTEK=y
+CONFIG_R8169=m
+CONFIG_USB_NET_DRIVERS=y
+CONFIG_USB_USBNET=m
+CONFIG_USB_RTL8152=m
+CONFIG_USB_NET_CDCETHER=m
+CONFIG_USB_NET_CDC_NCM=m
+
+# -------------------------------------------------------------------- wifi
+# Modules on purpose (see header).  Firmware is loaded from /lib/firmware, or
+# from the boot medium via firmware_class.path; xz/zstd compressed files work.
+CONFIG_MODULES=y
+CONFIG_MODULE_UNLOAD=y
+CONFIG_MODVERSIONS=n
+CONFIG_MODULE_SIG=n
+CONFIG_FW_LOADER=y
+CONFIG_FW_LOADER_USER_HELPER=n
+CONFIG_FW_LOADER_COMPRESS=y
+CONFIG_FW_LOADER_COMPRESS_XZ=y
+CONFIG_FW_LOADER_COMPRESS_ZSTD=y
+CONFIG_RFKILL=y
+CONFIG_WIRELESS=y
+CONFIG_CFG80211=m
+CONFIG_MAC80211=m
+CONFIG_CFG80211_WEXT=n
+CONFIG_CFG80211_DEBUGFS=n
+CONFIG_CFG80211_CRDA_SUPPORT=n
+CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=n
+CONFIG_CFG80211_USE_KERNEL_REGDB_KEYS=n
+CONFIG_MAC80211_DEBUGFS=n
+CONFIG_MAC80211_LEDS=n
+CONFIG_WLAN=y
+
+# Intel
+CONFIG_WLAN_VENDOR_INTEL=y
+CONFIG_IWLWIFI=m
+CONFIG_IWLDVM=m
+CONFIG_IWLMVM=m
+CONFIG_IWLWIFI_LEDS=n
+CONFIG_IWLWIFI_DEBUGFS=n
+# MediaTek (mt7921e covers MT7921/MT7922; mt7925e is Wi-Fi 7)
+CONFIG_WLAN_VENDOR_MEDIATEK=y
+CONFIG_MT76_CORE=m
+CONFIG_MT7921E=m
+CONFIG_MT7921U=m
+CONFIG_MT7925E=m
+CONFIG_MT76_LEDS=n
+# Realtek
+CONFIG_WLAN_VENDOR_REALTEK=y
+CONFIG_RTW88=m
+CONFIG_RTW88_8822CE=m
+CONFIG_RTW88_8822BE=m
+CONFIG_RTW88_8821CE=m
+CONFIG_RTW88_8723DE=m
+CONFIG_RTW89=m
+CONFIG_RTW89_8852AE=m
+CONFIG_RTW89_8852BE=m
+CONFIG_RTW89_8852CE=m
+CONFIG_RTW89_8922AE=m
+CONFIG_RTL8XXXU=m
+# Qualcomm Atheros
+CONFIG_WLAN_VENDOR_ATH=y
+CONFIG_ATH9K=m
+CONFIG_ATH9K_HTC=m
+CONFIG_ATH10K=m
+CONFIG_ATH10K_PCI=m
+CONFIG_ATH11K=m
+CONFIG_ATH11K_PCI=m
+CONFIG_ATH12K=m
+# Broadcom (FullMAC; Macs, Raspberry-class chips, many USB sticks)
+CONFIG_WLAN_VENDOR_BROADCOM=y
+CONFIG_BRCMFMAC=m
+CONFIG_BRCMFMAC_PCIE=y
+CONFIG_BRCMFMAC_USB=y
+
+# keep it small
+CONFIG_DEBUG_KERNEL=n
+CONFIG_DEBUG_INFO_NONE=y
+CONFIG_KALLSYMS=n
+CONFIG_MAGIC_SYSRQ=y

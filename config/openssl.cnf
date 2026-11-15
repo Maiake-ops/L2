@@ -1,0 +1,25 @@
+# L2 minimal OpenSSL configuration (installed as /etc/ssl/openssl.cnf).
+# Enough for s_client/s_server/req/x509/genpkey/dgst/enc; no engines, no legacy.
+openssl_conf = l2_init
+
+[l2_init]
+ssl_conf = l2_ssl
+
+[l2_ssl]
+system_default = l2_tls
+
+[l2_tls]
+MinProtocol = TLSv1.2
+CipherString = DEFAULT:@SECLEVEL=2
+
+[req]
+distinguished_name = req_dn
+x509_extensions = v3_ca
+prompt = no
+
+[req_dn]
+CN = L2
+
+[v3_ca]
+basicConstraints = critical,CA:true
+subjectKeyIdentifier = hash

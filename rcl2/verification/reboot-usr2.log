@@ -1,0 +1,21 @@
+== full serial capture ==
+Warning: unable to open an initial console.
+rcl2: config 1 service(s) parsed
+rcl2: start shell pid 33
+rcl2: resident 64 KiB (budget 150)
+rcl2: boot complete: 1 service(s), signals armed
+/bin/dash: 0: can't access tty; job control turned off
+L2# kill -USR2 1
+L2# rcl2: shutting down: reboot request
+kill -USR2 1
+L2# reboot: Restarting system
+
+== raw tail repr ==
+b"Warning: unable to open an initial console.\r\nrcl2: config 1 service(s) parsed\r\nrcl2: start shell pid 33\r\nrcl2: resident 64 KiB (budget 150)\r\nrcl2: boot complete: 1 service(s), signals armed\r\n/bin/dash: 0: can't access tty; job control turned off\r\nL2# kill -USR2 1\r\nL2# \x01rcl2: shutting down: reboot request\r\nkill -USR2 1\r\nL2# \x01\x01reboot: Restarting system\r\n"
+== verdict ==
+SIGUSR2 shutdown line: True
+SIGUSR1 shutdown line: False
+kernel reboot line: True
+qemu exit code: 0
+resident RAM: 64 KiB (budget 150)
+RESULT: PASS

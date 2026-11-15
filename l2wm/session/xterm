@@ -1,0 +1,4 @@
+#!/bin/dash
+. /etc/l2/desktop-runtime.sh
+export XAPPLRESDIR SHELL=/bin/dash TERMINFO=/opt/l2-desktop/terminfo
+exec "$L2_XTERM" -fn fixed -bg '#0d1117' -fg '#c9d1d9' "$@"

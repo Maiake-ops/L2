@@ -1,0 +1,10 @@
+build/
+l2pm/l2pm
+*.o
+*.l2p
+*.part
+l2wifi/l2wifi
+l2wifi/*.tar.xz
+config/kernel.local
+__pycache__/
+my_disk.qcow2

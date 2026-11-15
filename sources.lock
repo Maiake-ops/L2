@@ -1,0 +1,35 @@
+# L2 source lock.  One key=value per line.
+# `l2 update` resolves the newest stable kernel, musl, dash and limine.
+# Keep this file in git: two builders using the same lock and toolchain should
+# produce identical archives, initramfs and ISO images.
+epoch=1767225600
+kernel_version=7.3.3
+kernel_sha256=79c66dde66cd96877fcde8f7d36aec946b1f423d2b97b5a7b1751b75c764f3d1
+musl_version=1.2.5
+musl_sha256=a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
+dash_version=0.5.12
+dash_sha256=6a474ac46e8b0b32916c4c60df694c82058d3297d8b385b74508030ca4a8f28a
+limine_version=9.6.7
+limine_sha256=5469ff372f7054a055156ed23534f1faeeebaf9d7d8d0f82cdb719c134c12a9b
+limine_source=https://codeberg.org/Limine/Limine/releases/download/v9.6.7/limine-9.6.7.tar.gz
+busybox_version=1.36.1
+libnl_version=3.11.0
+wpa_version=2.11
+openssl_version=3.5.4
+openssl_source=https://github.com/openssl/openssl/releases/download/openssl-3.5.4/openssl-3.5.4.tar.gz
+busybox_sha256=b8cc24c9574d809e7279c3be349795c5d5ceb6fdf19ca709f80cde50e47de314
+libnl_sha256=2a56e1edefa3e68a7c00879496736fdbf62fc94ed3232c0baba127ecfa76874d
+wpa_sha256=912ea06f74e30a8e36fbb68064d6cdff218d8d591db0fc5d75dee6c81ac7fc0a
+openssl_sha256=967311f84955316969bdb1d8d4b983718ef42338639c621ec4c34fddef355e99
+e2fsprogs_version=1.47.4
+e2fsprogs_sha256=da274408bebbfd13a5a2fc3cfc66e3ffff17c48534673aa67f88d49b99123b96
+dosfstools_version=4.2
+dosfstools_sha256=64926eebf90092dca21b14259a5301b7b98e7b1943e8a201c7d726084809b527
+firmware_version=20261019
+firmware_sha256=a10d1ab5baf2c74ba92e8c7cf313e691696c26bddfa6df00db795e48d70cd4ca
+l2wm_xorgproto_sha256=56898c716c0578df8a2d828c9c3e5c528277705c0484381a81960fe1a67668e8
+l2wm_xtrans_sha256=faafea166bf2451a173d9d593352940ec6404145c5d1da5c213423ce4d359e92
+l2wm_xcb_proto_sha256=2c1bacd2110f4799f74de6ebb714b94cf6f80fb112316b1219480fd22562148c
+l2wm_xau_sha256=74d0e4dfa3d39ad8939e99bda37f5967aba528211076828464d2777d477fc0fb
+l2wm_xcb_sha256=599ebf9996710fea71622e6e184f3a8ad5b43d0e5fa8c4e407123c88a59a6d55
+l2wm_x11_sha256=bbc78c46217174655c2b32b138ad119f3ac15f50808b4d0b3a2677a4b1afc950
