@@ -12,10 +12,20 @@ case "$1" in
             for r in $router; do ip route replace default via "$r" dev "$interface"; break; done
         fi
         if [ -n "$dns" ]; then
+            # $domain comes straight from the DHCP packet (untrusted): keep
+            # only DNS-name characters so it cannot inject extra lines.
+            _dom=
+            case "${domain:-}" in
+                *[!A-Za-z0-9.-]*) ;;
+                ?*) _dom=$domain ;;
+            esac
+            # atomic replace: concurrent interfaces must not interleave writes
+            _tmp=$(mktemp /etc/resolv.conf.XXXXXX 2>/dev/null) || _tmp=/etc/resolv.conf.new
             {
-                [ -n "$domain" ] && echo "search $domain"
+                [ -n "$_dom" ] && echo "search $_dom"
                 for d in $dns; do echo "nameserver $d"; done
-            } > /etc/resolv.conf
+            } > "$_tmp"
+            mv -f "$_tmp" /etc/resolv.conf
         fi
         ;;
 esac

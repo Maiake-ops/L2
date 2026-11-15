@@ -41,7 +41,10 @@ WITH_WIFI=1
 WITH_SSL=1
 EFI_ENTRY=0
 VERIFY=1
-LOG=${TMPDIR:-/tmp}/l2install.$$.log
+# Private, unpredictable log file (mktemp: 0600, no symlink race in /tmp).
+# The template must end in XXXXXX for busybox mktemp on the live system.
+LOG=$(mktemp "${TMPDIR:-/tmp}/l2install.XXXXXX") || exit 1
+trap 'rm -f "$LOG" 2>/dev/null' EXIT
 LOOPDEV=""
 
 # ---- shared UI; falls back to a minimal built-in one when the lib is absent
@@ -146,7 +149,10 @@ setup_live() {
     ln -s "$_pack/bin/limine" "$PAYLOAD/out/limine/bin/limine"
     ln -s "$MEDIUM/boot/limine/limine-bios.sys" "$PAYLOAD/out/limine/share/limine/limine-bios.sys"
     ln -s "$MEDIUM/EFI/BOOT/BOOTX64.EFI" "$PAYLOAD/out/limine/share/limine/BOOTX64.EFI"
-    # pristine rootfs: the initramfs is the rootfs, extract it (cpio applet)
+    # pristine rootfs: the initramfs is the rootfs, extract it (cpio applet).
+    # Verify the gzip stream first: in a POSIX sh pipeline only cpio's exit
+    # status is visible, so a corrupt medium could otherwise slip through.
+    gzip -t "$MEDIUM/boot/initramfs" || die "corrupt initramfs on the boot medium"
     gzip -dc "$MEDIUM/boot/initramfs" | (cd "$PAYLOAD/rootfs" && cpio -idm --quiet) \
         || die "cannot extract the rootfs from the medium's initramfs"
     L2_ROOTFS_DIR=$PAYLOAD/rootfs
@@ -174,13 +180,35 @@ ensure_payload() {
 size_of() {  # device -> bytes
     if have blockdev; then blockdev --getsize64 "$1" 2>/dev/null && return 0; fi
     if [ -r "/sys/class/block/${1##*/}/size" ]; then
-        _s=$(cat "/sys/class/block/${1##*/}/size"); echo $((_s * 512)); return 0
+        _s=$(cat "/sys/class/block/${1##*/}/size"); printf '%s\n' $((_s * 512)); return 0
     fi
     echo 0
 }
 
-disk_busy() {  # any partition (or the disk) mounted?
-    grep -q "^$1" /proc/mounts 2>/dev/null
+disk_busy() {  # device in use: mounted, active swap, or held by dm/md?
+    _d=$(readlink -f "$1" 2>/dev/null) || _d=$1
+    [ -n "$_d" ] || _d=$1
+    # held by device-mapper / md (LVM, RAID, crypt)?
+    if [ -d "/sys/class/block/${_d##*/}/holders" ]; then
+        for _h in "/sys/class/block/${_d##*/}/holders"/*; do
+            [ -e "$_h" ] && return 0
+        done
+    fi
+    # Mounted?  Resolve mount sources too: they may be /dev/mapper/...,
+    # /dev/disk/by-uuid/... or other aliases of the same device.  Match the
+    # disk itself and its partitions (sda1, nvme0n1p1, ...).
+    while read -r _src _rest; do
+        _s=$(readlink -f "$_src" 2>/dev/null) || _s=$_src
+        case "$_s" in "$_d"|"$_d"[0-9]*|"$_d"p[0-9]*) return 0 ;; esac
+    done < /proc/mounts
+    # Active swap would be destroyed just as thoroughly as a mount.
+    if [ -r /proc/swaps ]; then
+        while read -r _src _rest; do
+            _s=$(readlink -f "$_src" 2>/dev/null) || _s=$_src
+            case "$_s" in "$_d"|"$_d"[0-9]*|"$_d"p[0-9]*) return 0 ;; esac
+        done < /proc/swaps
+    fi
+    return 1
 }
 
 # one line per candidate disk:  /dev/sda|238.5G|usb|removable|Model
@@ -200,12 +228,13 @@ list_disks() {
 }
 
 cmd_list() {
-    printf 'DISK,SIZE,BUS,KIND\n' > "$LOG.tab"
-    list_disks | while IFS='|' read -r n s t r m; do
-        busy=""; disk_busy "$n" && busy=" (in use)"
-        printf '%s,%s,%s,%s%s %s\n' "$n" "$s" "$t" "$r" "$busy" "$m"
-    done >> "$LOG.tab"
-    ui_table < "$LOG.tab"; rm -f "$LOG.tab"
+    {
+        printf 'DISK,SIZE,BUS,KIND\n'
+        list_disks | while IFS='|' read -r n s t r m; do
+            busy=""; disk_busy "$n" && busy=" (in use)"
+            printf '%s,%s,%s,%s%s %s\n' "$n" "$s" "$t" "$r" "$busy" "$m"
+        done
+    } | ui_table
 }
 
 pick_disk() {
@@ -236,8 +265,10 @@ part_name() {
 cleanup() {
     set +e
     job_kill 2>/dev/null
-    mountpoint -q "$MNT/boot/efi" 2>/dev/null && umount "$MNT/boot/efi" 2>/dev/null
-    mountpoint -q "$MNT" 2>/dev/null && umount "$MNT" 2>/dev/null
+    # umount directly: works without mountpoint(1) and is a harmless no-op
+    # when the path is not a mount point.
+    umount "$MNT/boot/efi" 2>/dev/null
+    umount "$MNT" 2>/dev/null
     [ -n "$LOOPDEV" ] && losetup -d "$LOOPDEV" 2>/dev/null
     [ -n "$PAYLOAD" ] && rm -rf "$PAYLOAD" 2>/dev/null
     return 0
@@ -263,6 +294,11 @@ preflight() {  # device
         have "$_t" || { [ "$DRY" = 1 ] && warn "missing $_t (dry run continues)" || die "missing '$_t' (install gptfdisk, e2fsprogs, dosfstools, util-linux)"; }
     done
     [ -b "$_dev" ] || [ "$DRY" = 1 ] || die "$_dev is not a block device"
+    # Whole disks only: installing onto a partition would nest a GPT inside
+    # it and destroy the surrounding table's meaning.
+    if [ -e "/sys/class/block/${_dev##*/}/partition" ]; then
+        die "$_dev is a partition, not a whole disk; pick the parent disk"
+    fi
     if [ "$DRY" != 1 ] && disk_busy "$_dev"; then
         die "$_dev (or one of its partitions) is mounted; unmount it first. Refusing to continue."
     fi
@@ -359,13 +395,15 @@ install_disk() {
     _dev=${1:-}
     [ -n "$_dev" ] || { _dev=$(pick_disk) || die "no disk selected"; [ "$_dev" = cancel ] && die "cancelled"; }
     STEP_T=7; [ "$VERIFY" = 1 ] && STEP_T=8
+    # Trap before setup_live: it stages a PAYLOAD temp tree that must be
+    # cleaned up even when a later step dies.
+    : > "$LOG"; trap cleanup EXIT INT TERM
     setup_live || true
     preflight "$_dev"
     review_and_confirm "$_dev"
     ensure_payload
     _out=$(out_dir); _lim="$_out/limine/bin/limine"; _ls="$_out/limine/share/limine"
     [ "$DRY" = 1 ] || [ -x "$_lim" ] || die "limine missing; run: $L2_SRC/l2 build limine"
-    : > "$LOG"; trap cleanup EXIT INT TERM
 
     stage "unmount and partition $_dev"
     run sgdisk --zap-all "$_dev"
@@ -449,6 +487,7 @@ install_disk() {
 install_image() {
     _img=${1:-}; _size=${2:-512M}
     [ -n "$_img" ] || die "usage: l2install image out.img [SIZE]"
+    [ -b "$_img" ] && die "image target must be a regular file, not a block device: $_img (use: l2install disk $_img)"
     [ "$DRY" = 1 ] || [ "$(id -u)" -eq 0 ] || die "image needs root for loop devices: sudo $0 image $_img"
     need truncate
     if [ "$DRY" = 1 ]; then
@@ -471,7 +510,7 @@ install_iso() {
 install_dir() {
     _dest=${1:-}
     [ -n "$_dest" ] || die "usage: l2install dir /mnt/target"
-    trap 'if [ -n "$PAYLOAD" ]; then rm -rf "$PAYLOAD"; fi' EXIT
+    trap 'if [ -n "$PAYLOAD" ]; then rm -rf "$PAYLOAD"; fi; rm -f "$LOG" 2>/dev/null' EXIT
     setup_live || true
     ensure_payload
     STEP_T=1
@@ -546,6 +585,7 @@ done
 case "$HOSTNAME_NEW" in ''|*[!A-Za-z0-9-]*) die "bad hostname: $HOSTNAME_NEW" ;; esac
 case "$ESP_MB" in ''|*[!0-9]*) die "bad --efi-size" ;; esac
 [ "$ESP_MB" -ge 64 ] || die "--efi-size must be at least 64 MiB (FAT32 minimum)"
+case "$FIRMWARE" in bios|uefi|auto) ;; *) die "bad --firmware: $FIRMWARE (want bios, uefi or auto)" ;; esac
 
 cmd=${1:-menu}; [ $# -gt 0 ] && shift || true
 case "$cmd" in

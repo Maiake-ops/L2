@@ -136,23 +136,63 @@ l2pm selftest          # prints RSS and budget
 `L2PM_RECIPES` points at a recipe directory. `l2 pm ...` wires both and uses the
 musl-built binary automatically.
 
-Recipe format (one file, `key = value`):
+### Recipe format and the 4-step pipeline
+
+One file, `key = value`. Builds run in four numbered steps:
+
+1. **repo** — obtain the source: a git clone for `repo=` recipes, or the
+   recipe itself when it comes from a remote recipe repository
+2. **fetch/extract** — download + verify the tarball (`source=`/`sha256=`),
+   or export the pinned git worktree (`.git` removed, mtimes normalized to
+   `SOURCE_DATE_EPOCH`)
+3. **compile** — the `compile=` command (optional)
+4. **install** — the `install=` command stages files into `$DESTDIR`; the
+   archive → store → profile flow is unchanged
+
+Legacy recipes with a single `build=` command keep working exactly as before
+(`build=` is compile+install combined). Mixing `build=` with `compile=`/
+`install=` is an error.
 
 ```ini
 name = hello
 version = 1.0
+epoch = 1767225600
+deps =
+
+# tarball source (step 2 verifies the pinned sha256):
 source = https://example.org/hello-1.0.tar.gz
 sha256 = <pinned hash>
 source_dir = hello-1.0
-deps =
-epoch = 1767225600
-build = mkdir -p "$DESTDIR/usr/bin" && cc -O2 -o "$DESTDIR/usr/bin/hello" hello.c
+
+# ...or a git source: the commit hash IS the pin (replaces sha256).
+# repo = https://example.org/hello.git
+# ref = <full commit hash>        # tags/branches work but warn: not reproducible
+
+compile = make -j"$JOBS"
+install = make DESTDIR="$DESTDIR" PREFIX=/usr install
 ```
 
-The build command runs with `/bin/sh -e -u -c`, in the extracted source
-directory, with `DESTDIR`, `PREFIX=/usr`, `SRC`, `SOURCE_DATE_EPOCH`,
-`JOBS=16`, `TZ=UTC`, `LC_ALL=C`, and a fixed umask. A package is whatever the
-recipe stages under `$DESTDIR`.
+All commands run with `/bin/sh -e -u -c` in the extracted source directory,
+with `DESTDIR`, `PREFIX=/usr`, `SRC`, `SOURCE_DATE_EPOCH`, `JOBS`, `CC`,
+`TZ=UTC`, `LC_ALL=C` and a fixed umask. A package is whatever the recipe
+stages under `$DESTDIR`. `git` is required for `repo=` sources and git recipe
+repositories (it is in every `l2 deps` list).
+
+### Remote recipe repositories
+
+`l2pm add <name>` / `l2pm build <name>` resolve bare names locally first
+(CWD, `L2PM_RECIPES`, `<root>/l2/recipes`), then in `L2PM_RECIPE_REPO`:
+
+- **git URL** (`git://`, `ssh://`, `git@…`, or ending in `.git`): cloned into
+  `<root>/l2/var/recipe-repo`; pin it with `L2PM_RECIPE_REPO_REF=<commit>`.
+- **raw base URL** (e.g. `https://host/recipes`): downloads
+  `<base>/<name>.recipe` with curl/wget.
+
+Fetched recipes are cached and keep working offline. **A fetched recipe
+executes arbitrary shell**: l2pm shows it and refuses to run it until you
+confirm interactively or pass `--trust`. Trusted recipe content hashes are
+recorded in `<root>/l2/var/trusted-recipes`; a changed recipe must be
+trusted again. Local recipes never need the gate.
 
 ## l2fetch
 

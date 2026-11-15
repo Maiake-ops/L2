@@ -44,6 +44,7 @@ find_pack() {
         [ -b "$d" ] && { _any=1; break; }
     done
     [ "$_any" = 0 ] && return 1
+    mkdir -p /media/l2 2>/dev/null
     n=0
     while [ "$n" -lt 10 ]; do
         for d in ${L2_PACK_DEV:-} /dev/sr0 /dev/sr1 /dev/sd[a-z] /dev/sd[a-z][0-9] \
@@ -104,9 +105,20 @@ eth_ifaces() {
     done
 }
 
+# pid alive AND still the expected program: a stale pidfile whose pid got
+# reused must not suppress DHCP nor cause wifi-stop to kill a stranger.
+pid_alive() {  # pid, expected comm
+    [ -n "$1" ] || return 1
+    kill -0 "$1" 2>/dev/null || return 1
+    [ "$(cat "/proc/$1/comm" 2>/dev/null)" = "$2" ]
+}
+
 dhcp() {
     i=$1
-    [ -f "/run/udhcpc.$i.pid" ] && kill -0 "$(cat "/run/udhcpc.$i.pid")" 2>/dev/null && return 0
+    if [ -f "/run/udhcpc.$i.pid" ] &&
+       pid_alive "$(cat "/run/udhcpc.$i.pid" 2>/dev/null)" udhcpc; then
+        return 0
+    fi
     ip link set "$i" up 2>/dev/null
     udhcpc -b -i "$i" -s /etc/l2/udhcpc.script -p "/run/udhcpc.$i.pid" \
            -t 4 -T 3 -A 5 >/dev/null 2>&1
@@ -122,7 +134,9 @@ wifi_start() {
         [ -z "$i" ] && i=$(for x in $(wifi_ifaces); do echo "$x"; break; done)
     fi
     [ -n "$i" ] || { log "no wifi interface (driver or firmware missing? see dmesg)"; return 1; }
-    [ -x "$WPA" ] || [ -x /bin/wpa_supplicant ] || { log "wpa_supplicant not installed"; return 1; }
+    # fall back to the installed binary when the pack's copy is unusable
+    [ -x "$WPA" ] || WPA=/bin/wpa_supplicant
+    [ -x "$WPA" ] || { log "wpa_supplicant not installed"; return 1; }
     unblock
     ip link set "$i" up 2>/dev/null || { log "cannot bring $i up (rfkill / firmware?)"; return 1; }
     mkdir -p /run/wpa_supplicant
@@ -147,8 +161,14 @@ wifi_stop() {
     [ -n "$i" ] || for x in $(wifi_ifaces); do i=$x; break; done
     [ -n "$i" ] || return 0
     for p in "/run/udhcpc.$i.pid" "/run/wpa_supplicant.$i.pid"; do
-        [ -f "$p" ] && kill "$(cat "$p")" 2>/dev/null
-        rm -f "$p"
+        if [ -f "$p" ]; then
+            _pid=$(cat "$p" 2>/dev/null)
+            case "$p" in
+                *udhcpc*)        pid_alive "$_pid" udhcpc && kill "$_pid" 2>/dev/null ;;
+                *wpa_supplicant*) pid_alive "$_pid" wpa_supplicant && kill "$_pid" 2>/dev/null ;;
+            esac
+            rm -f "$p"
+        fi
     done
     ip addr flush dev "$i" 2>/dev/null
     ip link set "$i" down 2>/dev/null

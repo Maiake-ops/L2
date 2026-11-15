@@ -8,3 +8,5 @@ l2wifi/*.tar.xz
 config/kernel.local
 __pycache__/
 my_disk.qcow2
+.codex/
+.qwen/

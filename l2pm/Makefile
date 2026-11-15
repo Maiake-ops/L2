@@ -1,10 +1,14 @@
 # l2pm - small static package manager.
 #
-# Defaults build a static binary with the host cc.  For the real L2 userland:
+# Prefer the project's generated musl wrapper (static glibc is absent on some
+# hosts, e.g. NixOS); honour an explicit CC from the environment/command line.
+# For the real L2 userland:
 #   make CC=/path/to/musl-gcc LDFLAGS=-static
 #
 PREFIX ?= /usr/local
-CC ?= cc
+ifeq ($(origin CC),default)
+CC := $(if $(wildcard ../build/bin/musl-gcc),../build/bin/musl-gcc,cc)
+endif
 CFLAGS ?= -std=c11 -Os -Wall -Wextra -ffile-prefix-map=$(CURDIR)=.
 LDFLAGS ?= -static
 BIN := l2pm

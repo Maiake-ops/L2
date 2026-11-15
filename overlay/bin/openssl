@@ -8,6 +8,7 @@
 M=${L2_MEDIA:-/media/l2}
 P=$M/l2/ssl
 if [ ! -x "$P/bin/openssl" ]; then
+    mkdir -p "$M" 2>/dev/null
     n=0
     while [ "$n" -lt 3 ] && [ ! -x "$P/bin/openssl" ]; do
         for d in ${L2_PACK_DEV:-} /dev/sr0 /dev/sr1 /dev/sd[a-z] /dev/sd[a-z][0-9] \

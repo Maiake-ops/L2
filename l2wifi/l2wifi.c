@@ -62,6 +62,22 @@ static void die(const char *fmt, ...)
 }
 
 /* ------------------------------------------------------------ interface */
+/* Interface names reach system() via l2net and fixed-size path buffers;
+ * accept only the kernel-typical charset (IFNAMSIZ is 16 incl. NUL). */
+static int valid_iface(const char *s)
+{
+    size_t n = strlen(s), i;
+
+    if (!n || n > 15)
+        return 0;
+    for (i = 0; i < n; i++) {
+        char c = s[i];
+        if (!isalnum((unsigned char)c) && c != '.' && c != '_' && c != '-')
+            return 0;
+    }
+    return 1;
+}
+
 static int pick_iface(void)
 {
     DIR *d = opendir("/sys/class/net");
@@ -73,6 +89,8 @@ static int pick_iface(void)
         return -1;
     while ((e = readdir(d))) {
         if (e->d_name[0] == '.')
+            continue;
+        if (!valid_iface(e->d_name))
             continue;
         snprintf(p, sizeof p, "/sys/class/net/%s/wireless", e->d_name);
         if (stat(p, &st) == 0) {
@@ -183,11 +201,13 @@ static void ensure_supplicant(void)
 }
 
 /* ------------------------------------------------------------ utilities */
-static void hexenc(const char *s, char *out)
+static void hexenc(const char *s, char *out, size_t n)
 {
-    for (; *s; s++, out += 2)
-        sprintf(out, "%02x", (unsigned char)*s);
-    *out = 0;
+    size_t o = 0;
+
+    for (; *s && o + 2 < n; s++, o += 2)
+        sprintf(out + o, "%02x", (unsigned char)*s);
+    out[o] = 0;
 }
 
 /* wpa_supplicant escapes non-printables in ssid as \xNN */
@@ -450,11 +470,10 @@ static int wait_connected(int secs)
 static void read_secret(const char *prompt, char *out, size_t n)
 {
     struct termios t, o;
-    int tty = isatty(0);
+    int tty = isatty(0) && tcgetattr(0, &o) == 0;
 
     fprintf(stderr, "%s", prompt);
     if (tty) {
-        tcgetattr(0, &o);
         t = o;
         t.c_lflag &= ~ECHO;
         tcsetattr(0, TCSANOW, &t);
@@ -474,6 +493,8 @@ static int cmd_connect(const char *ssid, const char *psk, int force_open, const 
     char pass[128] = "";
     int rc, secured;
 
+    if (strlen(ssid) > 32)
+        die("SSID too long (802.11 allows at most 32 bytes)");
     ensure_supplicant();
     secured = !force_open && (!known_sec || strcmp(known_sec, "open"));
     if (secured && !psk) {
@@ -509,10 +530,21 @@ static int cmd_connect(const char *ssid, const char *psk, int force_open, const 
     snprintf(id, sizeof id, "%s", r);
     if (!isdigit((unsigned char)id[0]))
         die("ADD_NETWORK failed: %s", r);
-    hexenc(ssid, hex);
+    hexenc(ssid, hex, sizeof hex);
     ctrlf("SET_NETWORK %s ssid %s", id, hex);
     if (secured) {
-        r = ctrlf("SET_NETWORK %s psk \"%s\"", id, psk);
+        /* Escape quotes/backslashes for the wpa_supplicant quoted-string
+         * parser; an unescaped '"' would inject extra config fields. */
+        char esc[256];
+        size_t o = 0;
+        const char *p;
+        for (p = psk; *p && o + 2 < sizeof esc; p++) {
+            if (*p == '"' || *p == '\\')
+                esc[o++] = '\\';
+            esc[o++] = *p;
+        }
+        esc[o] = 0;
+        r = ctrlf("SET_NETWORK %s psk \"%s\"", id, esc);
         if (strncmp(r, "OK", 2))
             die("rejected passphrase: %s", r);
         if (known_sec && (!strcmp(known_sec, "WPA3") || !strcmp(known_sec, "WPA2/3")))
@@ -645,6 +677,8 @@ int main(int argc, char **argv)
     color = isatty(1) && !getenv("NO_COLOR");
     while (i < argc && argv[i][0] == '-' && argv[i][1]) {
         if (!strcmp(argv[i], "-i") && i + 1 < argc) {
+            if (!valid_iface(argv[i + 1]))
+                die("bad interface name: %s", argv[i + 1]);
             snprintf(iface, sizeof iface, "%s", argv[i + 1]);
             i += 2;
         } else if (!strcmp(argv[i], "--no-color")) {

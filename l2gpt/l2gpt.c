@@ -54,8 +54,11 @@ static uint64_t total_sectors;          /* disk size in 512-byte sectors */
 static uint64_t last_use;               /* last usable LBA */
 static int have_gpt;                    /* entries[] holds a valid table */
 static int dirty;                       /* something changed -> write */
+static int rdonly;                      /* device could only be opened O_RDONLY */
 static const char *dev;
 static int fd = -1;
+
+static int part_used(int n);
 
 /* ------------------------------------------------------------------ util */
 static void die(const char *fmt, ...) {
@@ -139,6 +142,12 @@ static void write_sect(uint64_t lba, const void *buf) {
 static void open_disk(void) {
     struct stat st;
     fd = open(dev, O_RDWR);
+    if (fd < 0 && (errno == EACCES || errno == EROFS || errno == EPERM)) {
+        /* Read-only media (write-protected stick, ro file): -p/-v/-i still
+         * work; any write attempt dies with a clear error. */
+        fd = open(dev, O_RDONLY);
+        rdonly = 1;
+    }
     if (fd < 0) die("cannot open %s: %s", dev, strerror(errno));
     if (fstat(fd, &st) < 0) die("fstat %s: %s", dev, strerror(errno));
     uint64_t bytes;
@@ -162,11 +171,21 @@ static void open_disk(void) {
 static int hdr_valid(const uint8_t *h, uint64_t expect_lba) {
     uint8_t tmp[HDR_SZ];
     if (memcmp(h, "EFI PART", 8) != 0) return 0;
+    if (rd32(h + 8) != 0x00010000) return 0;          /* GPT revision 1.0 */
     if (rd32(h + 12) != HDR_SZ) return 0;
     if (rd64(h + 24) != expect_lba) return 0;
+    uint64_t alt = rd64(h + 32);
+    if (alt == expect_lba || alt >= total_sectors) return 0;
+    uint64_t first = rd64(h + 40), last = rd64(h + 48);
+    if (first < FIRST_USE || last > total_sectors - 34 || first > last) return 0;
     memcpy(tmp, h, HDR_SZ);
     memset(tmp + 16, 0, 4);
     return crc32(tmp, HDR_SZ) == rd32(h + 16);
+}
+
+/* The entry array must fit on the disk and not overlap the headers. */
+static int entries_lba_ok(uint64_t elba) {
+    return elba >= 2 && elba <= total_sectors - NPARTS * ENTRY_SZ / SECT;
 }
 
 static void load_gpt(void) {
@@ -181,6 +200,8 @@ static void load_gpt(void) {
     uint32_t n = rd32(use + 80), esz = rd32(use + 84);
     if (n != NPARTS || esz != ENTRY_SZ)
         die("%s: GPT with %u entries of %u bytes not supported", dev, n, esz);
+    if (!entries_lba_ok(elba))
+        die("%s: GPT entry array LBA %llu out of range", dev, (unsigned long long)elba);
     uint8_t buf[NPARTS * ENTRY_SZ];
     for (uint32_t i = 0; i < NPARTS * ENTRY_SZ / SECT; i++)
         read_sect(elba + i, buf + i * SECT);
@@ -188,6 +209,16 @@ static void load_gpt(void) {
         die("%s: GPT entry array CRC mismatch", dev);
     memcpy(entries, buf, sizeof buf);
     memcpy(disk_guid, use + 56, GUID_LEN);
+    /* A crafted table with a valid CRC can still carry nonsense LBAs;
+     * reject them before any sector arithmetic (first_free, overlap
+     * checks, print) can overflow on them. */
+    for (int i = 0; i < NPARTS; i++) {
+        if (!part_used(i)) continue;
+        uint64_t s = rd64(entries[i] + 32), e = rd64(entries[i] + 40);
+        if (s < FIRST_USE || e > last_use || s > e)
+            die("%s: GPT partition %d has invalid LBA range %llu..%llu",
+                dev, i + 1, (unsigned long long)s, (unsigned long long)e);
+    }
     have_gpt = 1;
 }
 
@@ -209,6 +240,7 @@ static void chs(uint64_t lba, uint8_t out[3]) {
 }
 
 static void write_gpt(void) {
+    if (rdonly) die("%s is read-only; cannot write a GPT", dev);
     uint8_t sect[SECT];
     uint64_t backup = total_sectors - 1;
 
@@ -257,6 +289,7 @@ static void write_gpt(void) {
 }
 
 static void zap_all(void) {
+    if (rdonly) die("%s is read-only; cannot zap", dev);
     uint8_t z[SECT];
     memset(z, 0, SECT);
     for (uint64_t i = 0; i < 34; i++) write_sect(i, z);
@@ -295,11 +328,22 @@ static uint64_t first_free(uint64_t need) {
         if (e < cur) continue;
         if (s > cur) {                  /* gap [cur, s-1] before this part */
             uint64_t a = (cur + ALIGN - 1) / ALIGN * ALIGN;
-            if (a + need - 1 < s) return a;
+            /* overflow-safe form of: a + need - 1 < s */
+            if (a < s && need <= s - a) return a;
         }
         cur = e + 1;
     }
     return (cur + ALIGN - 1) / ALIGN * ALIGN;
+}
+
+/* Strict unsigned parse: no sign, no trailing garbage, no overflow. */
+static uint64_t parse_u64(const char *s) {
+    if (!*s || *s < '0' || *s > '9') die("bad number: %s", s);
+    errno = 0;
+    char *end;
+    unsigned long long v = strtoull(s, &end, 0);
+    if (errno == ERANGE || *end) die("bad number: %s", s);
+    return v;
 }
 
 /* size suffixes are powers of 1024; plain numbers are sectors */
@@ -312,12 +356,12 @@ static uint64_t size_sectors(const char *s) {
                c == 'G' ? 1073741824ULL : 1099511627776ULL;
         char *tmp = strndup(s, len - 1);
         if (!tmp) die("out of memory");
-        uint64_t v = strtoull(tmp, NULL, 0);
+        uint64_t v = parse_u64(tmp);
         free(tmp);
         if (v > 0xFFFFFFFFFFFFULL / mult) die("size out of range: %s", s);
         return v * mult / SECT;
     }
-    return strtoull(s, NULL, 0);
+    return parse_u64(s);
 }
 
 static void op_new(const char *arg) {
@@ -491,6 +535,11 @@ static int verify(void) {
         uint8_t buf[NPARTS * ENTRY_SZ];
         for (int pass = 0; pass < 2; pass++) {
             uint64_t elba = rd64((pass ? bh : h) + 72);
+            if (!entries_lba_ok(elba)) {
+                fprintf(stderr, "%s entry array LBA out of range\n", pass ? "backup" : "primary");
+                bad = 1;
+                continue;
+            }
             for (uint32_t i = 0; i < sizeof buf / SECT; i++) read_sect(elba + i, buf + i * SECT);
             if (crc32(buf, sizeof buf) != rd32((pass ? bh : h) + 88)) {
                 fprintf(stderr, "%s entry array CRC mismatch\n", pass ? "backup" : "primary");
