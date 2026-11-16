@@ -25,6 +25,15 @@ installer and QEMU tests.
 
 ## Quick start
 
+Clone only the Linux source branch (excluding website branch history):
+
+```sh
+git clone --single-branch --branch main https://github.com/Maiake-ops/L2.git
+cd L2
+```
+
+The project website is published separately from the `gh-pages` branch.
+
 ```sh
 # interactive (gum)
 ./l2
