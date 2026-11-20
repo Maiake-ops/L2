@@ -221,7 +221,9 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
 - 20:3x launched heavy-coder W2 (l2pm transactions/consistency, parallel,
   disjoint scope); amended W1 to rcl2-scoped tests only (lead runs full
   make check after both land). Retired l2pm-phased-pipeline memory
-  (condition met: committed at HEAD, 84 l2pm tests green).
+  (condition met: committed at HEAD, 71 l2pm tests green — corrected count:
+  security 45 + pipeline 19 + validation 3 + features 4; earlier "84"
+  misattributed the stability harness's 17).
 - 20:4x l2install read-only security audit complete: F3/F4/F5/F7/F14
   confirmed, 3 hypotheses falsified by verification; W6 queued with
   regression-test scope. Target status: rcl2 48 KiB resident = ~50 KiB
