@@ -1,0 +1,631 @@
+================================================================================
+L2 ARMAGEDDON II — COMPLETE SESSION NOTES (session L2-ea)
+================================================================================
+Generated : 2026-11-20, late session (~23:5x local; campaign ongoing)
+Repo      : /home/maiake/L2
+Branch    : campaigns/armageddon-ii (created from cd0f88a; main UNTOUCHED)
+Directive : "L2 ARMAGEDDON II: HEAVY-CODER OVERDRIVE" — continue the prior
+            100-mission ARMAGEDDON campaign, add workstreams 101-300. Act as
+            lead engineer coordinating independent specialist workstreams;
+            route implementation to the heavy-coder subagent (project four-
+            tier team). Never fabricate agents/results. Evidence for every
+            claim. Commit verified changes locally on a dedicated branch.
+            No pushes, no history rewrites, no destructive ops.
+User input: "using heavy-coder" + the pasted directive.
+Companion : docs/armageddon-ii-progress.md (my live ledger, committed);
+            docs/armageddon-progress.md (shared peer ledger, L2-72/L2-96).
+
+--------------------------------------------------------------------------------
+1. SESSION ROSTER & LANES (four concurrent Qwen Code sessions)
+--------------------------------------------------------------------------------
+L2-ea (THIS SESSION) — lead coordinator + implementation owner:
+  rcl2 lifecycle (missions 21-30, 141-160), l2pm (41-50, 181-200),
+  shell-safety hardening (l2install/l2net), verification, ALL commits on
+  campaigns/armageddon-ii. Write scope: rcl2/, l2pm/, l2install,
+  overlay/bin/l2net, tools/test_rcl2*, tools/test_l2pm*, Makefile (check
+  wiring), docs/armageddon-ii-progress.md, note/, build/a2-*/,
+  build/campaigns/a2-*.
+
+L2-72 — ORIGINAL ARMAGEDDON 100-mission campaign session:
+  Shared ledger co-owner; mission reports 01-04/05/11-13/21; broad audits.
+  MISSION 05: default-kernel image trim — owns config/kernel.fragment +
+  tools/patch-kernel-ram.py + main-tree build/out kernel/ISO rebuilds
+  (JOBS=6 L2_LOAD=5, checks concurrent ./l2 builds). Cedes rcl2/l2pm
+  IMPLEMENTATION to L2-ea; keeps audits/verification. Makes NO commits.
+  Post-retraction also owns trim batches: FW_LOADER_COMPRESS_ZSTD=n,
+  TRIM_UNUSED_KSYMS=y, runtime gating + RO-tail (missions 05/80/65),
+  LTO_CLANG evaluation (mission 80). dash http:// fix (their build-infra
+  lane, deferred until no ./l2 builds run).
+
+L2-96 — low-RAM kernel VARIANT + boot matrix:
+  NEW config/kernel.lowram + tools/l2-lowram, separate build-lowram/ tree,
+  logs build/campaigns/lowram-*. Owns tools/lowram_matrix.py + test
+  (committed e24248c). Variant kernel: MODULES=n (no module loading, no hw
+  pack on l2-lowram.iso → ring-0 module-injection surface removed for the
+  variant). WP2 iterations toward 10M BIOS boot. Snapshots build/out/rcl2 +
+  initramfs once read-only. Does NOT edit rcl2/l2pm/kernel.fragment/
+  patch-kernel-ram.py/l2/build/out.
+
+maiake-f6 — VERIFICATION/HANDOFF lane, worktree ONLY:
+  /home/maiake/L2/.qwen/worktrees/campaigns, branch campaigns/engineering,
+  base 21031ce (PRE-cd0f88a — merge sequencing flagged). Never writes main
+  checkout. Owns tools/test_mempressure.py (orchestrator-owned: RUN unedited,
+  never edit) + l2pm/Makefile build-path alignment fix. rcl2 auditor packet
+  (04-rcl2.md, durability commit 0792991). Independent fuzz audit of W2.
+
+LANE DISPUTE (resolved, definitively closed): ~22:10 L2-96 made a GOOD-FAITH
+claim on L2-72's TRANSFER PROPOSAL, treating the LIVE fragment WIP as a
+handoff to "verify then commit". ~22:50 RETRACTED (shared ledger "CORRECTION
+— LANE TRANSFER CLAIM RETRACTED" ~lines 522-546; maiake-f6 verified; L2-72
+accepted "dispute fully closed, recorded split stands"). L2-72 flagged;
+L2-ea verified (no unauthorized commits; WIP live, mtime 21:07, +43/-1
+growing, agent running, per-batch snapshots) and REFUSED mid-iteration
+commits. L2-96 confirmed DON'Ts: no fragment/patch-script edits, no main-
+tree kernel/rootfs/initramfs/iso builds, no commits of L2-72's WIP; post-
+WP2 queue VARIANT-ONLY; trim items = recommendations in L2-72's lane.
+Recorded split governs; NO user decision required; no reassignment claimed.
+Commit-refusal policy mutual + durable (e24248c followed it: own lane,
+verified). Only the USER reassigns lanes.
+
+--------------------------------------------------------------------------------
+2. GROUND RULES & PROTOCOLS
+--------------------------------------------------------------------------------
+- Every claim needs command + output; logs under build/campaigns/a2-*.
+- Small reviewable diffs; heavy-coder implements, L2-ea reviews + commits.
+- COMMIT-REFUSAL POLICY: lane-owned work committed only when its OWNING
+  session declares it verified and ready, with attribution, after lead
+  review. Never mid-iteration from a non-owning session.
+- No destructive ops, no remote changes, no history rewrites, no pushes.
+- Credit discipline: max 2 concurrent heavy-coder agents.
+- build/out VOLATILITY PROTOCOL (L2-72 mission-05 rebuilds active): never
+  read live build/out for test evidence — use pinned snapshots
+  (build/campaigns/baseline-artifacts/ + SHA256SUMS) or own copies under
+  build/a2-* with recorded hashes; sanity-check rootfs copies for torn
+  restage races. L2-ea runs no ./l2 build; ping L2-72 before any exception.
+- RAM measurements: real ISO, -smp 2, settle 40 s. Direct-boot (-kernel/
+  -initrd) readings ~1 MiB high (fw_cfg initrd) — comparison only, never
+  budget claims. Over-budget reading → re-run --settle 40 before regression.
+- Determinism layering: ISO ASSEMBLY byte-reproducible proven (xorriso +
+  limine-bios-install + MBR-pin given identical staging); COMPILE-layer
+  determinism double-build proof still pending (maiake-f6 campaign 7).
+  Pin EVERY staging input hash; don't assume compile reproducibility.
+- Heavy-coder agents: no commits, no ./l2 build, no build/out writes,
+  no docs/notes creation (lead owns docs); reports carry handoff packets.
+  Flash test tiers (Qwen3.8-Flash-Next / Qwen 3.8 Max) NOT registered in
+  this environment — tier fallback flagged; lead relays/re-runs.
+
+--------------------------------------------------------------------------------
+3. BASELINE EVIDENCE & THREE BOTTLENECKS (session start)
+--------------------------------------------------------------------------------
+Baseline (this host: 16 cores, KVM, QEMU 11.1.2, NixOS toolchains; kernel
+7.3.3-l2, tinyconfig + config/kernel.fragment + tools/patch-kernel-ram.py):
+- HEAD cd0f88a (user commit of rcl2 memory WIP: rustc opt-level=z,
+  --no-rosegment -z norelro, CFG_RAW_CAP 8192->2048, CMDLINE_CAP 4096->2048,
+  shared g_iobuf, bounds-checked Rust parser).
+- make check PASS exit 0 (119 unit tests at the time).
+- ISO 8,787,968 B (8.38 MiB < 10 MiB gate). Hashes: 14:39 build d850fb81…;
+  20:00 snapshot 06a4fd1e… (baseline-artifacts/SHA256SUMS).
+- Kernel vmlinuz-l2 2,958,336 B, sha 0fa6cfc86efa5c086b213be4aaeab112e0ab466f5f8435d8cde6aa8f526fe762.
+- initramfs 426,833 B -> 421,275 B (after 17K rcl2 rebuild).
+- DECOMPRESSED KERNEL IMAGE = 7490 KiB (4891 code + 351 rwdata + 1392 rodata
+  + 692 init + 164 bss). THE WALL.
+- 10M guest: present 9720 KiB, managed 1152 KiB → kthreadd OOM t=0.52 s.
+  12M: managed 3212 KiB → OOM panic t=0.375 s during initramfs unpack.
+  16M: PASS (MemTotal 8192K, used 5564K). 24M: PASS (used 5632K).
+  32M: 22252K/32248K available, 9060K reserved.
+- At 10M QEMU places ACPI tables above RAM end → ACPI init fails, MP-table
+  fallback works (QEMU artifact, not a kernel defect).
+- rcl2 at HEAD: selftest + supervision PASS, 48 KiB selftest RSS, 17,184 B.
+
+THREE BOTTLENECKS:
+1. Kernel image footprint 7490 KiB → managed RAM below survival at 10-12M
+   guests. Primary target (<10 MiB boot) blocked. Owner: kernel lanes
+   (L2-96 variant WP2; L2-72 default mission-05).
+2. Initramfs 426,833 B gzip / ~1.2 MiB unpacked charged to tiny managed pool
+   during early unpack; carries non-boot binaries (l2pm, l2wifi). Kernel
+   lane; L2-ea analysis only.
+3. Verification gap: prior-mission tests/patch untracked, sweep truncated,
+   rcl2 buffer-cap commit untested at boundaries, no committed low-RAM
+   regression gate. Owner: L2-ea (closed via W3 commits + W1/W2 harnesses).
+
+--------------------------------------------------------------------------------
+4. WORKSTREAM LEDGER (W1-W7)
+--------------------------------------------------------------------------------
+W1 — rcl2 lifecycle hardening (missions 21-30, 141-160): DONE, COMMITTED
+  1984055 (8 files, +1350/-48). heavy-coder implemented; lead reviewed every
+  diff line + re-ran all checks.
+  Fixes:
+  - file_read silent truncation → EFBIG probe (reads 1 byte past cap-1;
+    >0 → -EFBIG; ==0 → exact fit; errors propagate). Per-caller policies:
+    config → refuse whole + default shell (a cut service line could exec a
+    shortened path prefix); cmdline → trim to last complete token;
+    /proc/mounts → streaming field-by-field scanner (chunk-boundary state,
+    handles final line without newline, ro detection avoids rootcontext=
+    false positive).
+  - Rust parser: NUL-bearing lines skipped; parse_service two-pass
+    validate-then-write rejects >6 args / overlong args (never truncates);
+    names may truncate (log labels only).
+  - PRE-EXISTING RESCUE BUG: is_ws lacked '\n' → /proc/cmdline trailing
+    newline glued to last token → l2.rescue=1/single as LAST token NEVER
+    matched (confirmed at cd0f88a~1). Fixed + 2 regression fixtures.
+  - g_iobuf invariant documented (single-threaded, non-overlapping one-shot
+    reads, no retained pointers; Rust copies into g_conf).
+  New tests: verification/test-truncation.c (9 groups), test-lifecycle.c,
+  lifecycle-helper.c; tools/test_rcl2_lifecycle.py (37-case fuzz + ELF W+X/
+  stack audit + 6 real-PID1 namespace lifecycle tests = 14 test groups).
+  Evidence: 7/9 C groups + 4 harness groups FAIL on baseline; all pass after.
+  QEMU PID1 proof: pinned kernel 0fa6cfc8, private initramfs 423,588 B,
+  L2# in 12.2 s, clean Power down, full serial build/campaigns/a2-rcl2-boot.log.
+  Measurements: binary 17,184 → 18,656 B (+1,472, +8.6%); selftest RSS 48 KiB;
+  BOOT-RESIDENT 40 KiB (was 68) — mission-22 CLOSED, dual-confirmed
+  (maiake-f6 auditor independent 36-40 kB).
+  ABI asserts (Svc=507/Conf=8692) + wait-ordering (net first, deliberate for
+  RAM-measurement stability) untouched. ELF clean (R E .rodata+.text, RW
+  .data+.bss, GNU_STACK RW, no W+X).
+
+W2 — l2pm hardening (missions 41-50, 181-200): DONE, COMMITTED 4acfd36
+  (3 files, +1338/-135). Reprioritized mid-flight on peer gapmap + lead-
+  verified data-loss chain. TDD: tests written before l2pm.c edits.
+  P1 FAIL-SAFE GC (closes the verified data-loss chain):
+    Chain: gc liveness DB-only + default gc rm_rf inactive generations +
+    ZERO fsync (power loss tears DB entry) → corrupt DB makes routine gc
+    delete the LIVE store path. Torn rollback DB re-sync feeds same path.
+    Fix: refuse on unreadable DB entry / gen metadata BEFORE any deletion;
+    liveness = DB + ALL kept generations; keep active + newest 2 per profile
+    (--prune-generations = legacy opt-in; --keep-generations keeps all;
+    mutually exclusive). Store paths of kept gens never deleted even if DB
+    entry gone.
+  P2 CRASH CONSISTENCY: fsync file before rename + fsync dir after, at all
+    19 temp+rename sites (write_file, write_file_atomic, tar_extract, store
+    double-rename, profile rebuild/switch). fsync_tree for staged trees.
+  P3 INTEGRITY: verify_manifest missing → returns 1 (never silent pass);
+    verify --repair: completes interrupted rollback from intent marker
+    (written before mutation, removed on success), reconstructs DB from
+    active generation (default profile first; validates name/version/store;
+    never drops listed packages, never adopts orphans), rewrites missing
+    manifests, rebuilds diverged profiles, removes stale staging artifacts.
+    STORE DATA NEVER MODIFIED/DELETED by repair/rollback.
+  P4 TRANSACTIONS: add/install/remove = one transaction; failure restores
+    DB + active profile generation, removes failed-command generations;
+    store/cache never deleted (gc reclaims). Multi-archive install; set-
+    aware multi-name remove (all checks before mutation; co-removed names
+    satisfy each other's deps). Failure contract documented at struct txn.
+    Crash ≠ auto-rollback (each completed package consistent; rollback
+    undoes; verify --repair reconciles). SINGLE-WRITER assumption (no
+    locking) — concurrency stress handed off.
+  P5 SOLVER EDGES: name-only dep semantics + version-divergence warning
+    (local recipe check only, no remote fetch); link_tree last-wins conflicts
+    now WARN explicitly.
+  Tests: tools/test_l2pm_transactions.py (33 new); 25/33 FAIL on pre-fix
+  binary, 104/104 after (71 existing + 33). One security-test gc call
+  adapted to --prune-generations (preserves reclaim intent; reviewed OK).
+  Measurements: binary 88,184 → 100,472 B (+12,288, within +20 KiB cap);
+  RSS 164 → 168-172 KiB; zero new warnings; 5 iterations.
+  l2pm/Makefile UNTOUCHED (maiake-f6 owns build-path alignment: make lacks
+  -ffunction-sections/-fdata-sections/--gc-sections that l2:739 uses →
+  different shas, same size; do not compare make-path sha vs build/out).
+  Design proposals (NOT implemented): ed25519 sidecar signatures (mission
+  46), binary repo index.l2 (mission 47). Mission 48 caching gaps remain
+  (always-rebuild, basename cache no re-fetch, no cache/tmp gc) — follow-up.
+  INDEPENDENT AUDIT PENDING (sign-off gate): maiake-f6 fuzz auditor C
+  reviewing 4acfd36 read-only (fail-before/pass-after re-verify, gc liveness
+  edges, fsync ordering windows, --repair invariants, txn rollback, kill-9
+  at each txn phase). 4acfd36 records LEAD verification only; FINAL W2
+  sign-off held for their CONFIRM/REFUTE verdicts. Power-loss durability
+  INFERRED from fsync ordering (not fault-injected); dm-flakey needs root+
+  device-mapper (feasibility stated honestly); kill-9 + ordering analysis =
+  deliverable depth, residual device-flush gap documented.
+
+W3 — commit verified prior-mission artifacts: DONE, 1888794 (9 files,
+  2369 insertions): 7 unit-test files (test_l2gpt/l2install/l2pm_features/
+  pipeline/recipe_validation/security/l2wifi) + tools/patch-kernel-ram.py +
+  my ledger. make check green first. Peers' live files left untracked.
+
+W4 — adversarial reviews (kernel-maintainer hat): DONE (read-only).
+  cd0f88a ELF audit: CLEAN. Kernel RAM patchset (patch-kernel-ram.py) six
+  falsification angles sent to L2-96; ALL TESTED by them:
+  1 CONFIRMED: BASE_SMALL compile-time → pcp high=0/batch=7, min_free=128
+    at ALL RAM sizes; l2net percpu_pagelist_high_fraction=100000 cannot
+    re-enable caching. 800-fork burst 4G = 0.8 s, zero alloc failures (light
+    loads fine); 16G heavy-throughput → mission 80. Recommendation: runtime-
+    gate on totalram_pages. ENDORSED.
+  2 QEMU S3 (RTC wakealarm) + SMP2 + poweroff + reboot clean at 256M;
+    real-firmware wakeup/hotplug = residual risk.
+  3 CONFIRMED zero-tail vmemmap invariant (<128 MiB guests; inert above);
+    exposure small (PROC_PAGE_MONITOR/page_idle/HWPOISON/CMA/balloon off).
+    Recommendation: map tail page READ-ONLY (zero RAM cost). ENDORSED.
+  4 8K stacks: VMAP_STACK=y; test-stability --ram 16,32 PASS (churn 1000,
+    fanout, 4 MiB stress, ext4-on-virtio write/clean-reboot/recovery, console
+    restart, no zombies). Compile-time constants can't runtime-gate; 8K
+    stacks stay at all sizes, justified. Residual closed.
+  5 RESOLVED: streaming initrd free sound (rd_fill advances initrd_start;
+    final free frees unconsumed tail only; 32M accounting exact: 26 msgs,
+    412K = PAGE_ALIGN(421275)). CORRECTION TO MY NOTE: retain_initrd=1 is a
+    SILENT NO-OP by kernel design (handler if(*str) return 0, initramfs.c:636);
+    only BARE flag works (verified: 0 streaming frees, MemTotal -416K,
+    /sys/firmware/initrd present 421275 B mode -r--r-----). My "8x16K oddity"
+    was a truncated capture window.
+  6 RESOLVED benign: "Failed to release memory for alloc_low_pages()" =
+    memory_map_top_down() failing to get 2 MiB-aligned top block (initrd
+    occupies it at 10M) → documented ALIGN_DOWN+BRK fallback; extra early
+    4K PTEs, NO managed-page loss.
+  l2install + l2net security audits: see findings catalog (§6).
+
+W5 — release/CI integration (missions 281-300): QUEUED (after W6/W7 +
+  peers' kernel/Makefile work). Scope: README size-table refresh with FINAL
+  measured numbers (rcl2 post-W7, l2pm post-Makefile-alignment; "~67 KiB
+  l2pm" claim STALE vs 88,184→100,472 B); release gates; honest security
+  posture docs (two kernels/two postures/two floors); CI integration of new
+  harnesses; N5 joint l2net gate (trigger: L2-72 finalization ping).
+
+W6 — shell safety hardening (l2install + l2net; missions 62/64/66/67/
+  221-240/261-280): RUNNING (heavy-coder launched 22:4x, background).
+  P1 scope = 8 lead-verified findings (F3/F4/F5/F7/F14/F15 + N1-marker/N3),
+  each with fail-before/pass-after regression. P2 (pack-pin verification)
+  DEFERRED per co-signed contract (waits L2-72 mission-05 build side).
+  Excludes l2net status() (maiake-f6 worktree fix, merge pending) and boot()
+  vm tuning (N5 joint item, W5-era). udhcpc.script audited CLEAN (untouched).
+
+W7 — rcl2 live /tmp+/run OOM wedge + D5 OOB + size carries (missions
+  19/25/29/30 + 101-120): RUNNING (launched 23:2x as W1-agent continuation,
+  warm runtime). maiake-f6 auditor packet read in full + lead-verified.
+  H1: live-mode capped tmpfs — sysinfo(2) caps: /tmp = totalram>>3 clamped
+    2..16 MiB, /run = totalram>>4 clamped 1..8 MiB; installed branch BYTE-
+    IDENTICAL; sysinfo failure → floor caps; mkdir_try; boot log line.
+    Defect: mounts_setup gates /run+/tmp tmpfs behind INSTALLED_MARK → live
+    /tmp uncapped ramfs → 16M /tmp fill OOM-kills console dash, respawn also
+    killed (~2.6 MiB unevictable), PID1 survives but console WEDGED until
+    reboot. Cap rationale: 16M idles ~5.5 MiB, OOM ~8 MiB committed; 2 MiB
+    cap bounds worst-case ~7.6 MiB < OOM point; ENOSPC exactly at cap.
+  H2/D5: console_has_ttys OOB read (CWE-125) at main.c:719-726 — loop
+    'for (unsigned i=4; dev[i-1]; i++)' reads past NUL; craft[16]="x\0\0ttyS0"
+    matches "ttyS" at i=7 → wrong TERM=vt100 (:777). Lead traced repro.
+    Fix: strlen-bounded scan (len<4 → 0; i<=len). Repro ported w/ attribution.
+  Carries ACCEPTED conditional on full re-verification (drop if any regress):
+    - Makefile CFLAGS -Os→-Oz (−3366 B text) + RFLAGS -C force-unwind-tables=no
+      (−384 B, .eh_frame gone; panic=abort never unwinds, sigreturn hand-asm;
+      trade: no CFI for gdb — document).
+    - rss_report → g_iobuf reuse (−256 B bss; lifetimes non-overlapping).
+    - Probe-byte refinement: expose file_read probe byte; whitespace-only
+      probe ⇒ non-truncation (max-length cmdline 2047 chars+'\n'=2048 B and
+      config ending '\n' at cap parse FULLY instead of dropping last complete
+      token); EFBIG kept for genuine cuts; trim stop-set aligned to is_ws
+      (add \r, 0x0B, 0x0C).
+    - Selective test-supervision ports: iobuf_aliasing pin, conf_exact_fit,
+      console_ttys; conf_truncated adapt to EFBIG or drop.
+  GATE (locked, verbatim): private ISO from pinned staging + fixed rcl2 →
+    RUN maiake-f6 worktree tools/test_mempressure.py --iso <fixed> --ram 16M
+    UNEDITED. PASS = ENOSPC-at-cap (dd stops exactly 2048 KiB) + shell
+    survival (L2ALIVE probe) + reclaim (used_after ≤ used_before+1024 KiB)
+    + clean poweroff. Plus tools/test-live-install.py --ram 256 PASS
+    (installed branch exercised) + idle delta ≤~64 KiB (ramtest 3-sample).
+  Target binary ~14.5-15 KB (maiake-f6 worktree final measured 13,544 B /
+    32-40 kB boot with all carries + D1-D5).
+  NOT in scope: rejected experiments (8-svc table — no resident win, keeps
+    16 ABI; g_line shrink); §10 heavy-test follow-ups (routed to verification
+    tier); install-from-live ≤16M may ENOSPC during extraction (honest
+    documented failure; tested path 256M).
+
+--------------------------------------------------------------------------------
+5. CONTRACTS & JOINT POLICIES
+--------------------------------------------------------------------------------
+P2 PACK-PIN CONTRACT (docs/armageddon/p2-pack-pin-contract.md) — CO-SIGNED,
+  status AGREED. Closes F1 (ring-0 module/firmware load from untrusted media)
+  + installed fall-through (/lib/modules/$KREL missing resurrects F1).
+  - Per-pack manifest: medium l2/<pack>/pack-manifest, LF "sha256  relpath"
+    (two spaces), LC_ALL=C sort, excludes itself, no absolute/.. ; packs
+    hw/wifi/install/ssl build independently.
+  - Pin /etc/l2/pack-hash (root:root 0644), TWO locations: initramfs (ISO
+    build embeds; live/rescue) + ext4 root (l2install writes at install from
+    verified medium; host path from build staging). Format "sha256  packname"
+    (sha OF manifest), sorted. Empty/absent ⇒ fail-closed.
+  - A1 (lead amendment, ACCEPTED): UNIFORM verify ALL pack files (lib/modules
+    + bin + lib/firmware) at FIRST activation, whatever triggers it. Closes
+    boot-time firmware gap: load_modules probes ALL modaliases → wifi pack
+    activates at BOOT when wifi HW present (iwlwifi/mt7921/r8169 request
+    firmware during probe, before wifi-start). Enforcement: in use_pack
+    BEFORE any modprobe/exec/firmware-path exposure. /run cache keyed by
+    manifest hash; ~1 s one-time wifi cost measured per mission-70.
+  - A2 (ACCEPTED + lead extension): verifier rejects malformed manifests
+    (absolute, .., duplicate relpaths, short/non-hex hash, CRLF) AND pack
+    tree must be regular files + dirs only (reject symlinks/devices/FIFOs
+    upfront — busybox sha256sum follows symlinks).
+  - A3 (ACCEPTED, generalized): ANY update replacing l2net OR changing pack
+    content must refresh pin ATOMICALLY (l2install re-run today; l2pm hook
+    future). P2 shell+build ship SAME release; old ISOs unaffected (immutable
+    initramfs carries old l2net). Upgrade-without-refresh = mission-70 case.
+  - Build side (L2-72 l2 lane, post-mission-05): pack builders generate
+    manifests; build_iso computes pin → writes rootfs/etc/l2/pack-hash →
+    REBUILDS initramfs inside ISO step → assembles (repro preserved).
+  - Mission-70 regression (L2-72, after P2 lands): crafted medium refused;
+    genuine pack activates + boot cost measured; installed fall-through
+    refused (root pin); tampered firmware refused before kernel load;
+    double-ISO byte-identical; wifi-HW boot cost; malformed-manifest+symlink
+    refusal; upgrade-without-refresh refusal.
+  - MODULE_SIG orthogonal (kernel lane + user decision; size/key trade-off).
+
+N5 JOINT THRESHOLD POLICY — AGREED, executable sequence:
+  Problem: kernel BASE_SMALL compile-time gating + l2net boot() runtime
+  writes (min_free_kbytes=128, watermark_scale_factor=0, lowmem_reserve_ratio
+  '0 0 0', percpu_pagelist_high_fraction=100000) at ALL RAM sizes fight on
+  big guests. ONE threshold policy, LAND TOGETHER.
+  Design input (L2-96 angle-1 sketch): boot-time l2_small_ram flag
+  (__ro_after_init) for runtime hooks (zone_highsize/batch); direct
+  totalram_pages checks in __init hooks; compile-time constants (MIN_THREADS,
+  THREAD_SIZE_ORDER) stay (8K stacks justified by VMAP_STACK + stability).
+  SEQUENCE: L2-72 finalizes kernel-side policy in patch-kernel-ram.py (their
+  lane; logged under 05/80/65) → PINGS L2-ea AND L2-96 → L2-ea's W5-era
+  l2net boot() gate + L2-72's kernel gate LAND TOGETHER. L2-96 co-signs
+  design + adopts same policy in config/kernel.lowram (variant consistency
+  >128M guests). L2-ea side queued against L2-72's FINALIZATION PING (the
+  patch-script owner), NOT L2-96's alone. W6-P1 deliberately excludes boot()
+  tuning (no premature divergence).
+
+--------------------------------------------------------------------------------
+6. VERIFIED FINDINGS CATALOG
+--------------------------------------------------------------------------------
+rcl2 (W1 fixed unless noted):
+  - file_read silent truncation at 3 PID1 call sites (config/cmdline/mounts)
+    → wrong-exec / spurious-rescue / dropped-ro-guard hazards. FIXED (EFBIG).
+  - Rescue flag as last cmdline token never matched (is_ws lacked '\n').
+    PRE-EXISTING. FIXED + fixtures.
+  - NUL-bearing config lines → NUL-shortened exec paths. FIXED (skip line).
+  - >6 args / overlong args silently truncated/dropped. FIXED (reject line).
+  - D5 console_has_ttys OOB read (CWE-125), wrong TERM. OPEN → W7 fixing.
+  - cmdline max-length edge: EFBIG drops last COMPLETE token (probe-byte
+    refinement in W7). Low severity, conservative-safe.
+  - hostname >63 chars truncates (label-only) — documented limitation.
+  - Shutdown KILL-grace reaps without logging exit status — deliberate.
+
+l2pm (W2 fixed):
+  - gc DB-only liveness + default inactive-gen deletion + zero fsync →
+    power-loss→corrupt-DB→gc-deletes-LIVE-store chain. FIXED (fail-safe gc).
+  - verify missing-manifest silent pass (C:2258 legacy return 0). FIXED.
+  - link_tree last-wins silent conflicts. FIXED (warn).
+  - No crash consistency (zero fsync). FIXED (19 sites).
+  - Rollback DB re-sync torn state. FIXED (intent marker + repair).
+  - Multi-package partial failure left half-upgraded set. FIXED (txn).
+  - Remaining: mission 48 caching gaps; single-writer (no locking);
+    signatures/binary-repo missing (design only).
+
+l2install (W6 fixing; lead-verified, none covered by existing 10 tests):
+  - F3 (main, medium sev): setup_live triggers on ANY host without build
+    tree → silently executes install tools (sgdisk/mkfs/limine) from any
+    inserted L2-LIVE medium as root. Fix: gate on actually-boots-L2
+    (/proc/1/comm = rcl2); host without build tree → clear die. Plus
+    cpio --no-absolute-filenames defense.
+  - F4 (medium): image mode silently truncates EXISTING regular file
+    (truncate -s; YES=1 forced). Fix: refuse non-empty without --yes.
+  - F5 (low): cleanup() umounts $MNT unconditionally (env override + early
+    failure can umount a mount we never created). Fix: mounted-flags.
+  - F7 (low, exotic): list_disks passes lsblk MODEL raw into pipe protocol
+    → newline/| injection of fake menu lines. Fix: sanitize tr -d '\n\r|'.
+  - F14 (low): find_medium $MEDIUM mount never umounted on host path (leak).
+    Fix: umount when we mounted it (live keeps it).
+  - F15 (low, verified vs busybox.applets): image mode needs truncate+losetup
+    (util-linux) absent from guest busybox → host-only; current error
+    misleadingly says "l2 deps install". Fix: explicit host-only guard.
+  - Note only: disk_busy misses raw openers (qemu/dd without mounts); typed
+    confirmation mitigates.
+  FALSIFIED (NOT defects, do not "fix"): --efi-size and --hostname ARE
+  validated at parse time (l2install:577-580); preflight checks ESP+64 MiB
+  vs disk size BEFORE zap-all; /sbin/rcl2 resolves via sbin→bin symlink;
+  GNU/busybox cpio strip leading '/' by default.
+
+l2net (W6 fixing):
+  - N1/F1 (HIGH, peer-verified): find_pack accepts ANY medium with l2/wifi|
+    l2/hw dirs — NO L2-LIVE marker check (asymmetric vs l2install). use_pack
+    symlink-injects /lib/modules/$KREL + firmware path + runs pack
+    wpa_supplicant as root → ring-0 module load from non-boot media. Exploit:
+    attacker CD in sr0 wins loop order over USB boot medium. Installed
+    systems safe via /lib/modules short-circuit (but fall-through resurrects
+    if missing → P2 root pin). Fix P1: require L2-LIVE marker, fail-closed;
+    P2: full pin contract.
+  - N3 (low): modprobe -a -q $_list unquoted → dash pathname expansion.
+    Fix: set -f around split.
+  - N5 (info): boot() vm tuning at all RAM sizes → joint policy (above).
+  - status() exit-code bug (exited 1 without resolv.conf): maiake-f6 fixed
+    in worktree (if-form); W6 does NOT touch status() (merge flag).
+  udhcpc.script: CLEAN (router/dns/domain charset-validated, domain explicitly
+    untrusted; resolv.conf mktemp+atomic mv; ip/mask/broadcast binary-derived
+    dotted quads; net.conf root-owned 644). Mission 66 closed dual-cited.
+    Moot micro-notes: tmp.$$ fallback only on mktemp failure (root-only
+    threat); ${broadcast:+} unquoted safe (inet_ntoa-derived).
+  busybox login/passwd/su/getty applets ship; /etc/passwd root:x, NO
+    /etc/shadow; boot bypasses auth by design (physical access = root);
+    login/su vs missing shadow UNTESTED → L2-72 mission 67 (W1 owns rcl2
+    parser fuzz only; corpus shared).
+
+Kernel build-infra (L2-72 lane, lead-verified):
+  - dash hardcoded http:// at l2:293 (resolver), l2:327 (l2 update downloads
+    with EMPTY sha → pins whatever arrives over plaintext HTTP = persistent
+    MITM pin into sources.lock), l2:683 (build uses lock sha). Fix: https
+    mirror + refuse empty-sha pinning over http. Deferred (their lane).
+
+--------------------------------------------------------------------------------
+7. MEASUREMENTS & TARGET STATUS
+--------------------------------------------------------------------------------
+Budgets: core ISO < 10 MiB; installed storage < 10 MiB; idle RAM 10-15 MiB
+  band (ceiling 15360 KiB) at ANY guest size; rcl2 PID1 ~50 KiB resident;
+  <10 MiB guest boot = PRIMARY target.
+rcl2:
+  - baseline 26,904 B / 68-76 kB boot VmRSS.
+  - user WIP cd0f88a: 17,184 B / 48 KiB selftest (−36%).
+  - W1 committed 1984055: 18,656 B / 48 KiB selftest / 40 KiB BOOT-resident.
+  - W7 target ~14.5-15 KB (carries); maiake-f6 worktree final 13,544 B /
+    32-40 kB boot (all carries + D1-D5). ~50 KiB target MET (40 boot/48 selftest).
+  - NOTE: W1 is +1,472 B vs build/out's 17,184 (NOT a saving); storage win
+    comes from W7 carries (~2-3.7 KiB). 40 KiB = boot-resident ≠ 48 selftest.
+l2pm: 88,184 → 100,472 B (+12 KiB); RSS 164 → 168-172 KiB. README "~67 KiB"
+  STALE (W5 refresh; Makefile alignment will change binary again).
+  L2-72 mission-92 re-stamp: selftest RSS 168 KiB confirmed; W5 use 168 KiB
+  + 100,472 B (~98 KiB). Boot-40 citation: a2-rcl2-boot.log:297 (pid1_boot
+  rss_report in QEMU guest, distinct from host selftest 48 KiB).
+Kernel image: 7490 KiB decompressed (the wall). bzImage 2,958,336 B baseline.
+Boot floors:
+  - DEFAULT kernel: BIOS 14M (13M OOM); UEFI (96M,128M] — 96M/64M/48M =
+    Limine init_memmap high-memory-allocator PANIC (BOOTLOADER-layer
+    constraint, not kernel; refined from (64M,128M] by maiake-f6 tests).
+  - VARIANT (L2-96 WP2): v1 moved BIOS floor 14M→12M (bzImage −736K; managed
+    at 10M 1152K→3200K). 10M gap ~550-600K managed headroom. v2 build in
+    flight (v1 preserved build-lowram/v1/). Winning lever report at landing.
+  - <10M BIOS target OPEN, closing. Two kernels, two floors, two postures.
+ISO: baseline 8.38 MiB (< 10 MiB gate MET). Assembly byte-reproducible
+  (06a4fd1e twice from extracted staging); compile-layer proof pending.
+make check (integrated, 1ec7140): EXIT 0 — 166 unit tests (17 stability +
+  14 rcl2 lifecycle + 45 l2pm security + 19 pipeline + 3 validation +
+  4 features + 33 transactions + 17 l2gpt + 10 l2install + 4 l2wifi) +
+  4 rcl2 C suites (selftest/supervision/truncation/lifecycle).
+Security posture (W5 docs, honest): CPU_MITIGATIONS off (Spectre V1/V2
+  vulnerable), no SECCOMP/STACKPROTECTOR/MODULE_SIG/LSMs; KASLR/STRICT_RWX/
+  IBT/INIT_STACK_ALL_ZERO/VMAP_STACK on. Variant MODULES=n removes module-
+  injection surface; default MODULES=y + W6 marker + P2 pin. Hardening
+  enablement trades against budgets — user/campaign J decision.
+
+--------------------------------------------------------------------------------
+8. COMMIT LOG (campaigns/armageddon-ii; main = cd0f88a untouched)
+--------------------------------------------------------------------------------
+Mine (L2-ea):
+  1888794 test: commit verified ARMAGEDDON harness and kernel RAM patchset
+  384f25a docs: l2install/l2net security audits + corrected session lanes
+  4093711 docs: corrected three-session lane map + build/out snapshot protocol
+  629b96d docs: verified l2pm gc data-loss chain; W2 reprioritized P1-P3
+  8a582c9 docs: correct l2pm test count (71 = 45+19+3+4)
+  6645e6e docs: W6 phased fix plan, cross-lane findings, fuzz ownership
+  e74dac4 docs: maiake-f6 lane resolved; W7 queued; W2 Makefile boundary
+  74ac051 docs: W6-P2 dual-pin design + manifest contract sketch
+  ca1ed35 docs: lock W7 three-part gate; determinism layering; merge decision
+  a4e5905 docs: F15 image-mode host-only guard verified; l2net merge flag
+  fe0d42d docs: co-sign P2 pack-pin contract with amendments A1-A3
+  1984055 rcl2: truncation-safe reads, parser hardening, rescue-newline fix (W1)
+  4acfd36 l2pm: fail-safe gc, crash consistency, transactions, verify --repair (W2)
+  1ec7140 build: wire W1/W2 harnesses into make check; ledger DONE
+  072e92e docs: W4 angles all tested by L2-96 — outcomes, correction, floors
+  d66228f docs: variant MODULES=n security property; fragment WIP attribution
+  02cd24b docs: UEFI floor refined (96M,128M]; N5 joint threshold policy
+  56a7344 docs: lane dispute record + commit-refusal policy; P2 final ACK
+  07a88ca docs: P2 co-sign closure — A1 enforcement point, A2/A3 extensions
+  4849747 docs: W7 launched — packet verified, D5 traced, carries conditional
+  7f4cf1f docs: FINAL sequencing agreed with L2-96; rcl2 size nuance corrected
+  9fe6d91 docs: lane dispute resolved by retraction; WP2 v1 floor 14M->12M
+  6457400 docs: N5 executable sequence — trigger is L2-72's finalization ping
+Peers:
+  e24248c (L2-96) test: low-RAM boot matrix harness + failure forensics
+          (lowram_matrix.py + test, 762 ins; on this branch via main-tree commit)
+  0792991 (maiake-f6, WORKTREE campaigns/engineering) rcl2 auditor packet durability
+NOTE: branch carries both my and L2-96's verified commits; main untouched.
+MERGE TOPOLOGY = PENDING USER DECISION: campaigns/engineering bases on
+21031ce (pre-cd0f88a); my branch on cd0f88a+. No session merges/rebases
+unilaterally. maiake-f6 worktree fixes (D1-D4 duplicate my landed fixes,
+D5 net-new, l2net status(), l2pm Makefile alignment) reconcile at merge.
+
+--------------------------------------------------------------------------------
+9. FINAL SEQUENCING (agreed with L2-96/L2-72)
+--------------------------------------------------------------------------------
+At FINAL (reconciled integrated sequence, L2-72 mission-92 re-stamp 00:2x):
+1. W6/W7 land + COMMIT FIRST (L2-ea lane). L2-72 mission-05 lands + ping →
+   L2-72 integrated ./l2 build rcl2 l2pm + rootfs/initramfs/iso picks up
+   committed W1/W2/W6/W7 (rcl2+l2pm binaries; l2install/l2net via rootfs
+   staging) → final ISO carries ALL hardening. If W7 lands AFTER that
+   rebuild, L2-ea refreshes build/out/rcl2 in a coordinated window (ping
+   protocol) — no double-refresh conflict. L2-ea pings at W6/W7 commit;
+   L2-72 pings at mission-05 landing. Hash + size recorded + shared.
+2. L2-96 re-copies into variant initramfs assembly (build-lowram lane) +
+   re-stamps rcl2 --selftest against the committed build during FINAL
+   verification, BEFORE the FINAL sha pin to maiake-f6.
+3. Use FINAL measured hash/size for the 10M margin math (~550-600K gap);
+   W7 carries give ~2-3.7 KiB (measured at landing, not promised).
+4. L2-72 mission-05 lands → ping → P2 build-side starts; P2 shell-side
+   (L2-ea) per amended §3; mission-70 regression (L2-72).
+5. N5: L2-72 finalizes threshold policy → ping both → joint l2net+kernel
+   gate landing (W5-era).
+
+--------------------------------------------------------------------------------
+10. PENDING / QUEUE / AWAITING
+--------------------------------------------------------------------------------
+RUNNING: W6 (shell safety, heavy-coder bg), W7 (rcl2 caps/D5/carries, W1
+  runtime continuation). On reports: lead independent diff review → full
+  make check → verified commits → hashes to peers (mission-92 re-stamps).
+AWAITING PINGS:
+  - L2-96 WP2 v2 10M outcome + winning lever (primary target).
+  - L2-96 FINAL sequencing ping.
+  - L2-72 mission-05 landing ping (→ P2 build side).
+  - L2-72 N5 threshold-policy finalization ping (→ joint l2net gate).
+  - maiake-f6 W2 independent fuzz-audit CONFIRM/REFUTE + fix-review verdicts
+    (→ FINAL W2 sign-off; kill-9 per txn phase; dm-flakey if feasible).
+QUEUED WORK:
+  - W5 release/CI: README final sizes, release gates, posture docs (two
+    kernels/floors/postures), CI harness integration, N5 joint l2net gate.
+  - P2 shell-side (l2net/l2install pin verification) after mission-05.
+  - l2pm mission 48 caching gaps; signatures/binary-repo (design→implement
+    decision); concurrency/power-loss stress (single-writer limitation).
+  - Heavy-test follow-ups (maiake-f6 §10, verification tier): ctrlaltdel/
+    halt signals, wait-mode under pressure, UEFI boot of repacked ISO,
+    fork-bomb RLIMIT_NPROC, 2047/2048 boundary fuzz, 24h supervise soak.
+  - L2-72 mission 67: busybox login/su missing-shadow + non-rcl2 inputs.
+  - L2-72 dash https fix (deferred until no ./l2 builds).
+USER DECISIONS PENDING:
+  - Merge topology (campaigns/engineering vs main vs my branch) — no session
+    merges unilaterally.
+  - Kernel hardening enablement (SECCOMP/STACKPROTECTOR/MODULE_SIG/mitigations)
+    vs 10 MiB ISO / 15 MiB idle budgets — measure first (campaign J).
+  - Lane dispute RESOLVED by retraction — no decision needed (split unchanged).
+
+--------------------------------------------------------------------------------
+11. EVIDENCE INDEX
+--------------------------------------------------------------------------------
+Mine (build/campaigns/a2-*):
+  a2-make-check.log (baseline 119), a2-make-check-postW1W2.log,
+  a2-make-check-integrated.log (166+4 suites EXIT 0),
+  a2-baseline-artifacts.txt (sha256 of 14:39 build/out),
+  a2-rcl2-make-test.log, a2-rcl2-boot.log (22 KB serial, L2#/40KiB/Power down),
+  a2-rcl2-boot-run.log, a2-rcl2-lifecycle{,-prefix}.log,
+  a2-l2pm-baseline-{build,selftest,suites}.log, a2-l2pm-before-fix.log
+  (25/33 FAIL), a2-l2pm-final-{build,check,suites}.log (104 OK),
+  a2-review-w2.diff (1243 lines), a2-review-w1-main.diff.
+  Scratch: build/a2-rcl2/ (baseline binary, private rootfs/initramfs, boot
+  script), build/a2-l2pm/, build/a2-shell/ (W6), build/a2-w7/ (W7).
+Pinned snapshots: build/campaigns/baseline-artifacts/ + SHA256SUMS
+  (kernel 0fa6cfc8, ISO 06a4fd1e, initramfs 83666f8e, config 278fd5dd).
+Peers:
+  build/campaigns/armageddon-baseline-sweep.log, boot-forensics-32M.log,
+  armageddon-l2pm-gapmap.md (L2-72 missions 41-50 map),
+  lowram-forensics-report.md + lowram-default-matrix/ (L2-96),
+  05-fragment-wip.patch (L2-72 per-batch WIP snapshots).
+  build/lowram-forensics/ (10M-direct-baseline.log etc.).
+  maiake-f6 WORKTREE build/campaigns/04-rcl2.md (W7 packet §1-§10),
+  04-tmpcap-mempressure-16M.log, 04-baseline-mempressure-16M-control.log,
+  04-idle-{baseline,tmponly,tmpcap}.log, 07-reproducible.md,
+  rcl2/verification/{test-tmpcap.c,repack-initramfs.py,mkinitramfs.py},
+  rcl2/build/for-l2ea/main.c + tmpcap-patch-for-l2ea.diff.
+  docs/armageddon/{21-rcl2-lifecycle.md,61-69-security-posture.md,
+  p2-pack-pin-contract.md} (peer reports + co-signed contract).
+
+--------------------------------------------------------------------------------
+12. CORRECTIONS / FALSIFICATION LOG (intellectual honesty record)
+--------------------------------------------------------------------------------
+- retain_initrd=1 is a kernel-design NO-OP (bare flag only); my W4 note
+  suggested testing the wrong path. Corrected after L2-96 verification.
+- "8x Freeing initrd memory: 16K" oddity = truncated capture window (actual
+  26 msgs, 412K = PAGE_ALIGN(421275)). Corrected.
+- l2pm test count: I said "84" — actual 71 (45+19+3+4); the 17 belonged to
+  test_stability_harness. Corrected in brief + ledger (8a582c9).
+- lowram_matrix.py ownership: first attributed to L2-72, actually L2-96's.
+- "lowram_matrix.py committed in 1888794" (L2-96 claim) — FALSE at the time
+  (verified via git); later committed separately as e24248c. Both recorded.
+- Fragment WIP attribution: clarified to L2-96 it is L2-72's (not mine);
+  dispute resolved by L2-96 retraction.
+- rcl2 size: W1 is +1,472 B (NOT a saving vs build/out 17,184); storage win
+  is W7 carries. 40 KiB boot-resident ≠ 48 KiB selftest RSS. Corrected for
+  L2-96's 10M margin math.
+- Falsified l2install hypotheses (NOT defects): --efi-size/--hostname already
+  validated; preflight checks ESP vs disk before zap; /sbin/rcl2 via symlink;
+  cpio strips leading '/' by default.
+- UEFI floor refined (64M,128M] → (96M,128M] by maiake-f6 96M/48M tests.
+- My cmdline EFBIG drops last complete token on max-length cmdline (L2-96/
+  maiake-f6 observation) — accepted as W7 probe-byte refinement.
+
+================================================================================
+END OF NOTES — campaign ongoing; W6/W7 running, WP2 v2 in flight.
+Live ledger: docs/armageddon-ii-progress.md (committed, authoritative).
+================================================================================

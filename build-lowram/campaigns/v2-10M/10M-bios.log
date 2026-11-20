@@ -1,0 +1,59 @@
+[    0.401305] swapper/0 invoked oom-killer: gfp_mask=0x40cc0(GFP_KERNEL|__GFP_COMP), order=0, oom_score_adj=0
+[    0.401319] CPU: 0 UID: 0 PID: 1 Comm: swapper/0 Not tainted 7.3.3-l2-lowram #1 PREEMPTLAZY 
+[    0.401325] Call Trace:
+[    0.401327]  <TASK>
+[    0.401328]  ? 0xffffffff80208079
+[    0.401330]  ? 0xffffffff802038dd
+[    0.401331]  ? 0xffffffff802c1fbd
+[    0.401332]  ? 0xffffffff802f802b
+[    0.401333]  ? 0xffffffff8052c481
+[    0.401334]  ? 0xffffffff802f9ba9
+[    0.401335]  ? 0xffffffff802f9c7a
+[    0.401336]  ? 0xffffffff802f9f5a
+[    0.401337]  ? 0xffffffff8050f240
+[    0.401338]  ? 0xffffffff802fa0d8
+[    0.401338]  ? 0xffffffff802fa14e
+[    0.401339]  ? 0xffffffff8035237b
+[    0.401340]  ? 0xffffffff8035237b
+[    0.401341]  ? 0xffffffff8035249c
+[    0.401342]  ? 0xffffffff8035215c
+[    0.401343]  ? 0xffffffff8035293c
+[    0.401343]  ? 0xffffffff803535b0
+[    0.401344]  ? 0xffffffff8035343f
+[    0.401345]  ? 0xffffffff80354c57
+[    0.401346]  ? 0xffffffff8035567f
+[    0.401347]  ? 0xffffffff8035663c
+[    0.401348]  ? 0xffffffff8064c680
+[    0.401349]  ? 0xffffffff8064c92c
+[    0.401349]  ? 0xffffffff8064c680
+[    0.401350]  ? 0xffffffff8062ec29
+[    0.401351]  ? 0xffffffff8062eed5
+[    0.401352]  ? 0xffffffff80526cc0
+[    0.401353]  ? 0xffffffff80526cd6
+[    0.401353]  ? 0xffffffff8022344c
+[    0.401354]  ? 0xffffffff80526cc0
+[    0.401355]  ? 0xffffffff802096b1
+[    0.401356]  </TASK>
+[    0.401357] Mem-Info:
+[    0.401365] active_anon:25 inactive_anon:155 isolated_anon:0
+[    0.401365]  active_file:0 inactive_file:0 isolated_file:0
+[    0.401365]  unevictable:0 dirty:0 writeback:0
+[    0.401365]  slab_reclaimable:0 slab_unreclaimable:611
+[    0.401365]  mapped:0 shmem:205 pagetables:69
+[    0.401365]  sec_pagetables:0 bounce:0
+[    0.401365]  kernel_misc_reclaimable:0
+[    0.401365]  free:30 free_pcp:0 free_cma:0
+[    0.401371] Node 0 active_anon:100kB inactive_anon:620kB active_file:0kB inactive_file:0kB unevictable:0kB isolated(anon):0kB isolated(file):0kB mapped:0kB dirty:0kB writeback:0kB shmem:820kB kernel_stack:320kB pagetables:276kB sec_pagetables:0kB all_unreclaimable? yes Balloon:0kB gpu_active:0kB gpu_reclaim:0kB
+[    0.401377] DMA32 free:120kB boost:0kB min:128kB low:160kB high:192kB reserved_highatomic:0kB free_highatomic:0kB active_anon:100kB inactive_anon:620kB active_file:0kB inactive_file:0kB unevictable:0kB writepending:0kB zspages:0kB present:9720kB managed:4044kB mlocked:0kB bounce:0kB free_pcp:0kB local_pcp:0kB free_cma:0kB
+[    0.401383] lowmem_reserve[]: 0 0 0
+[    0.401387] DMA32: 4*4kB (UM) 0*8kB 1*16kB (M) 1*32kB (M) 1*64kB (M) 0*128kB 0*256kB 0*512kB 0*1024kB 0*2048kB 0*4096kB = 128kB
+[    0.401402] 205 total pagecache pages
+[    0.401403] 2430 pages RAM
+[    0.401404] 0 pages HighMem/MovableOnly
+[    0.401405] 1419 pages reserved
+[    0.401406] Tasks state (memory values in pages):
+[    0.401408] [  pid  ]   uid  tgid total_vm      rss rss_anon rss_file rss_shmem pgtables_bytes swapents oom_score_adj name
+[    0.401409] Out of memory and no killable processes...
+[    0.401411] Kernel panic - not syncing: System is deadlocked on memory
+[    0.411010] Kernel Offset: disabled
+[    0.411010] ---[ end Kernel panic - not syncing: System is deadlocked on memory ]---

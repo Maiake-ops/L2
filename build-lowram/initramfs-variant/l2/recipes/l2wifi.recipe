@@ -1,0 +1,5 @@
+name = l2wifi
+version = 0.1.0
+epoch = 1767225600
+source = ../../l2wifi
+build = mkdir -p "$DESTDIR/usr/bin" && ${CC:-cc} -std=c11 -Os -static -Wno-format-truncation -o "$DESTDIR/usr/bin/l2wifi" l2wifi.c

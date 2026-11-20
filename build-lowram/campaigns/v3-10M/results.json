@@ -1,0 +1,26 @@
+[
+  {
+    "size": 10,
+    "mode": "bios",
+    "status": "PASS",
+    "signature": null,
+    "reason": null,
+    "last_ts": null,
+    "tail": [],
+    "spawn_ok": true,
+    "log": "build-lowram/campaigns/v3-10M/10M-bios.log",
+    "mem_total": 5440,
+    "mem_available": 1604,
+    "mem_free": 1796,
+    "used": 3836,
+    "reserved": 4800,
+    "slab": 2028,
+    "pagetables": 404,
+    "kernel_stack": 240,
+    "percpu": 32,
+    "kernel_release": "7.3.3-l2-lowram",
+    "cmdline": "rdinit=/init console=ttyS0,115200 console=tty0 loglevel=4 dhash_entries=2048 ihash_entries=2048 mhash_entries=128 mphash_entries=128 thash_entries=128 uhash_entries=128",
+    "qemu_exit": null,
+    "seconds": 53.5
+  }
+]

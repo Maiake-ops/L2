@@ -1,0 +1,150 @@
+
+L2 live system ready
+Commands: l2fetch, l2net, l2wifi, l2install, poweroff. RAM-only session: changes are lost at shutdown.
+L2# cat /proc/meminfo; echo L2ME''MDONE
+
+MemTotal:         252024 kB
+MemFree:          247128 kB
+MemAvailable:     246936 kB
+Buffers:               0 kB
+Cached:              832 kB
+SwapCached:            0 kB
+Active:              280 kB
+Inactive:            564 kB
+Active(anon):        280 kB
+Inactive(anon):      564 kB
+Active(file):          0 kB
+Inactive(file):        0 kB
+Unevictable:           0 kB
+Mlocked:               0 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+Dirty:                 0 kB
+Writeback:             0 kB
+AnonPages:            80 kB
+Mapped:              268 kB
+Shmem:               832 kB
+KReclaimable:          0 kB
+Slab:               2828 kB
+SReclaimable:          0 kB
+SUnreclaim:         2828 kB
+KernelStack:         400 kB
+PageTables:          440 kB
+SecPageTables:         0 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:      126012 kB
+Committed_AS:       1428 kB
+VmallocTotal:   34359738367 kB
+VmallocUsed:         448 kB
+VmallocChunk:          0 kB
+Percpu:              288 kB
+Balloon:               0 kB
+GPUActive:             0 kB
+GPUReclaim:            0 kB
+DirectMap4k:       10112 kB
+DirectMap2M:      251904 kB
+L2MEMDONE
+L2# L2# cat /proc/meminfo; echo L2ME''MDONE
+
+MemTotal:         252024 kB
+MemFree:          247092 kB
+MemAvailable:     246900 kB
+Buffers:               0 kB
+Cached:              832 kB
+SwapCached:            0 kB
+Active:              280 kB
+Inactive:            564 kB
+Active(anon):        280 kB
+Inactive(anon):      564 kB
+Active(file):          0 kB
+Inactive(file):        0 kB
+Unevictable:           0 kB
+Mlocked:               0 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+Dirty:                 0 kB
+Writeback:             0 kB
+AnonPages:            92 kB
+Mapped:              268 kB
+Shmem:               832 kB
+KReclaimable:          0 kB
+Slab:               2852 kB
+SReclaimable:          0 kB
+SUnreclaim:         2852 kB
+KernelStack:         416 kB
+PageTables:          436 kB
+SecPageTables:         0 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:      126012 kB
+Committed_AS:       1432 kB
+VmallocTotal:   34359738367 kB
+VmallocUsed:         456 kB
+VmallocChunk:          0 kB
+Percpu:              288 kB
+Balloon:               0 kB
+GPUActive:             0 kB
+GPUReclaim:            0 kB
+DirectMap4k:       10112 kB
+DirectMap2M:      251904 kB
+L2MEMDONE
+L2# L2# cat /proc/meminfo; echo L2ME''MDONE
+
+MemTotal:         252024 kB
+MemFree:          247080 kB
+MemAvailable:     246888 kB
+Buffers:               0 kB
+Cached:              832 kB
+SwapCached:            0 kB
+Active:              280 kB
+Inactive:            600 kB
+Active(anon):        280 kB
+Inactive(anon):      600 kB
+Active(file):          0 kB
+Inactive(file):        0 kB
+Unevictable:           0 kB
+Mlocked:               0 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+Dirty:                 0 kB
+Writeback:             0 kB
+AnonPages:            84 kB
+Mapped:              268 kB
+Shmem:               832 kB
+KReclaimable:          0 kB
+Slab:               2852 kB
+SReclaimable:          0 kB
+SUnreclaim:         2852 kB
+KernelStack:         408 kB
+PageTables:          436 kB
+SecPageTables:         0 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:      126012 kB
+Committed_AS:       1432 kB
+VmallocTotal:   34359738367 kB
+VmallocUsed:         456 kB
+VmallocChunk:          0 kB
+Percpu:              288 kB
+Balloon:               0 kB
+GPUActive:             0 kB
+GPUReclaim:            0 kB
+DirectMap4k:       10112 kB
+DirectMap2M:      251904 kB
+L2MEMDONE
+L2# L2# uname -r; echo L2VE''RDONE
+
+7.3.3-l2-lowram
+L2VERDONE
+L2# L2# cat /proc/cmdline; echo L2CM''DDONE
+
+rdinit=/init console=ttyS0,115200 console=tty0 loglevel=4 dhash_entries=2048 ihash_entries=2048 mhash_entries=128 mphash_entries=128 thash_entries=128 uhash_entries=128
+L2CMDDONE
+L2# L2# /bin/dash -c 'echo L2SPAWN''OK'
+
+L2SPAWNOK
+L2# L2# 

@@ -1,0 +1,29 @@
+xorriso 1.5.8.pl02 : RockRidge filesystem manipulator, libburnia project.
+
+xorriso : NOTE : Environment variable SOURCE_DATE_EPOCH encountered with value 1767225600
+Drive current: -outdev 'stdio:/home/maiake/L2/build-lowram/out/l2-lowram.iso'
+Media current: stdio file, overwriteable
+Media status : is blank
+Media summary: 0 sessions, 0 data blocks, 0 data,  697g free
+Added to ISO image: directory '/'='/home/maiake/L2/build-lowram/iso.lowram'
+xorriso : UPDATE :      14 files added in 1 seconds
+xorriso : UPDATE :      14 files added in 1 seconds
+ISO image produced: 2911 sectors
+Written to medium : 2911 sectors at LBA 0
+Writing to 'stdio:/home/maiake/L2/build-lowram/out/l2-lowram.iso' completed successfully.
+
+Physical block size of 512 bytes.
+Installing to GPT. Logical block size of 512 bytes.
+Secondary header at LBA 0x2d7b.
+Secondary header valid.
+Detected ISOHYBRID with a GUID partition table (GPT).
+Converting to MBR for improved compatibility...
+Conversion successful.
+No active partition found, some systems may not boot.
+Setting partition 1 as active to work around the issue...
+Installing to MBR.
+Stage 2 to be located at 0x200 and 0x2600.
+Reminder: Remember to copy the limine-bios.sys file in either
+          the root, /boot, /limine, or /boot/limine directories of
+          one of the partitions on the device, or boot will fail!
+Limine BIOS stages installed successfully!

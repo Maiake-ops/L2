@@ -1,0 +1,6 @@
+# rcl2 lives in this repository at ../../rcl2.
+name = rcl2
+version = 0.1.0
+epoch = 1767225600
+source = ../../rcl2
+build = make -j${JOBS:-16} && mkdir -p "$DESTDIR/usr/bin" && cp build/rcl2 "$DESTDIR/usr/bin/rcl2"

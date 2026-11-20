@@ -1,0 +1,278 @@
+/* Lifecycle regression: burst zombie reaping, once/wait semantics, shutdown
+ * TERM->KILL escalation with respawn suppression, and exit-status logging.
+ * Fake clock, fork queue, wait queue and kill log - no real children,
+ * signals, mounts or reboot syscalls are permitted. Complements
+ * test-supervision.c (backoff timing) without duplicating it. */
+#include "../src/syscalls.h"
+
+void *memcpy(void *dst, const void *src, unsigned long n);   /* src/mem.c */
+void *memset(void *dst, int c, unsigned long n);
+
+__attribute__((noreturn)) static void finish(int status)
+{
+    r_sys1(SYS_exit, status);
+    __builtin_unreachable();
+}
+
+static long fake_syscall(long, long, long, long, long, long, long);
+#define r_sys6 fake_syscall
+#define rcl_enter unused_init_entry
+#include "../src/main.c"
+#undef rcl_enter
+#undef r_sys6
+
+#define CHECK(condition) do { if (!(condition)) finish(1); } while (0)
+
+/* ------------------------------------------------------------- fake state */
+
+static unsigned long clock_ms = 1000;
+static long fork_queue[8];
+static int fork_n, fork_i;
+static int fork_count;                     /* children the kernel would hold */
+static struct { long pid; int st; } exit_queue[16];
+static int exit_n, exit_i;
+static int interrupt_wait;
+static int eintr_budget;
+static struct { long pid; int sig; } kill_log[32];
+static int kill_n;
+static unsigned reboot_cmd;
+static int reboot_done;
+static unsigned long mount_flags;
+static char log_buf[8192];
+static unsigned log_len;
+
+static void fake_child(long pid) { (void)pid; fork_count++; }
+
+static void queue_exit(long pid, int st)
+{
+    CHECK(exit_n < 16);
+    exit_queue[exit_n].pid = pid;
+    exit_queue[exit_n].st = st;
+    exit_n++;
+}
+
+static long pop_exit(void)
+{
+    CHECK(exit_i < exit_n);
+    long pid = exit_queue[exit_i].pid;
+    exit_i++;
+    fork_count--;
+    return pid;
+}
+
+static int log_contains(const char *needle)
+{
+    for (unsigned i = 0; i + 1 < log_len; i++) {
+        unsigned j = 0;
+        while (needle[j] && i + j < log_len && log_buf[i + j] == needle[j]) j++;
+        if (!needle[j]) return 1;
+    }
+    return 0;
+}
+
+static int kill_index(long pid, int sig)
+{
+    for (int i = 0; i < kill_n; i++)
+        if (kill_log[i].pid == pid && kill_log[i].sig == sig) return i;
+    return -1;
+}
+
+static void reset(void)
+{
+    memset(&g_conf, 0, sizeof(g_conf));
+    svc_state_clear();
+    fork_n = fork_i = fork_count = 0;
+    exit_n = exit_i = 0;
+    interrupt_wait = 0;
+    eintr_budget = 1000;
+    kill_n = 0;
+    reboot_done = 0;
+    reboot_cmd = 0;
+    mount_flags = 0;
+    log_len = 0;
+    clock_ms = 1000;
+    g_closing = 0;
+    g_flags = 0;
+}
+
+static void name_svc(unsigned i, const char *name)
+{
+    for (unsigned k = 0; k + 1 < RCL_NAME_LEN && name[k]; k++)
+        g_conf.svcs[i].name[k] = name[k];
+}
+
+static long fake_syscall(long nr, long a, long b, long c, long d, long e, long f)
+{
+    (void)e; (void)f;
+    switch (nr) {
+    case SYS_clock_gettime: {
+        struct kts *t = (struct kts *)b;
+        t->tv_sec = (long)(clock_ms / 1000);
+        t->tv_nsec = (long)(clock_ms % 1000) * 1000000L;
+        return 0;
+    }
+    case SYS_nanosleep: {
+        if (reboot_done) {
+            /* shutdown_run idles after a successful reboot: final audit */
+            CHECK(reboot_cmd == RB_POWER_OFF);
+            CHECK(mount_flags == (MS_REMOUNT | MS_RDONLY));
+            int t1 = kill_index(301, SIGTERM), t2 = kill_index(302, SIGTERM);
+            int ta = kill_index(-1, SIGTERM), tk = kill_index(-1, SIGKILL);
+            CHECK(t1 >= 0 && t2 >= 0 && ta > t1 && ta > t2 && tk > ta);
+            CHECK(g_next[0] == 0 && g_next[1] == 0);   /* no respawn while closing */
+            CHECK(log_contains("shutting down: poweroff request"));
+            /* the KILL grace sweep reaps silently (raw wait4, by design):
+             * assert the children are gone, not a log line */
+            CHECK(fork_count == 0);
+            finish(0);
+        }
+        struct kts *req = (struct kts *)a;
+        clock_ms += (unsigned long)req->tv_sec * 1000UL +
+                    (unsigned long)(req->tv_nsec / 1000000L);
+        return 0;
+    }
+    case SYS_fork:
+        CHECK(fork_i < fork_n);
+        fork_count++;
+        return fork_queue[fork_i++];
+    case SYS_wait4: {
+        if (c & WNOHANG) {
+            if (exit_i < exit_n) {
+                long pid = pop_exit();
+                *(int *)b = exit_queue[exit_i - 1].st;
+                return pid;
+            }
+            return fork_count > 0 ? 0 : -ECHILD;
+        }
+        if (interrupt_wait) { interrupt_wait = 0; return -EINTR; }
+        if (exit_i < exit_n && (a == -1 || exit_queue[exit_i].pid == a)) {
+            long pid = pop_exit();
+            *(int *)b = exit_queue[exit_i - 1].st;
+            return pid;
+        }
+        if (fork_count == 0) return -ECHILD;
+        CHECK(--eintr_budget > 0);
+        return -EINTR;
+    }
+    case SYS_kill:
+        CHECK(kill_n < 32);
+        kill_log[kill_n].pid = a;
+        kill_log[kill_n].sig = (int)b;
+        kill_n++;
+        if (a == -1 && b == SIGKILL) {
+            /* the KILL sweep lands: every supervised child dies */
+            for (unsigned i = 0; i < g_conf.nsvc; i++)
+                if (g_pid[i] > 0) queue_exit(g_pid[i], SIGKILL);
+        }
+        return 0;
+    case SYS_reboot:
+        reboot_cmd = (unsigned)c;
+        reboot_done = 1;
+        return 0;
+    case SYS_sync: return 0;
+    case SYS_mount:
+        mount_flags = (unsigned long)d;
+        return 0;
+    case SYS_write: {
+        unsigned n = (unsigned)c;
+        if (n > sizeof(log_buf) - log_len) n = sizeof(log_buf) - log_len;
+        memcpy(log_buf + log_len, (const void *)b, n);
+        log_len += n;
+        return c;
+    }
+    default: finish(2);
+    }
+    return 0;
+}
+
+/* ------------------------------------------------------------------ tests */
+
+/* burst exits: several services plus unknown pids in one reap sweep */
+static void test_burst_reaping(void)
+{
+    reset();
+    g_conf.nsvc = 3;
+    for (unsigned i = 0; i < 3; i++) {
+        g_conf.svcs[i].mode = RCL_MODE_RESPAWN;
+        name_svc(i, i == 0 ? "s0" : i == 1 ? "s1" : "s2");
+    }
+    fork_queue[0] = 101; fork_queue[1] = 102; fork_queue[2] = 103;
+    fork_n = 3;
+    svc_spawn(0); svc_spawn(1); svc_spawn(2);
+    fake_child(999);                       /* reparented zombie, not a service */
+    fake_child(401);
+    queue_exit(101, 0);                    /* exit 0 */
+    queue_exit(999, 11 /* SIGSEGV */);     /* unknown pid, killed */
+    queue_exit(102, 3 << 8);               /* exit 3 */
+    queue_exit(401, 0x137f);               /* stopped (WIFSTOPPED) */
+    queue_exit(103, SIGTERM);              /* signaled */
+    reap_children();
+    CHECK(g_pid[0] == 0 && g_pid[1] == 0 && g_pid[2] == 0);
+    CHECK(g_next[0] > 0 && g_next[1] > 0 && g_next[2] > 0);  /* respawn queued */
+    CHECK(fork_count == 0);                /* nothing left to reap */
+    CHECK(reap_children() == 1);           /* now -ECHILD */
+    CHECK(log_contains("reap 999 signal 11"));
+    CHECK(log_contains("reap 401 stop"));
+    CHECK(log_contains("exit 3"));
+    CHECK(log_contains("signal 15"));
+}
+
+/* once never respawns; wait blocks at boot and survives an EINTR sweep */
+static void test_once_wait(void)
+{
+    reset();
+    g_conf.nsvc = 1;
+    name_svc(0, "o");
+    g_conf.svcs[0].mode = RCL_MODE_ONCE;
+    fork_queue[0] = 201; fork_n = 1;
+    svc_spawn(0);
+    queue_exit(201, 0);
+    reap_children();
+    CHECK(g_pid[0] == 0 && g_next[0] == 0);
+    CHECK(log_contains("o done (exit 0)"));
+
+    g_conf.svcs[0].mode = RCL_MODE_WAIT;
+    name_svc(0, "w");
+    fork_queue[0] = 202; fork_i = 0; fork_n = 1;
+    svc_spawn(0);
+    queue_exit(202, 0);
+    svc_wait_boot(0);
+    CHECK(g_pid[0] == 0 && g_next[0] == 0);
+    CHECK(log_contains("w finished (exit 0)"));
+
+    /* EINTR during the blocking wait: the reap sweep collects the child */
+    fork_queue[0] = 203; fork_i = 0;
+    svc_spawn(0);
+    queue_exit(203, 5 << 8);
+    interrupt_wait = 1;
+    svc_wait_boot(0);
+    CHECK(g_pid[0] == 0 && g_next[0] == 0);
+    CHECK(log_contains("w done (exit 5)"));
+}
+
+/* shutdown: TERM each service, TERM sweep, grace, KILL sweep, ro remount,
+ * reboot; respawn stays suppressed throughout. Final audit runs in the
+ * fake nanosleep once reboot_done is set (shutdown_run never returns). */
+static void test_shutdown_escalation(void)
+{
+    reset();
+    g_conf.nsvc = 2;
+    for (unsigned i = 0; i < 2; i++) {
+        g_conf.svcs[i].mode = RCL_MODE_RESPAWN;
+        name_svc(i, i == 0 ? "s0" : "s1");
+    }
+    fork_queue[0] = 301; fork_queue[1] = 302; fork_n = 2;
+    svc_spawn(0); svc_spawn(1);
+    /* services ignore TERM: nothing exits until the KILL sweep */
+    shutdown_run("poweroff request", RB_POWER_OFF);
+    finish(3);                             /* unreachable: fake finishes first */
+}
+
+void rcl_enter(unsigned long *sp)
+{
+    (void)sp;
+    test_burst_reaping();
+    test_once_wait();
+    test_shutdown_escalation();
+    finish(0);
+}

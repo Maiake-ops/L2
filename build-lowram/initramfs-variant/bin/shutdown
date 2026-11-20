@@ -1,0 +1,11 @@
+#!/bin/sh
+# poweroff / reboot / halt for L2 (symlinked to this script).
+#
+# Use rcl2's direct power commands: they sync the filesystems and issue the
+# reboot syscall, which works from any context.  (Delivering a signal to PID 1
+# proved unreliable on an installed ext4 root, so the signal path is not used.)
+case ${0##*/} in
+    reboot) exec /bin/rcl2 reboot ;;
+    halt)   exec /bin/rcl2 halt ;;
+    *)      exec /bin/rcl2 poweroff ;;
+esac

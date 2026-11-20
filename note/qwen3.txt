@@ -1,0 +1,507 @@
+================================================================================
+SESSION RECORD — L2-96 (Qwen Code) — 2026-11-20, clock verified 21:32 +07
+Mission: boot L2 with UNDER 10 MiB TOTAL guest RAM (user clipboard brief)
+User instructions this session: "use heavy-coder"; "note everything in
+note/qwen3.txt". This file is the self-contained record of everything done,
+measured, corrected, agreed, and pending. Evidence paths are repo-relative
+(/home/maiake/L2). Timestamps are real clock unless marked (est).
+================================================================================
+
+0. MISSION & BUDGETS
+--------------------------------------------------------------------------------
+- Brief: 10-phase engineering mission (audit, memory forensics, 16M reliability,
+  kernel size/memory optimization, rcl2 init, build system, security, QEMU test
+  matrix 10-256M, adversarial review, deliverables). Rules: no fabricated
+  tests/boots; verify with executable evidence; incremental reviewable commits;
+  no destructive ops/history rewrites; demonstrate physical impossibility if a
+  requirement can't be met; preserve compatibility.
+- Goal distinction: TOTAL guest RAM <10 MiB boot (QEMU -m 10M) is the NEW
+  mission goal; the project's standing budgets are separate: core ISO <10 MiB
+  hard gate, installed storage <10 MiB, idle RAM 10-15 MiB band at ANY guest
+  size (hard ceiling 15360 KiB).
+- L2 stack (verified): ./l2 bash builder; kernel 7.3.3 tinyconfig +
+  config/kernel.fragment + tools/patch-kernel-ram.py (BASE_SMALL-gated RAM
+  patchset); musl 1.2.5 static; busybox 1.36.1; dash 0.5.12; rcl2 PID1
+  (freestanding C + Rust + asm, no heap, fixed static memory, self-pipe signals,
+  ppoll supervision, exponential backoff, rescue mode); Limine 9.6.7 hybrid
+  BIOS/UEFI ISO; gzip initramfs (sorted newc + gzip -n + SOURCE_DATE_EPOCH);
+  sources.lock sha256 pins; hw/ssl/install packs on medium (zero idle RAM).
+- Host: 16 cores, ~13 GiB RAM, KVM available, NixOS toolchain via
+  ~/.nix-profile (gcc 16.2.0, clang/lld/llvm-ar 21.1.8, qemu, xorriso, nasm,
+  mtools; OVMF at ~/.nix-profile/share/qemu/edk2-x86_64-code.fd).
+- rcl2 user WIP committed by user as cd0f88a "qwen burning credit time":
+  binary 26,904 -> 17,184 B; selftest RSS 48 KiB (budget 150).
+
+1. DELIVERABLES PRODUCED (L2-96 lane)
+--------------------------------------------------------------------------------
+- Full core rebuild, background exit 0 at 20:06:53 (build/build-mission.log):
+  musl kernel busybox dash rcl2 l2pm l2wifi limine hwpack l2gpt e2fsprogs
+  dosfstools installpack rootfs initramfs iso. DEFAULT vmlinuz BYTE-IDENTICAL
+  to baseline (sha256 0fa6cfc86efa5c086b213be4aaeab112e0ab466f5f8435d8cde6aa8f526fe762)
+  -> kernel-path reproducibility confirmed. initramfs 421,275 B (carries new
+  rcl2); ISO d850fb81522dac5dd68e35210018356920f487db3feb9a4b37463f2a51d32573
+  (8.3 MiB, under gate). Baseline ISO 06a4fd1e16498d3d0b5cc508bec89c01a9ed07801085c2417df21d8e1d36ab2a.
+  ISO delta vs baseline FULLY EXPLAINED = rcl2 WIP (initramfs 426,833->421,275);
+  no unexplained drift (closed lead's mission-52 question).
+- tools/lowram_matrix.py + tools/test_lowram_matrix.py — COMMITTED e24248c
+  "test: add low-RAM boot matrix harness with failure forensics" (2 files,
+  762 insertions; only my files staged). 39 unit tests OK; --selftest OK.
+  Features: BIOS/UEFI ISO + labeled direct mode; incremental FULL serial
+  capture (append, never truncate); first-match failure classification
+  (limine-panic FIRST — its text contains "Out of memory"; then no-cpio-magic,
+  oom-deadlock, oom-kill, decompress-fail, no-init, panic-other, silent <32B,
+  timeout-no-prompt); ANSI stripping (Limine draws panics char-by-char with
+  cursor escapes); broken-marker serial framing; settle 40s + min-of-3
+  meminfo; dash spawn probe; results.json + summary.md; exit 0 iff no FAIL,
+  130 on interrupt; forensics mode direct-only (ISO cmdline immutable).
+  NOTE: commit 1888794 (lead) carried patch-kernel-ram.py + 7 test files +
+  armageddon-ii ledger, NOT my harness (earlier misattribution corrected).
+- build/campaigns/lowram-forensics-report.md — AUTHORITATIVE evidence report
+  (all tables below live there with full detail + corrections).
+- build/campaigns/lowram-default-matrix/ — 20-run default-ISO matrix
+  (results.json, summary.md, per-run full serial logs).
+- build/campaigns/lowram-default-snapshot/ — pinned l2-default.iso +
+  vmlinuz-l2 + initramfs-l2 + SHA256SUMS (all my default-kernel evidence
+  pins to this snapshot; immune to peer rebuilds of build/out).
+- build/lowram-forensics/ — raw traces: 10M-tcg-trace.log, 10M-direct-
+  baseline.log, 13M/14M floor + stress logs, 16M accounting + stress,
+  suspend-A.log, reboot-B.log, 32M retain A/B full logs, 4G-pcp-stress.log,
+  32M-uefi debugcon/serial.
+- build/campaigns/lowram-stability-default/ — stability harness PASS 16M/32M
+  (report.json).
+- docs/armageddon-progress.md — L2-96 ledger entries (missions 10/17/19/20/
+  81/83/84/88/89 statuses + log entries incl. lane retraction CORRECTION).
+- .qwen/agents/heavy-coder.md — RESTORED from corrupted .md.save (frontmatter
+  was truncated: "ame: heavy-coder" -> "---\nname: heavy-coder"); .save left
+  untouched. heavy-coder = qwen4-max implementation tier per project's
+  four-tier team; user said "use heavy-coder" -> WP1 (harness) and WP2
+  (lowram variant) both launched via heavy-coder.
+- WP1 COMPLETED + verified by me (36 tests at delivery; I extended to 39
+  with ANSI/limine-panic regression tests from the real 64M UEFI capture).
+- WP2 IN FLIGHT (see section 6).
+
+2. THE THREE BOTTLENECKS (measured, ranked)
+--------------------------------------------------------------------------------
+B1. KERNEL RUNTIME IMAGE ~7.5 MiB vs <=10 MiB guest (78% of a 10M guest).
+    bzImage hdr.init_size = 0x7e4000 = 8,273,920 B (7.89 MiB) needed during
+    decompression/early boot; raw decompressed image 7,814,024 B. vmlinux
+    sections: .text 5,008,480; .rodata 1,140,080; .data 360,064; .init.text
+    269,451; .init.data 249,832; .bss 167,936; __ksymtab_strings 149,908 +
+    __ksymtab 94,452 (module exports); __bug_table 57,456; .ibt_endbr_seal
+    29,184; .data..percpu 121,176; .brk 131,072. Subsystem ranking
+    (built-in.a, pre-gc): drivers 2.75M (acpi 400K, usb 315K, tty 219K,
+    pci 200K, mmc 197K, ata 197K, base 181K, scsi 124K, video 82K, nvme 78K,
+    input 72K, hid 63K, pinctrl 60K, cpufreq 56K, gpio 48K, clk 46K, virtio
+    39K, thermal 34K, idle 30K, i2c 24K), net 1.10M, fs 994K, kernel 886K,
+    mm 405K, lib 292K, block 150K. (Nested built-in.a double-count — use
+    top-level archives only; size -t TOTALS line = text data bss dec hex.)
+B2. EARLY RESERVATIONS + SLAB-DOMINATED IDLE FLOOR.
+    reserved ~= 7936K + 1.56% x installed (struct page 64B/4K page; measured
+    14/16M 8192K, 20M 8260K, 24M 8320K, 32M 8448K, 64M 8960K, 128M 9980K,
+    256M 12024K). used ~= 5536K flat: Slab 3376K SUnreclaim DOMINANT
+    (kernfs_node_cache ~1.3 MiB unreclaimable, 9780 nodes, device-count
+    driven — maiake-f6 SLUB_DEBUG ranking; absolutes overstate shipped
+    SLUB_TINY kernel, ranking is signal), Shmem 832K (rootfs), PageTables
+    436K, KernelStack 408K (~50 threads x 8K patched stacks), Percpu 312K
+    (2 CPUs), AnonPages 80K, VmallocUsed 448K. Boot-floor model:
+    installed_min ~= reserved + used + headroom ~= 14.3 MiB.
+B3. LOADER/PLACEMENT VARIABILITY AT LOW RAM.
+    10M BIOS ISO = DETERMINISTIC arithmetic collision (NOT KASLR-caused —
+    maiake-f6 agent A independently TCG-proved; my earlier "KASLR adds
+    nondeterminism" framing corrected): PHYSICAL_START 0x200000 + init_size
+    0x7e4000 = 0x9e4000 > usable top 0x9e0000 (BIOS holes eat ~0.4 MiB of
+    10M); initrd top-placed [0x977000-0x9dffff]; decompressor stack/PT land
+    in initrd region -> #GP IP=0x9a1c90 SP=0x9ad3e0 CR3=0x9c3000 -> #DF ->
+    triple fault, ZERO serial output, QEMU exits ~4s (-no-reboot).
+    CONFIG_RANDOMIZE_BASE=y was ON (tinyconfig default; fragment never
+    disabled it); variant sets n for determinism margin, not as the fix.
+    PHYSICAL_START CANNOT go below 0x200000 on x86_64 — VERIFIED
+    arch/x86/Kconfig:2095-2099 PHYSICAL_ALIGN 'range 0x200000 0x1000000 if
+    X86_64' + MIN_KERNEL_ALIGN=PMD_SIZE BUILD_BUG_ON. My "lower it as a
+    further lever" claim INVALID, RETRACTED everywhere. Span shrink is the
+    ONLY placement lever.
+    UEFI = OVMF+Limine firmware/bootloader floor, kernel-independent:
+    10-32M silent (OVMF stage, RELEASE build, debugcon empty); 48M Limine
+    panic (A); 64M Limine "PANIC: High memory allocator: Out of memory"
+    stack panic <- ext_mem_alloc_type_aligned_mode <- init_memmap <-
+    uefi_entry (ANSI-interleaved capture decoded); 96M FAIL same class (A);
+    128M PASS; 256M PASS. UEFI floor (96M,128M]. Sub-10M is BIOS-ONLY,
+    demonstrated not assumed. UEFI costs ~5.9 MiB more reserved at 128M.
+    SeaBIOS itself stressed at 10M (ACPI RSDT length 0 — tables not built).
+
+3. DEFAULT-KERNEL MATRIX (20/20 runs; snapshot ISO; smp 2; settle 40; KVM)
+--------------------------------------------------------------------------------
+BIOS: 10M FAIL silent (4.0s, qemu exit 0); 12M FAIL oom-deadlock @0.400953s
+  (present 11768K, reserved 2139 pages=8556K, managed 3212K, free 120K <
+  min 128K, shmem 280K mid-unpack); 13M FAIL oom-deadlock (my bracket run);
+  14M PASS (MemTotal 6144K, used 5536K, reserved 8192K, avail ~492-608K);
+  16M PASS (8192K total, 5536 used); 20M PASS (12220/5568/8260); 24M PASS
+  (16256/5592/8320); 32M PASS (24320/5532/8448); 64M PASS (56576/5536/8960);
+  128M PASS (121092/5544/9980); 256M PASS (250120/5524/12024). All spawn ok.
+UEFI: 10/12/14/16/20/24/32M FAIL silent; 64M FAIL limine-panic (classified
+  timeout-no-prompt in that run — harness improvement came after; raw log
+  carries the panic); 128M PASS (115172/5744/15900); 256M PASS
+  (244196/5712/17948).
+10M DIRECT (-kernel/-initrd): boots further, kthreadd order-0 OOM @0.522s
+  BEFORE unpack (shmem:0): Memory: 364K/9720K available (4891K code, 351K
+  rwdata, 1392K rodata, 692K init, 164K bss, 8568K reserved); managed 1152K;
+  setup_percpu auto allocator failed (-12) fallback; "Failed to release
+  memory for alloc_low_pages()" @0.002s (benign, see 5.6).
+FLOORS: BIOS practical minimum 14M (13 FAIL / 14 PASS interactive);
+  UEFI (96M,128M]. Idle used flat ~5.5M BIOS / ~5.7M UEFI across sizes.
+PRESSURE (mission 19): 14M — 30 sequential spawns OK; 2x8-way parallel
+  fork/exec burst OOM-KILLS all 16 children (kernel OOM @43.14s, victim dash
+  pid 103; PID1 + interactive shell SURVIVE, avail recovers 580K).
+  CORRECTION: I first reported "burst OK" from the completion marker — the
+  marker only proved `wait` returned; the log showed the OOM. Lesson:
+  marker completion != workload success; always check the log.
+  16M — identical workload CLEAN (no OOM, 0 killed, avail 2536->2432K).
+  Usable parallel headroom starts at 16M for the default kernel.
+SUSPEND/SHUTDOWN (missions 88/89, 256M BIOS): RTC wakealarm +5s ->
+  echo mem > /sys/power/state -> RESUME OK (PM suspend entry (deep) ->
+  ACPI PM Low-level resume complete -> PM suspend exit; benign ata2.00
+  Check power mode failed from QEMU IDE CD); spawn after resume OK;
+  poweroff -> clean rcl2 shutdown, QEMU exit 0; reboot -> QEMU exit 0.
+  -> patchset skipped-low-1M-reservation flag DOWNGRADED to real-firmware
+  residual risk (ACPI wakeup vectors / CPU hotplug untestable here).
+STABILITY (test-stability.py --ram 16,32 --boots 1 --settle 40): PASS 16M
+  1/1, 32M 1/1, Filesystem PASS — 1000-spawn churn + orphan reaping,
+  console_service_restart (rcl2 respawn recovery = mission 89 evidence),
+  invalid_config_parser, bounded CPU/memory/process pressure (4 MiB),
+  no zombies, ext4-on-virtio write/clean-reboot/recovery. No oops/BUG.
+  72h soak gates intentionally not run.
+
+4. KERNEL IMAGE FORENSICS METHODS (reproducible)
+--------------------------------------------------------------------------------
+- extract-vmlinux script FAILS on this host (busybox grep shadows GNU grep;
+  mktemp busybox). Manual: payload_offset u32 @0x248 is RELATIVE to
+  (setup_sects+1)*512 (setup_sects @0x1f1 = 31 -> pm base 0x4000); absolute
+  XZ payload @0x42c4, magic fd377a585a00; xz -dc --single-stream (trailing
+  padding otherwise "Unexpected end of input"). init_size u32 @0x260.
+- vmlinux ELF with symbols: build/src/linux-7.3.3/vmlinux (wiped on each
+  rebuild — re-extract); size -A for sections; size -t built-in.a for
+  subsystem ranking (top-level only).
+- TCG -d int,cpu_reset -D <log> for fault traces (KVM logs NO exceptions);
+  -debugcon file: for OVMF (RELEASE build emits nothing).
+- meminfo/iomem/cmdline/ps/dmesg probes via serial with broken markers.
+
+5. ADVERSARIAL REVIEW — L2-ea SIX ANGLES, ALL DISPOSITIONED (evidence-first)
+--------------------------------------------------------------------------------
+5.1 Compile-time BASE_SMALL gating at ALL RAM sizes: CONFIRMED (code +
+    4G boot: zoneinfo pcp high=0/high_min=0/high_max=0 batch=7,
+    min_free_kbytes=128, percpu_pagelist_high_fraction=100000 — l2net's
+    runtime fraction write CANNOT re-enable pcp caching because
+    zone_highsize returns 0 under BASE_SMALL). 800-fork burst at 4G:
+    0.8s, ZERO alloc failures/OOM — contention not catastrophic for light
+    loads; heavy net-RX/IO + atomic-reserve adequacy at 16G uncharacterized
+    (mission 80). RECOMMENDATION (ENDORSED by L2-ea W4): runtime-gate on
+    totalram_pages (<=128 MiB). N5 JOINT POLICY: l2net boot() ALSO forces
+    min_free=128 + lowmem_reserve_ratio=0 + pcp fraction at runtime on EVERY
+    guest — kernel gate (L2-72 lane, patch-script owner) + l2net gate
+    (L2-ea W6/W5-era) must share ONE threshold and land TOGETHER; trigger =
+    L2-72's FINALIZATION PING to both; my design sketch = policy input:
+    boot-time l2_small_ram flag (__ro_after_init) for runtime hooks
+    (zone_highsize/batch), direct totalram_pages checks in __init hooks;
+    compile-time constants (MIN_THREADS, THREAD_SIZE_ORDER) can't be
+    runtime-gated — 8K stacks stay at all sizes (VMAP_STACK + stability
+    justify). I co-sign + adopt same policy in config/kernel.lowram.
+5.2 realmode low-1M skip: QEMU S3+SMP2+poweroff+reboot verified clean 256M;
+    real-firmware ACPI wakeup / CPU hotplug residual risk documented.
+5.3 vmemmap shared zero tail page: CONFIRMED invariant change — for
+    max_pfn < pfn < section_end (ONLY <128 MiB guests; hunk inert above),
+    pfn_to_page() returns zeroed struct page in a SHARED page instead of
+    faulting; pfn_valid()-first convention holds but violations fail
+    silently; get/put_page on shared page -> refcount corruption ->
+    eventual free of still-mapped page (UAF). Exposure small in this config
+    (PROC_PAGE_MONITOR/page_idle/HWPOISON/CMA/balloon all off).
+    RECOMMENDATION (ENDORSED): map tail page READ-ONLY (zero RAM cost,
+    restores fault-on-violation) + document invariant -> L2-72 lane.
+5.4 8K stacks (THREAD_SIZE_ORDER 2->1, IRQ 16K->8K): CONFIG_VMAP_STACK=y
+    confirmed (guard pages -> clean oops not corruption); stability PASS
+    16M/32M incl. ext4 writeback/churn/fanout -> cleared at tested depth;
+    deeper module-load stress a follow-up.
+5.5 Streaming initrd free: SOUND — rd_fill/post-decompress free consumed
+    pages AND advance initrd_start=free_end (init/initramfs.c:519-527,
+    596-605) so final free_initrd_mem frees only unconsumed tail; NO
+    double-free. Accounting EXACT: 32M direct default 26 msgs, 412K =
+    PAGE_ALIGN(421,275)=421,888 B, whole region once. Message count tracks
+    decompressor read pattern (L2-ea's "8x16K oddity" = truncated capture
+    window). retain_initrd=1 is a SILENT NO-OP BY KERNEL DESIGN — handler
+    'if (*str) return 0' (initramfs.c:636); BARE flag only. Bare-flag A/B
+    VERIFIED: 0 streaming frees, MemTotal 24320->23904 (-416K retained),
+    /sys/firmware/initrd present size 421275 mode -r--r----- (root-only).
+    Retained initrd stays reserved permanently in this kernel (sysfs
+    exposure; no later free in init/main.c).
+5.6 "Failed to release memory for alloc_low_pages()" @10M: BENIGN —
+    arch/x86/mm/init.c:646 memory_map_top_down(): 2MiB-aligned top block
+    unavailable (initrd occupies top) -> documented fallback ALIGN_DOWN
+    (map_end, PMD_SIZE) + BRK pgt_buf; cost = extra early 4K PTEs (part of
+    276K pagetables), NO managed-page loss. Cosmetic; no patch change.
+REGRESSION SUGGESTIONS ACCEPTED by L2-72 into mission-70/93 set: bare-flag
+retain_initrd semantics + streaming-free initrd_start invariant.
+My report also flags MIN_THREADS 20->128 (BASE_SMALL) for 16M regression
+confirmation (review item, not confirmed defect).
+
+6. LOWRAM VARIANT (WP2 via heavy-coder; build-lowram/ lane; THE 10M VEHICLE)
+--------------------------------------------------------------------------------
+Lane: NEW files only — config/kernel.lowram (standalone fragment on
+tinyconfig), tools/l2-lowram (self-contained builder; L2_BUILD_DIR=
+build-lowram; never touches build/ or build/out), build-lowram/ tree.
+Design: VM/serial-oriented; MODULES=n (~260K exports+infra; ALSO removes
+ring-0 module-injection surface — security side-benefit; W5 docs: two
+kernels/two floors/two postures), RANDOMIZE_BASE=n, IBT/microcode off,
+FW_LOADER=n, driver drops (USB/MMC/NVMe/AHCI/input/HID/pinctrl/gpio/clk/
+cpufreq/idle/thermal/ACPI-extras/fbcon/fonts), PERF_EVENTS X86-PINNED
+survives (178K; arch/x86 Kconfig X86 block selects it — =n reverted by
+olddefconfig), keep ATA_PIIX+SCSI+SR+ISO9660 (QEMU IDE CD boot), virtio,
+ext4, EFI_STUB (large-RAM UEFI), VT+VT_CONSOLE without FB (dummycon;
+/dev/tty1 must exist for rcl2.conf tty1 service), serial primary.
+v1 (20:53-20:54): bzImage 2,204,672 B (-736K vs default); ISO 6,518,784 B
+  (6.22 MiB); config 64,409 B. Results (harness, settle 40, smp 2):
+  10M FAIL oom-deadlock @0.38s — placement collision CLEARED (serial
+  present), managed 3200K (default 1152K), reserved 6520K, dies at 43%
+  unpack (shmem 360K, free 112K < min 128K); 12M PASS (MemTotal 6064K,
+  used 5032K, reserved 6224K, spawn ok) — DEFAULT FAILS HERE; 16M PASS
+  (10096K total [+1904K vs default], 5064 used [-472K slab]); 32M PASS
+  (26224/5092/6544); 256M PASS (252024/5088/10120). Floor 14M->12M.
+  v1 PRESERVED: build-lowram/v1/ (vmlinuz+config+ISO+kernel.lowram.v2-draft).
+v2 (21:22): bzImage 1,938,432 B (-996K vs default); ISO 6,252,544 B
+  (5.96 MiB); config 57,658 B; init_size 0x52e000 = 5,431,296 B = 5.18 MiB
+  (default 7.89 -> -2.71 MiB); decompression end 0x72e000 = 7.18 MiB ->
+  2.3 MiB clearance below top-placed initrd; "Kernel Offset: disabled"
+  confirms KASLR off. 10M BIOS: STILL oom-deadlock @0.41s BUT reserved
+  1419 pages = 5676K, managed 4044K, free 128K == min 128K, pagecache 205
+  pages ~= 820K of 832K rootfs (~99% UNPACKED) — dies at last unpack step /
+  PID1 start. GAP ~100-200K. Trend managed: 1152 -> 3200 -> 4044K.
+v3: ISO BUILT 5,961,728 B (5.69 MiB, v2 5.96 -> -290K), boot verification
+  pending (v2 preserved at build-lowram/v2/; log build-run-v3.log).
+  MEASURED TRIM INPUT relayed to WP2 (maiake-f6 scratch demonstration,
+  artifacts verified): l2wifi move = -63,488 B unpack pagecache (~62K,
+  1/3-1/2 of gap) + -35,051 B compressed + -80K 16M idle; recipe =
+  openssl-launcher pattern (~1 KiB dash launcher locates pack, execs real
+  binary); wiring safe (no rcl2.conf service; l2net never calls l2wifi;
+  l2install reads build artifact). Ready input: worktree build/campaigns/
+  rootfs-trimmed/ + initramfs-trimmed.gz (391,575 B). Variant assembly =
+  my lane; main-tree build_rootfs = L2-72. busybox applet trim = only
+  other big lever, NOT recommended without coverage audit.
+Candidate v3 levers (WP2's choice): further image trim (BUG ~90K / EFI
+  ~150K / init), NR_CPUS=1 (~140K percpu), VARIANT INITRAMFS TRIM — move
+  l2pm (88K) + l2wifi (62K) out of variant initramfs into on-ISO pack
+  (~150K shmem directly; l2wifi move -63K resident/-30K compressed per A);
+  codec change OFF THE TABLE (mission-15 negative tests: xz/zstd initramfs
+  cleanly rejected by gzip-only kernel — "decompressor failed", controlled
+  VFS panic, no corruption; gzip-only design validated).
+CAPACITY MODEL (maiake-f6 A): managed ~= RAM - 1149K - span + init_freed;
+  runtime needs ~3.9 MiB managed; 10M needs span <~5.9 MiB (v2 5.18 ✓ ->
+  plausible); 8M needs span <~3.6 MiB (text <~1.5 MiB — below essential-
+  subsystem floor without hard slab cuts -> stretch). Cross-check v2:
+  9720-1149-5304+692 ~= 3959K vs measured 4044K ✓.
+kernfs insight: device-count reduction attacks kernfs_node_cache directly
+  (highest slab leverage); variant driver drops already act on it.
+WP2 brief boundaries: no rcl2/l2pm/fragment/patch-script/l2/main-build
+  edits; -j8 -l6; one QEMU at a time; serial logs under build-lowram/
+  campaigns/; report with real evidence; if 10M unreachable, document
+  floor + smallest bootable size (brief rule 7).
+
+7. COORDINATION MAP (four user-driven sessions; ARMAGEDDON campaign)
+--------------------------------------------------------------------------------
+L2-72 = campaign lead, main tree, ledger docs/armageddon-progress.md.
+  OWNS mission 05: config/kernel.fragment + tools/patch-kernel-ram.py +
+  main-tree kernel/rootfs/initramfs/iso builds (default-kernel trim, keep
+  real-HW support). heavy-coder LIVE (batch1 EXIT=0, fragment +43/-1
+  mtime 21:07, WIP snapshots build/campaigns/05-fragment-wip.patch).
+  Delivered 05-kernel-size.md attribution (nm --size-sort method):
+  droppable FW_LOADER_COMPRESS_ZSTD=n ~83K (firmware is xz not zstd),
+  TRIM_UNUSED_KSYMS=y <=244K exports (BREAKS out-of-tree modules; in-tree
+  hw/wifi packs same-build safe); pinned: PERF_EVENTS (X86 select), THERMAL
+  core (ACPI_PROCESSOR select), IOSF_MBI (SDHCI select), BPF (NET select),
+  COMMON_CLK (I2C_DESIGNWARE_PLATFORM dep), PINCTRL_AMD (bool, AMD SoC
+  I2C-HID IRQ routing), VIRTIO_NET=y (initramfs has no modules; hw pack
+  dirs omit drivers/net), ETHTOOL_NETLINK (IGC dep), ACPI_LPIT/
+  ACPI_HOTPLUG_IOAPIC/EFI_ESRT (prompt-less default-y, =n ignored by
+  olddefconfig). Already optimal: CPU_MITIGATIONS=n, STACKPROTECTOR=n,
+  KALLSYMS=n, DEBUG_INFO_NONE, UNWINDER_GUESS, X86_5LEVEL=n etc.
+  LTO_CLANG: clang/lld 21.1.8 present, THIN via make LLVM=1; 10-20%
+  potential; build-time/RAM trade; mission 80. My queue items are
+  RECOMMENDATIONS in their lane (they hold zstd/ksymtrim; gating/RO-tail
+  under 05/80/65; LTO under 80). They share 05 before/after package at
+  landing for my citation + maiake-f6 gates.
+L2-ea = ARMAGEDDON II (missions 101-300), ledger docs/armageddon-ii-
+  progress.md. OWNS rcl2 21-30/141-160 + l2pm 181-200 implementation.
+  W1/W2 COMMITTED: 1984055 (rcl2 truncation-safe reads + parser hardening
+  + rescue-newline; binary 18,656 B = +1,472 vs 17,184 NOT a saving;
+  BOOT-resident VmRSS 40 KiB, selftest RSS still 48 KiB), 4acfd36 (l2pm
+  fail-safe gc/fsync/transactions/verify --repair — closes gc live-store-
+  deletion chain), 1ec7140 (harnesses into make check; 166 unit tests +
+  4 C suites green). W6-P1 shell hardening running (l2net find_pack accepts
+  hw/wifi packs from ANY medium without L2-LIVE marker check — ring-0
+  supply-chain angle; l2install find_medium HAS the check; fix queued;
+  variant MODULES=n immune). W7 running: /tmp cap (closes inherited WEDGED
+  defect; gate = maiake-f6 test_mempressure 3-part pass) + rcl2 carries
+  (-Oz, force-unwind-tables=no, rss reuse; target ~14.5-15 KB binary,
+  MEASURED-NOT-PROMISED; maiake-f6 worktree ref 13,544 B with all carries
+  + D1-D5). N5 joint-policy shell-side gate queued W5-era against L2-72
+  finalization ping.
+maiake-f6 = fourth session, WORKTREE .qwen/worktrees/campaigns (branch
+  campaigns/engineering), NEVER writes main. Analysis-only agent A
+  (missions 06-09 + 14-15): PHYSICAL_START floor correction (verified),
+  deterministic-collision proof, capacity model, kernfs slab ranking
+  (SLUB_DEBUG variant config/kernel.slubdebug + tools/l2-slubdebug.sh +
+  build-slubdebug/ committed on their branch), variant quantification,
+  UEFI 96M/48M points, initramfs double-build byte-identical (mission 14),
+  gzip-only validation (mission 15), initmem 692K + streaming free verified
+  (mission 09). Harnesses (read-only reuse welcome): ramtest.py extended
+  (--iso --sizes real-medium sweep + --uefi), test_mempressure.py (W7 gate;
+  explicit WEDGED diagnosis >=2 respawn banners + unanswered probe),
+  test_guest_compat.py (25 probes; baseline 24/25 — l2net status rc fix
+  only in their worktree overlay), test-release-matrix.py (in progress).
+  SECOND-MATRIX AGREEMENT: awaits my FINAL ping + ISO sha256, then brackets
+  variant at 8/10/12/14M read-only, report in their build/campaigns/, I cite.
+L2-96 (me) = additive lowram variant (config/kernel.lowram, tools/l2-lowram,
+  build-lowram/) + lowram_matrix harness + forensics/verification.
+DISPUTE HISTORY (resolved): L2-72 proposed transferring kernel
+  implementation to me claiming their agent stood down ("fragment
+  untouched mtime 13:21" — stale 20:20 check); I accepted in good faith
+  and recorded; they RETRACTED with live-agent evidence (roster-verified
+  running, batch1 EXIT=0, fragment growing); I STOOD DOWN fully — ledger
+  entry "CORRECTION — LANE TRANSFER CLAIM RETRACTED" (~522-546), confirmed
+  DON'Ts: no fragment/patch-script edits, no main-tree kernel/rootfs/
+  initramfs/iso builds, no committing their WIP; queue -> recommendations.
+  Accepted by L2-72 ("dispute fully closed"), verified by maiake-f6,
+  acknowledged by L2-ea. GOVERNING PRINCIPLE (all agreed): ONLY THE USER
+  reassigns lanes; peer proposals cannot. I claim no reassignment; user
+  gave me the low-RAM mission, not the default-kernel trim.
+COMMIT RULE (L2-ea, accepted): lane work committed only when the OWNING
+  session declares it verified and ready; L2-ea commit ownership on
+  campaigns/armageddon-ii; my e24248c followed the rule (my lane, verified,
+  acknowledged). I will not commit fragment/patch changes mid-iteration.
+PING PROTOCOLS: I ping L2-72 before any main-tree full rebuild or any
+  rcl2/l2pm edit (my agents forbidden from both anyway).
+MERGE TOPOLOGY: campaigns/armageddon-ii = campaign record (HEAD 6457400
+  at 21:32); main = cd0f88a UNTOUCHED; merge is the USER's call.
+TIMESTAMP CAVEAT: my ledger "~22:10/~22:50" stamps were estimates ~1.5h
+  ahead of real clock (verified 21:32); entry ORDERING is correct. Lesson:
+  run `date` before stamping. Peers' stamps similarly approximate.
+l2-lowram -> l2 INTEGRATION: main-tree change = L2-72 lane; stays a
+  PROPOSAL to user post-05 (they raise it); variant standalone until then;
+  I hand over the delta if/when requested.
+
+8. FINAL SEQUENCE (agreed end-to-end, awaiting WP2)
+--------------------------------------------------------------------------------
+1) WP2 completion notification -> I re-verify its serial-evidence claims
+   MYSELF with the committed 39-test harness (10M PASS = mission core met;
+   else documented floor + smallest bootable size per brief rule 7).
+2) L2-ea refreshes build/out/rcl2 with final post-W7 build in L2-72's
+   coordinated rebuild window; shares hash+size BEFORE my re-copy.
+3) I re-copy rcl2 into variant initramfs assembly (build-lowram lane),
+   re-stamp rcl2 --selftest against committed build, re-verify boot.
+   MARGIN MATH (corrected): two distinct terms — shmem-at-unpack (binary
+   size; W7 ~2-3.7 KiB saving vs 17,184) and runtime anon (boot VmRSS
+   40 vs 48 KiB). BOTH small vs ~100-200K gap -> rcl2 refresh is POLISH,
+   not the decider; WP2 kernel/initramfs levers decide 10M. Use L2-ea's
+   final MEASURED hash/size.
+4) My re-verification suite: lowram_matrix BIOS 8/10/11/12/14/16/32/256M +
+   UEFI 128/256M; test-stability --settle 40 at floor sizes; idle-band
+   256M/1G (10-15 MiB budget); ISO <10 MiB gate; double-build sha256.
+5) sha256 pin + FINAL ping to maiake-f6 -> their independent 8/10/12/14M
+   bracket (read-only, their report) -> I cite.
+6) Results share with L2-72 (missions 10/81 convergence) + ledger update.
+INHERITED DEFECTS (variant shares rootfs — ANNOTATE, NOT FORGIVE):
+  - test_mempressure W7 gate: expect WEDGED@16M (uncapped-ramfs /tmp)
+    until L2-ea W7 cap lands; then adopt 3-part pass expectation.
+  - test_guest_compat: expect 24/25 (l2net status rc fix worktree-only).
+
+9. METHODOLOGY RULES (hard-won; keep for all future measurements)
+--------------------------------------------------------------------------------
+- ISO boot AUTHORITATIVE; -kernel/-initrd reads ~1 MiB high (fw_cfg keeps
+  initrd in guest memory). Label direct mode as comparison only.
+- -smp 2 consistent (1 vs 2 changes readings ~1 MiB); settle >=40s (25s
+  once read 11192 vs 40s 9128 on same ISO); min of 3 samples;
+  used = MemTotal - MemAvailable; reserved = installed - MemTotal.
+- Serial framing: CRLF sends (bare LF dropped) + 0.7s pre-type settle;
+  BROKEN markers (echo L2SPAWN''OK -> output L2SPAWNOK) so echoed input
+  never fakes completion; split on echoed command for output extraction.
+- Marker completion != workload success (14M burst OOM lesson).
+- KVM logs NO exceptions; use -accel tcg -d int,cpu_reset -D for faults;
+  -debugcon for OVMF (RELEASE = silent); -no-reboot makes QEMU exit on
+  guest reset (exit 0 ≠ timeout).
+- retain_initrd BARE flag only (=1 silent no-op).
+- SLUB_TINY -> /sys/kernel/slab per-cache stats EMPTY; need SLUB_DEBUG
+  build for attribution (absolutes then overstate TINY; ranking is signal).
+- glob tool SKIPS gitignored paths (build/ invisible) -> use ls for build
+  artifacts; read_file for content.
+- Limine panics are ANSI-interleaved char-by-char -> strip escapes before
+  classification; "Out of memory" in Limine text must not classify as
+  kernel oom-kill (signature order).
+- Check `date` before timestamping records.
+- Two concurrent ./l2 build kernel runs rm -rf the SAME source tree ->
+  mutual destruction; separate L2_BUILD_DIR per concurrent builder.
+- bzImage payload_offset is relative to protected-mode base; xz needs
+  --single-stream (trailing padding).
+
+10. OPEN RISKS / FOLLOW-UPS
+--------------------------------------------------------------------------------
+- 8K stacks: cleared at tested depth; deeper module-load/net-RX stress
+  follow-up (mission 93).
+- realmode low-1M skip: real-firmware ACPI wakeup / CPU hotplug untested.
+- Big-guest (16G) pcp-disabled contention + 128K atomic reserves:
+  uncharacterized under heavy load (mission 80); N5 runtime gating is the
+  fix path (three-party sequence).
+- vmemmap zero-tail silent-violation exposure: RO-tail recommendation with
+  L2-72 (endorsed).
+- TRIM_UNUSED_KSYMS breaks future out-of-tree modules (caveat recorded).
+- LTO_CLANG: build time/RAM trade; reproducibility re-verification needed
+  if adopted (mission 80, L2-72 lane).
+- /tmp uncapped ramfs wedge (live mode): L2-ea W7; variant inherits until
+  fixed.
+- l2net find_pack missing L2-LIVE marker check: L2-ea W6-P1; variant
+  MODULES=n immune.
+- 8M boot: stretch per capacity model (span <~3.6 MiB below essential
+  floor); 10M is the mission goal, 8M exploratory (maiake-f6 bracket).
+- Campaign J final gates (91-100) owned by lead/maiake-f6 release matrix.
+
+11. POINTER INDEX
+--------------------------------------------------------------------------------
+Evidence report:      build/campaigns/lowram-forensics-report.md
+Default matrix:       build/campaigns/lowram-default-matrix/ (20 runs)
+Pinned snapshot:      build/campaigns/lowram-default-snapshot/ (SHA256SUMS)
+Raw forensics:        build/lowram-forensics/
+Stability:            build/campaigns/lowram-stability-default/report.json
+Baseline (peer):      build/campaigns/baseline-artifacts/ (SHA256SUMS)
+Lead attribution:     build/campaigns/05-kernel-size.md (+05-nm-symbols.txt,
+                      05-attribution-baseline.tsv, 05-fragment-wip.patch)
+Variant artifacts:    build-lowram/out/ (v2 current), build-lowram/v1/
+Variant campaigns:    build-lowram/campaigns/{v1-10M,v1-bios,v2-10M,v2-16M}
+Variant builder:      tools/l2-lowram; fragment config/kernel.lowram
+Harness (committed):  tools/lowram_matrix.py + tools/test_lowram_matrix.py
+                      (e24248c; 39 tests)
+Ledgers:              docs/armageddon-progress.md (L2-72),
+                      docs/armageddon-ii-progress.md (L2-ea)
+Peer reports:         docs/armageddon/{01-boot-process,02-04-kernel-config-
+                      memory,11-13-boot-infrastructure,21-rcl2-lifecycle,
+                      31-33-userspace-shell-libc,61-69-security-posture}.md;
+                      maiake-f6 worktree build/campaigns/{01-kernel-config,
+                      02-boot-memory,08-slab-data.txt,08-boot-fw,
+                      11-regression}
+Agent definition:     .qwen/agents/heavy-coder.md (restored; .save kept)
+Build log:            build/build-mission.log
+Kernel source:        build/src/linux-7.3.3 (main, L2-72 lane),
+                      build-lowram/src/linux-7.3.3 (variant, my lane)
+
+12. CURRENT STATE SNAPSHOT (21:39 verified)
+--------------------------------------------------------------------------------
+- ★ 10M BOOT ACHIEVED (v3, WP2 evidence; L2-96 re-verification pending):
+  v3-10M/results.json = PASS, MemTotal 5440K, used 3836K, reserved 4800K,
+  spawn_ok TRUE. bzImage 1,647,616 B (1.57 MiB, -44% vs default); ISO
+  5,961,728 B (5.69 MiB). v2->v3 delta entirely kernel-side (initramfs
+  unchanged; l2wifi trim NOT needed, remains extra margin). Trend managed
+  at 10M: 1152->3200->4044->5440K; reserved 8568->6520->5676->4800K.
+- Branch campaigns/armageddon-ii HEAD 6457400; main cd0f88a; peer WIP +
+  variant files untracked (expected).
+- WP2: v3 verification/report phase (no active build/QEMU at 21:39:35);
+  completion notification pending -> triggers L2-96 re-verification +
+  FINAL chain (section 8). Add 9M probe (strictly-under-10) to FINAL suite.
+- All coordination threads CLOSED; all corrections recorded; no boundary
+  issues; sole critical path = WP2 completion notification -> section 8.
+================================================================================
+END OF RECORD — L2-96

@@ -37,11 +37,13 @@ check:
 	python3 tools/ramtest.py --selftest
 	python3 -m unittest discover -s tools -p 'test_stability_harness.py'
 	$(MAKE) -C rcl2 test
+	python3 -m unittest discover -s tools -p 'test_rcl2_lifecycle.py'
 	$(MAKE) -C l2pm
 	python3 -m unittest discover -s tools -p 'test_l2pm_security.py'
 	python3 -m unittest discover -s tools -p 'test_l2pm_pipeline.py'
 	python3 -m unittest discover -s tools -p 'test_l2pm_recipe_validation.py'
 	python3 -m unittest discover -s tools -p 'test_l2pm_features.py'
+	python3 -m unittest discover -s tools -p 'test_l2pm_transactions.py'
 	python3 -m unittest discover -s tools -p 'test_l2gpt.py'
 	python3 -m unittest discover -s tools -p 'test_l2install.py'
 	$(MAKE) -C l2wifi

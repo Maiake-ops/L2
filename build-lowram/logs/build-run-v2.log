@@ -1,0 +1,21 @@
+l2-lowram: extracting linux 7.3.3
+patch-kernel-ram: patched /home/maiake/L2/build-lowram/src/linux-7.3.3
+l2-lowram: configuring linux 7.3.3 (tinyconfig + kernel.lowram)
+l2-lowram: WARNING: 91 fragment symbols dropped/changed by olddefconfig (see /home/maiake/L2/build-lowram/logs/kernel-lowram-dropped.txt)
+    CONFIG_X86_5LEVEL=n (got absent)
+    CONFIG_SCHED_MC_PRIO=n (got absent)
+    CONFIG_SCHED_SMT=n (got y)
+    CONFIG_XZ_DEC_POWERPC=n (got absent)
+    CONFIG_XZ_DEC_ARM=n (got absent)
+    CONFIG_XZ_DEC_ARMTHUMB=n (got absent)
+    CONFIG_XZ_DEC_ARM64=n (got absent)
+    CONFIG_XZ_DEC_SPARC=n (got absent)
+    CONFIG_XZ_DEC_RISCV=n (got absent)
+    CONFIG_RANDOMIZE_MEMORY=n (got absent)
+    CONFIG_MICROCODE=n (got y)
+    CONFIG_PERF_EVENTS=n (got y)
+l2-lowram: building linux 7.3.3 (-j8 -l6 bzImage, no modules)
+l2-lowram: kernel 7.3.3-l2-lowram: /home/maiake/L2/build-lowram/out/vmlinuz-l2-lowram (1938432 B)
+init_size      = 0x52e000 (5431296 B, 5.18 MiB)
+payload_offset = 0x2c4 (absolute 0x42c4)
+decompress end = PHYSICAL_START(0x200000)+init_size = 0x72e000

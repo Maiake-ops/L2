@@ -13,3 +13,8 @@ my_disk.qcow2
 AGENTS.md
 graphify-out
 /website/
+notes/
+/build-lowram/cache/
+*.qcow2
+*.ko
+*.tar.xz

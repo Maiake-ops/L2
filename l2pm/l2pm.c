@@ -33,6 +33,11 @@
  * recipes execute shell code: they are shown and must be explicitly trusted
  * (confirmation or --trust); trusted content hashes are remembered under
  * <root>/l2/var/trusted-recipes.
+ *
+ * Transactions: one add/install/remove command is one transaction.  If any
+ * step fails, the database and the active profile generation are restored
+ * to their pre-command state (see the failure contract at struct txn).
+ * `verify --repair` reconciles torn DB/profile states left by a crash.
  */
 
 #define _GNU_SOURCE
@@ -196,11 +201,25 @@ static int write_all(int fd, const void *buf, size_t n)
     return 0;
 }
 
+/* Durability helpers: rename is atomic but not durable until the file
+ * contents and the containing directory entry are on disk.  Every
+ * temp+rename mutation fsyncs the temp before the rename and the directory
+ * after it, so a power loss cannot tear a DB entry or a profile switch. */
+static int fsync_dir(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    int rc = fsync(fd);
+    if (close(fd) != 0 && rc == 0) rc = -1;
+    return rc;
+}
+
 static int write_file(const char *path, const void *buf, size_t n)
 {
     int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
     if (fd < 0) return -1;
     int rc = write_all(fd, buf, n);
+    if (rc == 0 && fsync(fd) != 0) rc = -1;
     if (close(fd) != 0 && rc == 0) rc = -1;
     return rc;
 }
@@ -218,7 +237,34 @@ static int write_file_atomic(const char *path, const void *buf, size_t n)
         return -1;
     }
     free(tmp);
-    return 0;
+    char *dir;
+    if (!sl) dir = xstrdup(".");
+    else if (sl == path) dir = xstrdup("/");
+    else dir = fmt("%.*s", (int)(sl - path), path);
+    int rc = fsync_dir(dir);
+    free(dir);
+    return rc;
+}
+
+/* Fsync every directory of a staged/extracted tree (file contents are
+ * fsynced at write time), so the whole tree is durable before its rename
+ * into the store or a generation directory. */
+static int fsync_tree(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    int rc = 0;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char *p = fmt("%s/%s", dir, e->d_name);
+        struct stat st;
+        if (lstat(p, &st) == 0 && S_ISDIR(st.st_mode) && fsync_tree(p) != 0) rc = -1;
+        free(p);
+    }
+    closedir(d);
+    if (fsync_dir(dir) != 0) rc = -1;
+    return rc;
 }
 
 /* Upper bound for metadata files (db entries, .l2pm/info, /proc files).
@@ -866,6 +912,7 @@ static int tar_extract(const char *tar, const char *dest)
                     left -= (long long)r;
                 }
                 if (rc == 0 && fchmod(o, mode ? mode : 0644) != 0) rc = -1;
+                if (rc == 0 && fsync(o) != 0) rc = -1;
                 if (close(o) != 0 && rc == 0) rc = -1;
             }
             if (rc == 0 && mt >= 0) {
@@ -1583,6 +1630,19 @@ static int link_tree(const char *store, const char *profile)
         } else {
             char *slash = strrchr(dst, '/');
             if (slash) { *slash = 0; mkdir_p(dst, 0755); *slash = '/'; }
+            /* File conflicts between packages: last-wins (stores are linked
+             * in sorted order), but never silently. */
+            struct stat ds;
+            if (lstat(dst, &ds) == 0 && S_ISLNK(ds.st_mode)) {
+                char old[MAXREL];
+                ssize_t r = readlink(dst, old, sizeof(old) - 1);
+                if (r > 0) {
+                    old[r] = 0;
+                    if (strcmp(old, src) != 0)
+                        fprintf(stderr, "l2pm: warning: profile conflict at %s: %s overrides %s\n",
+                                rel, src, old);
+                }
+            }
             unlink(dst);
             if (symlink(src, dst) != 0) rc = -1;
         }
@@ -1654,11 +1714,14 @@ static int switch_profile_symlink(const char *pdir, const char *profile, const c
             unlink(tmp_lnk);
             rc = -1;
         } else {
+            if (fsync_dir(pdir) != 0) rc = -1;
             rm_rf(old);
         }
         free(old);
     } else if (rename(tmp_lnk, cur) != 0) {
         unlink(tmp_lnk);
+        rc = -1;
+    } else if (fsync_dir(pdir) != 0) {
         rc = -1;
     }
     free(cur);
@@ -1721,6 +1784,7 @@ static int rebuild_profile(const char *profile)
         free(names[i]);
     }
     free(names);
+    if (fflush(gf) != 0 || fsync(fileno(gf)) != 0) rc = -1;
     if (fclose(gf) != 0) rc = -1;
     free(genfile);
 
@@ -1732,7 +1796,8 @@ static int rebuild_profile(const char *profile)
     char *gen_dir = fmt("%s/%s", pdir, gen_rel);
     if (rc == 0) {
         rm_rf(gen_dir);
-        if (rename(stage, gen_dir) != 0) rc = -1;
+        if (fsync_tree(stage) != 0 || rename(stage, gen_dir) != 0 ||
+            fsync_dir(pdir) != 0) rc = -1;
     }
     if (rc == 0 && switch_profile_symlink(pdir, profile, gen_rel) != 0) rc = -1;
     if (rc != 0) rm_rf(stage);
@@ -1742,6 +1807,151 @@ static int rebuild_profile(const char *profile)
     free(stage);
     free(pdir);
     return rc;
+}
+
+/* ---------------------------------------------------------- transactions */
+
+/* Failure contract (one command = one transaction):
+ * `add` (including recursive dependencies), `install` (one or more archives)
+ * and `remove` (one or more names) restore the database and the active
+ * profile generation to their pre-command state when any step fails, and
+ * remove the generations the failed command created.  Store paths and the
+ * build cache are NEVER deleted by a transaction rollback: they are
+ * content-addressed and `gc` reclaims unreferenced paths.  A crash (SIGKILL,
+ * power loss) is not rolled back automatically; every fully completed
+ * package leaves a consistent DB/profile pair, `rollback` undoes completed
+ * steps and `verify --repair` reconciles torn states.  Transactions assume
+ * a single writer: concurrent l2pm mutations are not locked. */
+
+struct txn_saved {
+    char *name;
+    char *db;       /* pre-command db entry bytes, NULL when absent */
+    char *manifest; /* pre-command manifest bytes, NULL when absent */
+};
+
+struct txn {
+    const char *profile;
+    int have_gen;
+    long gen;       /* active generation at begin, -1 when none */
+    struct txn_saved *saved;
+    size_t n, cap;
+};
+
+static int read_active_gen(const char *pdir, const char *profile,
+                           char *target, size_t cap, long *out_gen);
+
+static void txn_begin(struct txn *t, const char *profile)
+{
+    memset(t, 0, sizeof(*t));
+    t->profile = profile;
+    t->gen = -1;
+    char *pdir = l2path("var/profiles");
+    char target[MAXPATH];
+    long g = -1;
+    if (read_active_gen(pdir, profile, target, sizeof(target), &g) == 0) {
+        t->have_gen = 1;
+        t->gen = g;
+    }
+    free(pdir);
+}
+
+static void txn_free(struct txn *t)
+{
+    for (size_t i = 0; i < t->n; i++) {
+        free(t->saved[i].name);
+        free(t->saved[i].db);
+        free(t->saved[i].manifest);
+    }
+    free(t->saved);
+    t->saved = NULL;
+    t->n = t->cap = 0;
+}
+
+/* Snapshot the pre-command state of `name` (first record wins).  Must be
+ * called before any mutation of the entry.  Fails closed when an existing
+ * file cannot be read, rather than lose the pre-state. */
+static int txn_record(struct txn *t, const char *name)
+{
+    for (size_t i = 0; i < t->n; i++)
+        if (!strcmp(t->saved[i].name, name)) return 0;
+    char *dbp = l2path("var/db/installed/%s", name);
+    char *mpp = l2path("var/db/installed/%s.manifest", name);
+    char *db = read_small(dbp);
+    char *mp = read_small(mpp);
+    int rc = 0;
+    if ((!db && access(dbp, F_OK) == 0) || (!mp && access(mpp, F_OK) == 0)) {
+        fprintf(stderr, "l2pm: cannot snapshot database entry for %s\n", name);
+        rc = -1;
+    }
+    if (rc == 0) {
+        if (t->n == t->cap) {
+            t->cap = t->cap ? t->cap * 2 : 16;
+            t->saved = xrealloc(t->saved, t->cap * sizeof(*t->saved));
+        }
+        t->saved[t->n].name = xstrdup(name);
+        t->saved[t->n].db = db;
+        t->saved[t->n].manifest = mp;
+        t->n++;
+        db = mp = NULL;
+    }
+    free(db); free(mp); free(dbp); free(mpp);
+    return rc;
+}
+
+/* Drop generations created during the transaction and point the profile
+ * symlink back at the pre-command generation (or remove it when there was
+ * none).  Only symlink trees are deleted here, never store data. */
+static void txn_restore_profile(struct txn *t)
+{
+    char *pdir = l2path("var/profiles");
+    DIR *d = opendir(pdir);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            long g = 0;
+            if (!parse_gen_for_profile(e->d_name, t->profile, &g)) continue;
+            if (t->have_gen && g <= t->gen) continue;
+            char *p = fmt("%s/%s", pdir, e->d_name);
+            rm_rf(p);
+            free(p);
+        }
+        closedir(d);
+    }
+    if (t->have_gen) {
+        char *rel = fmt("%s-%ld-link", t->profile, t->gen);
+        switch_profile_symlink(pdir, t->profile, rel);
+        free(rel);
+    } else {
+        char *cur = fmt("%s/%s", pdir, t->profile);
+        struct stat st;
+        if (lstat(cur, &st) == 0 && S_ISLNK(st.st_mode)) unlink(cur);
+        free(cur);
+    }
+    free(pdir);
+}
+
+static void txn_abort(struct txn *t)
+{
+    for (size_t i = t->n; i > 0; i--) {
+        struct txn_saved *s = &t->saved[i - 1];
+        char *dbp = l2path("var/db/installed/%s", s->name);
+        char *mpp = l2path("var/db/installed/%s.manifest", s->name);
+        if (s->db) write_file_atomic(dbp, s->db, strlen(s->db));
+        else unlink(dbp);
+        if (s->manifest) write_file_atomic(mpp, s->manifest, strlen(s->manifest));
+        else unlink(mpp);
+        free(dbp); free(mpp);
+    }
+    txn_restore_profile(t);
+    if (t->n > 0)
+        fprintf(stderr, "l2pm: transaction failed; restored profile %s and "
+                        "database to pre-operation state\n", t->profile);
+    txn_free(t);
+}
+
+static void txn_commit(struct txn *t)
+{
+    txn_free(t);
 }
 
 /* ------------------------------------------------------------- commands */
@@ -1916,8 +2126,10 @@ static char *recipe_repo_fetch(const char *name)
 
 /* Resolve a recipe argument.  Local locations always win; a bare name that
  * is not found locally is looked up in `from_dir` (for sibling dependencies)
- * and then in L2PM_RECIPE_REPO (if set), setting *remote for trust gating. */
-static char *resolve_recipe_from(const char *arg, const char *from_dir, int *remote)
+ * and then in L2PM_RECIPE_REPO (if set), setting *remote for trust gating.
+ * local_only skips the remote repository (no network side effects). */
+static char *resolve_recipe_from(const char *arg, const char *from_dir, int *remote,
+                                 int local_only)
 {
     struct stat st;
     *remote = 0;
@@ -1952,14 +2164,16 @@ static char *resolve_recipe_from(const char *arg, const char *from_dir, int *rem
         if (stat(p, &st) == 0 && S_ISREG(st.st_mode)) return p;
         free(p);
     }
-    p = recipe_repo_fetch(arg);
-    if (p) { *remote = 1; return p; }
+    if (!local_only) {
+        p = recipe_repo_fetch(arg);
+        if (p) { *remote = 1; return p; }
+    }
     return NULL;
 }
 
 static char *resolve_recipe(const char *arg, int *remote)
 {
-    return resolve_recipe_from(arg, NULL, remote);
+    return resolve_recipe_from(arg, NULL, remote, 0);
 }
 
 static int cmd_build(int argc, char **argv)
@@ -2015,7 +2229,7 @@ static int cmd_build(int argc, char **argv)
     return 0;
 }
 
-static int install_tar(const char *file, const char *profile)
+static int install_tar(const char *file, const char *profile, struct txn *t)
 {
     ensure_layout();
     /* Hash the whole archive before anything is extracted. */
@@ -2043,16 +2257,23 @@ static int install_tar(const char *file, const char *profile)
     } else {
         /* Extract to a sibling temp and rename, so a failed extraction
          * never leaves a half package in the store.  Both paths live under
-         * the same L2 root, so rename is atomic there. */
+         * the same L2 root, so rename is atomic there; fsync makes it
+         * durable against power loss before the DB entry points at it. */
         char *tmp2 = fmt("%s.tmp-%ld", store, (long)getpid());
         rm_rf(tmp2);
-        if (rename(tmp, tmp2) != 0 || rename(tmp2, store) != 0) {
+        if (fsync_tree(tmp) != 0 || rename(tmp, tmp2) != 0 || rename(tmp2, store) != 0) {
             rm_rf(tmp2);
             rm_rf(tmp);
             free(tmp2); free(tmp); free(store);
             return 1;
         }
         free(tmp2);
+        char *sdir = l2path("store");
+        char *tdir = l2path("tmp");
+        int frc = fsync_dir(sdir);
+        if (fsync_dir(tdir) != 0 && frc == 0) frc = -1;
+        free(sdir); free(tdir);
+        if (frc != 0) { free(tmp); free(store); return 1; }
     }
     free(tmp);
     struct pathlist decl_deps = {0};
@@ -2065,6 +2286,7 @@ static int install_tar(const char *file, const char *profile)
         }
     }
     pl_free(&decl_deps);
+    if (txn_record(t, name) != 0) { free(store); return 1; }
     if (db_write(name, ver, hash, store, deps) != 0) { free(store); return 1; }
     if (manifest_write(name, store) != 0) { free(store); return 1; }
     if (rebuild_profile(profile) != 0) { free(store); return 1; }
@@ -2075,26 +2297,36 @@ static int install_tar(const char *file, const char *profile)
 
 static int cmd_install(int argc, char **argv)
 {
-    const char *file = NULL, *profile = "default";
+    const char *profile = "default";
+    struct pathlist files = {0};
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile = argv[++i];
-        else if (!file) file = argv[i];
-        else die("install: unexpected argument %s", argv[i]);
+        else pl_add(&files, argv[i]);
     }
     if (!valid_name(profile)) die("install: bad profile name");
-    if (!file) die("install: missing package");
-    return install_tar(file, profile);
+    if (!files.n) die("install: missing package");
+    struct txn t;
+    txn_begin(&t, profile);
+    int rc = 0;
+    for (size_t i = 0; i < files.n; i++) {
+        if (install_tar(files.v[i], profile, &t) != 0) { rc = 1; break; }
+    }
+    if (rc != 0) txn_abort(&t);
+    else txn_commit(&t);
+    pl_free(&files);
+    return rc;
 }
 
 static int add_recipe_rec(const char *arg, const char *from_dir, const char *profile,
-                          int trust, int no_deps, struct pathlist *stack, int depth)
+                          int trust, int no_deps, struct pathlist *stack, int depth,
+                          struct txn *t)
 {
     if (depth > 32) {
         fprintf(stderr, "l2pm: dependency depth limit exceeded at %s\n", arg);
         return 1;
     }
     int remote = 0;
-    char *recipe_path = resolve_recipe_from(arg, from_dir, &remote);
+    char *recipe_path = resolve_recipe_from(arg, from_dir, &remote, 0);
     if (!recipe_path) {
         fprintf(stderr, "l2pm: add: recipe not found: %s\n", arg);
         return 1;
@@ -2127,11 +2359,30 @@ static int add_recipe_rec(const char *arg, const char *from_dir, const char *pro
                 return 1;
             }
             if (!is_installed(dep)) {
-                if (add_recipe_rec(dep, remote ? NULL : r.base, profile, trust, no_deps, stack, depth + 1) != 0) {
+                if (add_recipe_rec(dep, remote ? NULL : r.base, profile, trust, no_deps, stack, depth + 1, t) != 0) {
                     pl_free(&deps);
                     free(stack->v[--stack->n]);
                     return 1;
                 }
+            } else {
+                /* Dependency semantics: deps are NAME-ONLY (no version
+                 * constraints).  An installed package satisfies the
+                 * dependency as-is and is never implicitly upgraded or
+                 * downgraded.  Warn when a locally available recipe
+                 * advertises a different version (no remote fetch here). */
+                char *iv = db_get(dep, "version");
+                int dremote = 0;
+                char *rp = resolve_recipe_from(dep, remote ? NULL : r.base, &dremote, 1);
+                if (rp) {
+                    struct recipe dr;
+                    if (parse_recipe(rp, &dr) == 0 && iv && strcmp(dr.version, iv) != 0)
+                        fprintf(stderr, "l2pm: warning: dependency '%s' installed at "
+                                        "version %s; recipe provides %s "
+                                        "(keeping installed version)\n",
+                                dep, iv, dr.version);
+                    free(rp);
+                }
+                free(iv);
             }
         }
         pl_free(&deps);
@@ -2142,7 +2393,7 @@ static int add_recipe_rec(const char *arg, const char *from_dir, const char *pro
     free(cache);
     int rc = 0;
     if (build_once(&r, tar) != 0) rc = 1;
-    if (rc == 0 && install_tar(tar, profile) != 0) rc = 1;
+    if (rc == 0 && install_tar(tar, profile, t) != 0) rc = 1;
     free(tar);
     free(stack->v[--stack->n]);
     return rc;
@@ -2162,64 +2413,92 @@ static int cmd_add(int argc, char **argv)
     if (!valid_name(profile)) die("add: bad profile name");
     if (!arg) die("add: missing recipe");
     struct pathlist stack = {0};
-    int rc = add_recipe_rec(arg, NULL, profile, trust, no_deps, &stack, 0);
+    struct txn t;
+    txn_begin(&t, profile);
+    int rc = add_recipe_rec(arg, NULL, profile, trust, no_deps, &stack, 0, &t);
+    if (rc != 0) txn_abort(&t);
+    else txn_commit(&t);
     pl_free(&stack);
     return rc;
 }
 
 static int cmd_remove(int argc, char **argv)
 {
-    const char *name = NULL, *profile = "default";
+    const char *profile = "default";
     int force = 0;
+    struct pathlist names = {0};
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile = argv[++i];
         else if (!strcmp(argv[i], "--force")) force = 1;
-        else if (!name) name = argv[i];
-        else die("remove: unexpected argument %s", argv[i]);
+        else if (!pl_has(&names, argv[i])) pl_add(&names, argv[i]);
     }
     if (!valid_name(profile)) die("remove: bad profile name");
-    if (!name) die("remove: missing package");
-    if (!valid_name(name)) die("remove: bad package name");
-    char *db = l2path("var/db/installed/%s", name);
-    if (access(db, F_OK) != 0) {
-        fprintf(stderr, "l2pm: %s is not installed\n", name);
+    if (!names.n) die("remove: missing package");
+    for (size_t i = 0; i < names.n; i++)
+        if (!valid_name(names.v[i])) die("remove: bad package name");
+    /* All existence and reverse-dependency checks run before any mutation.
+     * Names removed together satisfy each other's dependencies. */
+    for (size_t i = 0; i < names.n; i++) {
+        char *db = l2path("var/db/installed/%s", names.v[i]);
+        int there = access(db, F_OK) == 0;
         free(db);
-        return 1;
+        if (!there) {
+            fprintf(stderr, "l2pm: %s is not installed\n", names.v[i]);
+            pl_free(&names);
+            return 1;
+        }
     }
     if (!force) {
         size_t n = 0;
-        char **names = db_names(&n);
-        struct pathlist rdeps = {0};
-        for (size_t i = 0; i < n; i++) {
-            if (strcmp(names[i], name) != 0) {
-                char *dstr = db_get(names[i], "deps");
+        char **dbn = db_names(&n);
+        int blocked = 0;
+        for (size_t i = 0; i < names.n && !blocked; i++) {
+            struct pathlist rdeps = {0};
+            for (size_t j = 0; j < n; j++) {
+                if (pl_has(&names, dbn[j])) continue;
+                char *dstr = db_get(dbn[j], "deps");
                 struct pathlist parsed = {0};
-                if (dstr && parse_deps_list(dstr, &parsed) == 0 && pl_has(&parsed, name))
-                    pl_add(&rdeps, names[i]);
+                if (dstr && parse_deps_list(dstr, &parsed) == 0 && pl_has(&parsed, names.v[i]))
+                    pl_add(&rdeps, dbn[j]);
                 pl_free(&parsed);
                 free(dstr);
             }
-            free(names[i]);
-        }
-        free(names);
-        if (rdeps.n > 0) {
-            fprintf(stderr, "l2pm: cannot remove %s; required by:", name);
-            for (size_t i = 0; i < rdeps.n; i++) fprintf(stderr, " %s", rdeps.v[i]);
-            fprintf(stderr, " (use --force to override)\n");
+            if (rdeps.n > 0) {
+                fprintf(stderr, "l2pm: cannot remove %s; required by:", names.v[i]);
+                for (size_t k = 0; k < rdeps.n; k++) fprintf(stderr, " %s", rdeps.v[k]);
+                fprintf(stderr, " (use --force to override)\n");
+                blocked = 1;
+            }
             pl_free(&rdeps);
-            free(db);
+        }
+        for (size_t j = 0; j < n; j++) free(dbn[j]);
+        free(dbn);
+        if (blocked) {
+            pl_free(&names);
             return 1;
         }
-        pl_free(&rdeps);
     }
-    if (unlink(db) != 0) { fprintf(stderr, "l2pm: %s is not installed\n", name); free(db); return 1; }
-    free(db);
-    char *mp = l2path("var/db/installed/%s.manifest", name);
-    unlink(mp);
-    free(mp);
-    if (rebuild_profile(profile) != 0) return 1;
-    printf("removed %s\n", name);
-    return 0;
+    struct txn t;
+    txn_begin(&t, profile);
+    int rc = 0;
+    for (size_t i = 0; i < names.n; i++) {
+        if (txn_record(&t, names.v[i]) != 0) { rc = 1; break; }
+        char *db = l2path("var/db/installed/%s", names.v[i]);
+        char *mp = l2path("var/db/installed/%s.manifest", names.v[i]);
+        if (unlink(db) != 0) rc = 1;
+        unlink(mp);
+        free(db); free(mp);
+        if (rc != 0) break;
+    }
+    if (rc == 0 && rebuild_profile(profile) != 0) rc = 1;
+    if (rc != 0) {
+        txn_abort(&t);
+    } else {
+        txn_commit(&t);
+        for (size_t i = 0; i < names.n; i++) printf("removed %s\n", names.v[i]);
+    }
+    pl_free(&names);
+    return rc;
 }
 
 static int cmd_list(void)
@@ -2250,12 +2529,21 @@ static int cmd_info(int argc, char **argv)
     return 0;
 }
 
+/* Returns 0 when the store matches the manifest, 1 when the manifest file
+ * is missing (never a silent pass: the caller must warn/repair or fail),
+ * -1 on mismatch or unreadable data (reason is set). */
 static int verify_manifest(const char *name, const char *store, char *reason, size_t rcap)
 {
     char *mp = l2path("var/db/installed/%s.manifest", name);
     char *txt = read_small(mp);
+    if (!txt) {
+        int missing = access(mp, F_OK) != 0;
+        free(mp);
+        if (missing) return 1;
+        snprintf(reason, rcap, "unreadable manifest");
+        return -1;
+    }
     free(mp);
-    if (!txt) return 0; /* legacy install without manifest */
     struct pathlist exp = {0};
     char *save = NULL;
     for (char *line = strtok_r(txt, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
@@ -2289,39 +2577,8 @@ static int verify_manifest(const char *name, const char *store, char *reason, si
     return 0;
 }
 
-static int cmd_verify(void)
-{
-    size_t n = 0;
-    char **names = db_names(&n);
-    int bad = 0;
-    for (size_t i = 0; i < n; i++) {
-        char *store = db_get(names[i], "store");
-        char *ver = db_get(names[i], "version");
-        if (!store || !is_dir(store)) {
-            printf("BROKEN %s: store path missing\n", names[i]);
-            bad++;
-        } else {
-            char nm[128], vv[128], dd[1024];
-            char reason[128] = "";
-            if (read_info(store, nm, sizeof(nm), vv, sizeof(vv), dd, sizeof(dd)) != 0 ||
-                strcmp(nm, names[i]) != 0) {
-                printf("BROKEN %s: metadata mismatch\n", names[i]);
-                bad++;
-            } else if (ver && strcmp(vv, ver) != 0) {
-                printf("BROKEN %s: version mismatch\n", names[i]);
-                bad++;
-            } else if (verify_manifest(names[i], store, reason, sizeof(reason)) != 0) {
-                printf("BROKEN %s: store integrity check failed (%s)\n", names[i], reason);
-                bad++;
-            } else {
-                printf("ok %s %s\n", names[i], vv);
-            }
-        }
-        free(store); free(ver); free(names[i]);
-    }
-    free(names);
-    return bad ? 1 : 0;
-}
+/* cmd_verify is defined after cmd_rollback: --repair reuses the rollback
+ * DB re-sync (sync_db_to_gen) and the generation metadata readers below. */
 
 struct gen_pkg {
     char *name;
@@ -2443,6 +2700,36 @@ static int cmd_generations(int argc, char **argv)
     return 0;
 }
 
+/* Synchronize var/db/installed with a generation's package list.  Shared
+ * by rollback and by `verify --repair` completing an interrupted rollback
+ * (the generation metadata is the snapshot; no separate journal format). */
+static int sync_db_to_gen(struct gen_pkg *pkgs, size_t pn)
+{
+    size_t cur_n = 0;
+    char **cur_names = db_names(&cur_n);
+    for (size_t i = 0; i < cur_n; i++) {
+        int keep = 0;
+        for (size_t j = 0; j < pn; j++)
+            if (!strcmp(cur_names[i], pkgs[j].name)) { keep = 1; break; }
+        if (!keep) {
+            char *db = l2path("var/db/installed/%s", cur_names[i]);
+            char *mp = l2path("var/db/installed/%s.manifest", cur_names[i]);
+            unlink(db);
+            unlink(mp);
+            free(db);
+            free(mp);
+        }
+        free(cur_names[i]);
+    }
+    free(cur_names);
+    for (size_t j = 0; j < pn; j++) {
+        if (db_write(pkgs[j].name, pkgs[j].version, pkgs[j].hash, pkgs[j].store, pkgs[j].deps) != 0 ||
+            manifest_write(pkgs[j].name, pkgs[j].store) != 0)
+            return -1;
+    }
+    return 0;
+}
+
 static int cmd_rollback(int argc, char **argv)
 {
     const char *profile = "default", *gen_arg = NULL;
@@ -2510,6 +2797,21 @@ static int cmd_rollback(int argc, char **argv)
     }
     free(target_dir);
 
+    /* Intent marker, written before any mutation: a crash between the
+     * symlink switch and the DB re-sync leaves a torn state that
+     * `verify --repair` completes from this marker.  Removed on success. */
+    char *intent = l2path("var/rollback-intent");
+    char ibuf[256];
+    int in = snprintf(ibuf, sizeof(ibuf), "profile=%s\ngen=%ld\n", profile, target_gen);
+    if (in < 0 || (size_t)in >= sizeof(ibuf) ||
+        write_file_atomic(intent, ibuf, (size_t)in) != 0) {
+        free(intent);
+        free_gen_pkgs(pkgs, pn);
+        free(target_rel); free(pdir);
+        die("rollback: cannot write rollback intent marker");
+    }
+    free(intent);
+
     if (switch_profile_symlink(pdir, profile, target_rel) != 0) {
         free_gen_pkgs(pkgs, pn);
         free(target_rel); free(pdir);
@@ -2518,58 +2820,389 @@ static int cmd_rollback(int argc, char **argv)
     free(target_rel);
     free(pdir);
 
-    /* Synchronize var/db/installed with the rolled-back generation. */
-    size_t cur_n = 0;
-    char **cur_names = db_names(&cur_n);
-    for (size_t i = 0; i < cur_n; i++) {
-        int keep = 0;
-        for (size_t j = 0; j < pn; j++)
-            if (!strcmp(cur_names[i], pkgs[j].name)) { keep = 1; break; }
-        if (!keep) {
-            char *db = l2path("var/db/installed/%s", cur_names[i]);
-            char *mp = l2path("var/db/installed/%s.manifest", cur_names[i]);
-            unlink(db);
-            unlink(mp);
-            free(db);
-            free(mp);
-        }
-        free(cur_names[i]);
-    }
-    free(cur_names);
-
-    for (size_t j = 0; j < pn; j++) {
-        if (db_write(pkgs[j].name, pkgs[j].version, pkgs[j].hash, pkgs[j].store, pkgs[j].deps) != 0 ||
-            manifest_write(pkgs[j].name, pkgs[j].store) != 0) {
-            free_gen_pkgs(pkgs, pn);
-            die("rollback: failed to update package database");
-        }
+    /* Synchronize var/db/installed with the rolled-back generation.  On
+     * failure the intent marker stays so `verify --repair` can finish. */
+    if (sync_db_to_gen(pkgs, pn) != 0) {
+        free_gen_pkgs(pkgs, pn);
+        die("rollback: failed to update package database");
     }
     free_gen_pkgs(pkgs, pn);
+    char *intent_done = l2path("var/rollback-intent");
+    unlink(intent_done);
+    free(intent_done);
     printf("rolled back %s to generation %ld\n", profile, target_gen);
     return 0;
 }
 
+/* DB snapshot in generation-file format (db_names is sorted, matching the
+ * order rebuild_profile writes into .l2pm-gen). */
+static void db_snapshot_lines(struct pathlist *out)
+{
+    size_t n = 0;
+    char **names = db_names(&n);
+    for (size_t i = 0; i < n; i++) {
+        char *ver = db_get(names[i], "version");
+        char *hash = db_get(names[i], "hash");
+        char *store = db_get(names[i], "store");
+        char *deps = db_get(names[i], "deps");
+        char *ln = fmt("%s\t%s\t%s\t%s\t%s", names[i], ver ? ver : "",
+                       hash ? hash : "", store ? store : "", deps ? deps : "");
+        pl_add(out, ln);
+        free(ln);
+        free(ver); free(hash); free(store); free(deps);
+        free(names[i]);
+    }
+    free(names);
+}
+
+/* verify: per-package store integrity plus DB/profile divergence.
+ * --repair additionally: completes an interrupted rollback from its intent
+ * marker, reconstructs missing/corrupt DB entries from the ACTIVE default
+ * generation (fail-safe: never drops a package the generation still lists,
+ * never adopts orphan stores), rewrites missing manifests from the store,
+ * rebuilds diverged profiles from the DB, and removes stale staging
+ * artifacts.  Store contents are NEVER modified or deleted here. */
+static int cmd_verify(int argc, char **argv)
+{
+    int repair = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--repair")) repair = 1;
+        else die("verify: unexpected argument %s", argv[i]);
+    }
+
+    char *pdir = l2path("var/profiles");
+    struct pathlist profiles = {0};
+    pl_add(&profiles, "default");
+    DIR *pd = opendir(pdir);
+    if (pd) {
+        struct dirent *e;
+        while ((e = readdir(pd))) {
+            if (e->d_name[0] == '.') continue;
+            char *prof = NULL;
+            long g = 0;
+            if (parse_any_gen_link(e->d_name, &prof, &g)) {
+                if (!pl_has(&profiles, prof)) pl_add(&profiles, prof);
+                free(prof);
+                continue;
+            }
+            char *full = fmt("%s/%s", pdir, e->d_name);
+            char tgt[MAXPATH];
+            ssize_t r = readlink(full, tgt, sizeof(tgt) - 1);
+            free(full);
+            if (r > 0) {
+                tgt[r] = 0;
+                long gg = 0;
+                if (parse_gen_for_profile(tgt, e->d_name, &gg) && !pl_has(&profiles, e->d_name))
+                    pl_add(&profiles, e->d_name);
+            }
+        }
+        closedir(pd);
+    }
+
+    int bad = 0;
+    if (repair) {
+        /* 1. Complete an interrupted rollback from its intent marker. */
+        char *ip = l2path("var/rollback-intent");
+        char *txt = read_small(ip);
+        if (txt) {
+            char prof[128] = "";
+            long gen = -1;
+            char *save = NULL;
+            for (char *line = strtok_r(txt, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+                if (!strncmp(line, "profile=", 8)) snprintf(prof, sizeof(prof), "%s", line + 8);
+                else if (!strncmp(line, "gen=", 4)) gen = strtol(line + 4, NULL, 10);
+            }
+            free(txt);
+            int done = 0;
+            if (valid_name(prof) && gen >= 0) {
+                char *rel = fmt("%s-%ld-link", prof, gen);
+                char *gdir = fmt("%s/%s", pdir, rel);
+                struct gen_pkg *pkgs = NULL;
+                size_t pn = 0;
+                if (is_dir(gdir) && read_gen_file(gdir, &pkgs, &pn) == 0) {
+                    int ok = 1;
+                    for (size_t j = 0; j < pn; j++)
+                        if (!valid_name(pkgs[j].name) || !valid_name(pkgs[j].version) ||
+                            !is_dir(pkgs[j].store)) { ok = 0; break; }
+                    if (ok && sync_db_to_gen(pkgs, pn) == 0) {
+                        char cur[MAXPATH];
+                        long cg = -1;
+                        if (read_active_gen(pdir, prof, cur, sizeof(cur), &cg) != 0 ||
+                            strcmp(cur, rel) != 0)
+                            switch_profile_symlink(pdir, prof, rel);
+                        unlink(ip);
+                        printf("repaired: completed interrupted rollback of %s to generation %ld\n",
+                               prof, gen);
+                        done = 1;
+                    }
+                    free_gen_pkgs(pkgs, pn);
+                }
+                free(gdir); free(rel);
+            }
+            if (!done) {
+                fprintf(stderr, "l2pm: cannot complete interrupted rollback from intent marker; "
+                                "reconciling profile to database\n");
+                unlink(ip);
+            }
+        }
+        free(ip);
+
+        /* 2. Reconstruct missing/corrupt DB entries from the active
+         *    generation (default profile first, else the first profile
+         *    with a readable active generation). */
+        for (size_t i = 0; i < profiles.n; i++) {
+            char cur[MAXPATH];
+            long gen = -1;
+            if (read_active_gen(pdir, profiles.v[i], cur, sizeof(cur), &gen) != 0)
+                continue;
+            char *gdir = fmt("%s/%s", pdir, cur);
+            struct gen_pkg *pkgs = NULL;
+            size_t pn = 0;
+            if (read_gen_file(gdir, &pkgs, &pn) != 0) {
+                free(gdir);
+                continue;
+            }
+            for (size_t j = 0; j < pn; j++) {
+                struct gen_pkg *g = &pkgs[j];
+                if (!valid_name(g->name) || !valid_name(g->version) || !is_dir(g->store))
+                    continue;
+                char *dbnm = db_get(g->name, "name");
+                char *dbstore = db_get(g->name, "store");
+                char *dbver = db_get(g->name, "version");
+                int valid = dbnm && !strcmp(dbnm, g->name) &&
+                            dbstore && is_dir(dbstore) && dbver && valid_name(dbver);
+                free(dbnm); free(dbstore); free(dbver);
+                if (valid) continue;
+                if (db_write(g->name, g->version, g->hash, g->store, g->deps) == 0 &&
+                    manifest_write(g->name, g->store) == 0)
+                    printf("repaired: reconstructed database entry for %s from generation %ld\n",
+                           g->name, gen);
+                else { printf("BROKEN %s: cannot reconstruct database entry\n", g->name); bad++; }
+            }
+            free_gen_pkgs(pkgs, pn);
+            free(gdir);
+            break;
+        }
+    }
+
+    /* Per-package integrity (detection always runs, on the repaired DB). */
+    size_t n = 0;
+    char **names = db_names(&n);
+    for (size_t i = 0; i < n; i++) {
+        char *store = db_get(names[i], "store");
+        char *ver = db_get(names[i], "version");
+        if (!store || !is_dir(store)) {
+            printf("BROKEN %s: store path missing\n", names[i]);
+            bad++;
+        } else {
+            char nm[128], vv[128], dd[1024];
+            char reason[128] = "";
+            if (read_info(store, nm, sizeof(nm), vv, sizeof(vv), dd, sizeof(dd)) != 0 ||
+                strcmp(nm, names[i]) != 0) {
+                printf("BROKEN %s: metadata mismatch\n", names[i]);
+                bad++;
+            } else if (ver && strcmp(vv, ver) != 0) {
+                printf("BROKEN %s: version mismatch\n", names[i]);
+                bad++;
+            } else {
+                int mrc = verify_manifest(names[i], store, reason, sizeof(reason));
+                if (mrc == 1) {
+                    if (repair && manifest_write(names[i], store) == 0) {
+                        printf("repaired: rewrote missing manifest for %s\n", names[i]);
+                        printf("ok %s %s\n", names[i], vv);
+                    } else {
+                        printf("BROKEN %s: manifest missing\n", names[i]);
+                        bad++;
+                    }
+                } else if (mrc != 0) {
+                    printf("BROKEN %s: store integrity check failed (%s)\n", names[i], reason);
+                    bad++;
+                } else {
+                    printf("ok %s %s\n", names[i], vv);
+                }
+            }
+        }
+        free(store); free(ver); free(names[i]);
+    }
+    free(names);
+
+    /* DB/profile divergence: the profile is a derived view of the DB. */
+    struct pathlist dblines = {0};
+    db_snapshot_lines(&dblines);
+    for (size_t i = 0; i < profiles.n; i++) {
+        const char *prof = profiles.v[i];
+        char cur[MAXPATH];
+        long gen = -1;
+        int have = read_active_gen(pdir, prof, cur, sizeof(cur), &gen) == 0;
+        struct gen_pkg *pkgs = NULL;
+        size_t pn = 0;
+        int genok = 0;
+        if (have) {
+            char *gdir = fmt("%s/%s", pdir, cur);
+            genok = read_gen_file(gdir, &pkgs, &pn) == 0;
+            free(gdir);
+        }
+        int diverged = (!have && dblines.n > 0) || (have && (!genok || pn != dblines.n));
+        if (!diverged && have && genok) {
+            for (size_t j = 0; j < pn; j++) {
+                char *ln = fmt("%s\t%s\t%s\t%s\t%s", pkgs[j].name, pkgs[j].version,
+                               pkgs[j].hash, pkgs[j].store, pkgs[j].deps);
+                int diff = strcmp(ln, dblines.v[j]) != 0;
+                free(ln);
+                if (diff) { diverged = 1; break; }
+            }
+        }
+        if (diverged) {
+            if (repair) {
+                if (rebuild_profile(prof) == 0)
+                    printf("repaired: rebuilt profile %s from database\n", prof);
+                else { printf("BROKEN profile %s: cannot rebuild from database\n", prof); bad++; }
+            } else {
+                printf("BROKEN profile %s: database/profile divergence\n", prof);
+                bad++;
+            }
+        }
+        if (pkgs) free_gen_pkgs(pkgs, pn);
+    }
+    pl_free(&dblines);
+
+    if (repair) {
+        /* Stale staging artifacts from crashed runs (dot-prefixed temps
+         * created by rebuild_profile / switch_profile_symlink). */
+        DIR *sd = opendir(pdir);
+        if (sd) {
+            struct dirent *e;
+            while ((e = readdir(sd))) {
+                if (e->d_name[0] != '.') continue;
+                if (!strstr(e->d_name, "-tmp-") && !strstr(e->d_name, ".link-") &&
+                    !strstr(e->d_name, ".old-")) continue;
+                char *full = fmt("%s/%s", pdir, e->d_name);
+                rm_rf(full);
+                printf("repaired: removed stale temporary artifact %s\n", e->d_name);
+                free(full);
+            }
+            closedir(sd);
+        }
+        /* Unreferenced store paths: report only, never delete (gc's job). */
+        struct pathlist refs = {0};
+        size_t rn = 0;
+        char **rnames = db_names(&rn);
+        for (size_t i = 0; i < rn; i++) {
+            char *s = db_get(rnames[i], "store");
+            if (s && !pl_has(&refs, s)) pl_add(&refs, s);
+            free(s); free(rnames[i]);
+        }
+        free(rnames);
+        DIR *gd = opendir(pdir);
+        if (gd) {
+            struct dirent *e;
+            while ((e = readdir(gd))) {
+                char *prof = NULL;
+                long g = 0;
+                if (!parse_any_gen_link(e->d_name, &prof, &g)) continue;
+                free(prof);
+                char *gdir = fmt("%s/%s", pdir, e->d_name);
+                struct gen_pkg *pkgs = NULL;
+                size_t pn = 0;
+                if (read_gen_file(gdir, &pkgs, &pn) == 0) {
+                    for (size_t j = 0; j < pn; j++)
+                        if (*pkgs[j].store && !pl_has(&refs, pkgs[j].store))
+                            pl_add(&refs, pkgs[j].store);
+                    free_gen_pkgs(pkgs, pn);
+                }
+                free(gdir);
+            }
+            closedir(gd);
+        }
+        char *sdir = l2path("store");
+        DIR *s = opendir(sdir);
+        int orphans = 0;
+        if (s) {
+            struct dirent *e;
+            while ((e = readdir(s))) {
+                if (e->d_name[0] == '.') continue;
+                char *full = fmt("%s/%s", sdir, e->d_name);
+                if (!pl_has(&refs, full)) orphans++;
+                free(full);
+            }
+            closedir(s);
+        }
+        free(sdir);
+        pl_free(&refs);
+        if (orphans > 0)
+            printf("note: %d unreferenced store path(s); run gc to reclaim\n", orphans);
+    }
+    pl_free(&profiles);
+    free(pdir);
+    return bad ? 1 : 0;
+}
+
+struct gc_gen {
+    char *prof;
+    long gen;
+    char *dir;
+    char *rel;
+    struct gen_pkg *pkgs;
+    size_t pn;
+    int keep;
+};
+
+static int cmp_gc_gen(const void *a, const void *b)
+{
+    const struct gc_gen *x = a, *y = b;
+    int c = strcmp(x->prof, y->prof);
+    if (c) return c;
+    return (y->gen > x->gen) - (y->gen < x->gen); /* descending */
+}
+
+/* gc: reclaim unreferenced store paths.  FAIL-SAFE: liveness comes from
+ * the DB AND from generation metadata; an unreadable DB entry or gen file
+ * means unknown liveness, so gc refuses rather than risk deleting live
+ * data.  By default the active generation plus the newest 2 per profile
+ * are kept (rollback history survives routine gc); --keep-generations
+ * keeps all, --prune-generations opts into the legacy keep-active-only
+ * behavior.  Store paths referenced by any kept generation are never
+ * deleted, even when the DB entry is gone (torn remove/rollback). */
 static int cmd_gc(int argc, char **argv)
 {
-    int keep_gens = 0;
+    int keep_gens = 0, prune_gens = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--keep-generations")) keep_gens = 1;
+        else if (!strcmp(argv[i], "--prune-generations")) prune_gens = 1;
         else die("gc: unexpected argument %s", argv[i]);
     }
+    if (keep_gens && prune_gens)
+        die("gc: --keep-generations and --prune-generations are mutually exclusive");
+    long keep_last = prune_gens ? 0 : 2;
 
     char *pdir = l2path("var/profiles");
     struct pathlist live_stores = {0};
 
     size_t dbn = 0;
     char **names = db_names(&dbn);
+    int refuse = 0;
     for (size_t i = 0; i < dbn; i++) {
         char *s = db_get(names[i], "store");
-        if (s && !pl_has(&live_stores, s)) pl_add(&live_stores, s);
+        if (!s) {
+            fprintf(stderr, "l2pm: gc: refusing: database entry %s has no readable "
+                            "store path (run verify --repair)\n", names[i]);
+            refuse = 1;
+        } else if (!pl_has(&live_stores, s)) {
+            pl_add(&live_stores, s);
+        }
         free(s);
         free(names[i]);
     }
     free(names);
+    if (refuse) {
+        pl_free(&live_stores);
+        free(pdir);
+        return 1;
+    }
 
+    /* Read every generation's metadata before deleting anything. */
+    struct gc_gen *gens = NULL;
+    size_t gn = 0, gcap = 0;
     DIR *pd = opendir(pdir);
     if (pd) {
         struct dirent *e;
@@ -2578,28 +3211,65 @@ static int cmd_gc(int argc, char **argv)
             char *prof = NULL;
             long g = 0;
             if (!parse_any_gen_link(e->d_name, &prof, &g)) continue;
-            char active_rel[MAXPATH] = "";
-            long ag = -1;
-            int have_active = read_active_gen(pdir, prof, active_rel, sizeof(active_rel), &ag) == 0;
-            int is_active = have_active && !strcmp(active_rel, e->d_name);
             char *gdir = fmt("%s/%s", pdir, e->d_name);
-            if (!keep_gens && !is_active) {
-                rm_rf(gdir);
-            } else if (keep_gens) {
-                struct gen_pkg *pkgs = NULL;
-                size_t pn = 0;
-                if (read_gen_file(gdir, &pkgs, &pn) == 0) {
-                    for (size_t j = 0; j < pn; j++)
-                        if (*pkgs[j].store && !pl_has(&live_stores, pkgs[j].store))
-                            pl_add(&live_stores, pkgs[j].store);
-                    free_gen_pkgs(pkgs, pn);
-                }
+            struct gen_pkg *pkgs = NULL;
+            size_t pn = 0;
+            if (read_gen_file(gdir, &pkgs, &pn) != 0) {
+                fprintf(stderr, "l2pm: gc: refusing: cannot read generation metadata "
+                                "%s (run verify --repair)\n", e->d_name);
+                free(gdir); free(prof);
+                refuse = 1;
+                break;
             }
-            free(gdir);
-            free(prof);
+            if (gn == gcap) {
+                gcap = gcap ? gcap * 2 : 16;
+                gens = xrealloc(gens, gcap * sizeof(*gens));
+            }
+            gens[gn].prof = prof;
+            gens[gn].gen = g;
+            gens[gn].dir = gdir;
+            gens[gn].rel = xstrdup(e->d_name);
+            gens[gn].pkgs = pkgs;
+            gens[gn].pn = pn;
+            gens[gn].keep = 0;
+            gn++;
         }
         closedir(pd);
     }
+    if (refuse) {
+        for (size_t i = 0; i < gn; i++) {
+            free_gen_pkgs(gens[i].pkgs, gens[i].pn);
+            free(gens[i].prof); free(gens[i].dir); free(gens[i].rel);
+        }
+        free(gens);
+        pl_free(&live_stores);
+        free(pdir);
+        return 1;
+    }
+    if (gn) qsort(gens, gn, sizeof(*gens), cmp_gc_gen);
+    for (size_t i = 0; i < gn; i++) {
+        char active_rel[MAXPATH] = "";
+        long ag = -1;
+        int have_active = read_active_gen(pdir, gens[i].prof, active_rel,
+                                          sizeof(active_rel), &ag) == 0;
+        int is_active = have_active && !strcmp(active_rel, gens[i].rel);
+        long newer = 0; /* same-profile entries before i are newer (sorted) */
+        for (size_t j = 0; j < i; j++)
+            if (!strcmp(gens[j].prof, gens[i].prof)) newer++;
+        gens[i].keep = is_active || keep_gens || newer < keep_last;
+    }
+    for (size_t i = 0; i < gn; i++) {
+        if (gens[i].keep) {
+            for (size_t j = 0; j < gens[i].pn; j++)
+                if (*gens[i].pkgs[j].store && !pl_has(&live_stores, gens[i].pkgs[j].store))
+                    pl_add(&live_stores, gens[i].pkgs[j].store);
+        } else {
+            rm_rf(gens[i].dir);
+        }
+        free_gen_pkgs(gens[i].pkgs, gens[i].pn);
+        free(gens[i].prof); free(gens[i].dir); free(gens[i].rel);
+    }
+    free(gens);
     free(pdir);
 
     char *dir = l2path("store");
@@ -2737,11 +3407,11 @@ static void usage(void)
         "usage:\n"
         "  l2pm build <recipe> [-o file.l2p] [--check] [--trust]\n"
         "  l2pm add <recipe> [--profile default] [--trust] [--no-deps]\n"
-        "  l2pm install <file.l2p> [--profile default]\n"
-        "  l2pm remove <name> [--profile default] [--force]\n"
-        "  l2pm list | info <name> | verify | search [text]\n"
+        "  l2pm install <file.l2p>... [--profile default]\n"
+        "  l2pm remove <name>... [--profile default] [--force]\n"
+        "  l2pm list | info <name> | verify [--repair] | search [text]\n"
         "  l2pm generations [--profile default] | rollback [GEN] [--profile default]\n"
-        "  l2pm gc [--keep-generations]\n"
+        "  l2pm gc [--keep-generations | --prune-generations]\n"
         "  l2pm hash <file> | tar <dir> <out> [--epoch N]\n"
         "  l2pm selftest\n"
         "recipe steps: 1 repo (git source clone)  2 fetch/extract  3 compile  4 install\n"
@@ -2767,7 +3437,7 @@ int main(int argc, char **argv)
     if (!strcmp(cmd, "remove") || !strcmp(cmd, "rm")) return cmd_remove(argc, argv);
     if (!strcmp(cmd, "list") || !strcmp(cmd, "ls")) return cmd_list();
     if (!strcmp(cmd, "info")) return cmd_info(argc, argv);
-    if (!strcmp(cmd, "verify")) return cmd_verify();
+    if (!strcmp(cmd, "verify")) return cmd_verify(argc, argv);
     if (!strcmp(cmd, "generations")) return cmd_generations(argc, argv);
     if (!strcmp(cmd, "rollback")) return cmd_rollback(argc, argv);
     if (!strcmp(cmd, "gc")) return cmd_gc(argc, argv);

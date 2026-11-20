@@ -1,0 +1,275 @@
+#!/bin/dash
+# l2net - L2 network bring-up and helper.      (dash; no bashisms)
+#
+#   l2net boot            rcl2 runs this once at boot
+#   l2net status          interfaces, addresses, wifi state
+#   l2net dhcp IFACE      run a DHCP client on IFACE
+#   l2net wifi-start [IF] load drivers, start wpa_supplicant + DHCP
+#   l2net wifi-stop  [IF]
+#   l2net modules         (re)load drivers for the hardware that is present
+#
+# Idle-RAM rule: nothing is loaded or started for hardware that is not there.
+# No wifi chip -> no cfg80211/mac80211, no wpa_supplicant.  No cable -> no
+# DHCP client.  wpa_supplicant only runs once a network has been saved.
+
+[ -r /etc/l2/net.conf ] && . /etc/l2/net.conf
+: "${ETH:=auto}" "${WIFI:=auto}" "${COUNTRY:=}"
+
+KREL=$(cat /proc/sys/kernel/osrelease 2>/dev/null)
+CONF=/etc/l2/wpa_supplicant.conf
+PACK=""                         # root of a wifi pack on the boot medium, if any
+WPA=/bin/wpa_supplicant
+
+log() { echo "l2net: $*"; }
+
+have_wifi_hw() {
+    for d in /sys/class/net/*; do
+        [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] && return 0
+    done
+    return 1
+}
+
+# ---------------------------------------------------------------- the pack
+# Installed system: modules and firmware are on the root filesystem.
+# Live ISO: they sit on the boot medium (never copied into RAM); mount it,
+# point /lib/modules and the firmware search path at it.
+find_pack() {
+    [ -d "/lib/modules/$KREL" ] && [ -f "/lib/modules/$KREL/modules.dep" ] && return 0
+    [ -d /media/l2/l2/wifi ] && { use_pack /media/l2/l2/wifi; return 0; }
+    [ -d /media/l2/l2/hw ] && { use_pack /media/l2/l2/hw; return 0; }
+    # No block device at all (initramfs-only boot, no medium): nothing to find,
+    # so do not spend ~10s retrying.  Real hardware always has a boot device.
+    _any=0
+    for d in /dev/sr[0-9] /dev/sd[a-z] /dev/vd[a-z] /dev/nvme[0-9]n[0-9] /dev/mmcblk[0-9]; do
+        [ -b "$d" ] && { _any=1; break; }
+    done
+    [ "$_any" = 0 ] && return 1
+    mkdir -p /media/l2 2>/dev/null
+    n=0
+    while [ "$n" -lt 10 ]; do
+        for d in ${L2_PACK_DEV:-} /dev/sr0 /dev/sr1 /dev/sd[a-z] /dev/sd[a-z][0-9] \
+                 /dev/vd[a-z] /dev/vd[a-z][0-9] /dev/nvme[0-9]n[0-9] /dev/nvme[0-9]n[0-9]p[0-9] \
+                 /dev/mmcblk[0-9] /dev/mmcblk[0-9]p[0-9]; do
+            [ -b "$d" ] || continue
+            mount -t iso9660 -o ro "$d" /media/l2 2>/dev/null || continue
+            if [ -d /media/l2/l2/wifi ]; then use_pack /media/l2/l2/wifi; return 0; fi
+            if [ -d /media/l2/l2/hw ]; then use_pack /media/l2/l2/hw; return 0; fi
+            # An L2 live medium without a pack will not grow one: stop
+            # searching instead of retrying for ~10s on every core-ISO boot.
+            if [ -f /media/l2/l2/L2-LIVE ]; then umount /media/l2 2>/dev/null; return 1; fi
+            umount /media/l2 2>/dev/null
+        done
+        n=$((n + 1)); sleep 1
+    done
+    return 1
+}
+
+use_pack() {
+    PACK=$1
+    mkdir -p /lib/modules
+    ln -sfn "$PACK/lib/modules/$KREL" "/lib/modules/$KREL"
+    [ -w /sys/module/firmware_class/parameters/path ] &&
+        echo "$PACK/lib/firmware" > /sys/module/firmware_class/parameters/path
+    [ -x "$PACK/bin/wpa_supplicant" ] && WPA=$PACK/bin/wpa_supplicant
+}
+
+# Load only modules whose alias matches a device that exists.
+# Two passes: host/platform buses first (creates i2c/hid/usb child buses),
+# then child buses.
+probe_modaliases() {
+    _list=""
+    for f in "$@"; do
+        [ -r "$f" ] || continue
+        read -r a < "$f" || continue
+        [ -n "$a" ] || continue
+        case " $_list " in
+            *" $a "*) ;;
+            *) _list="$_list $a" ;;
+        esac
+    done
+    # shellcheck disable=SC2086
+    [ -n "$_list" ] && modprobe -a -q $_list 2>/dev/null
+    return 0
+}
+
+load_modules() {
+    [ -f "/lib/modules/$KREL/modules.alias" ] || return 0
+    probe_modaliases /sys/bus/pci/devices/*/modalias /sys/bus/usb/devices/*/modalias \
+                     /sys/bus/acpi/devices/*/modalias /sys/bus/platform/devices/*/modalias
+    probe_modaliases /sys/bus/i2c/devices/*/modalias /sys/bus/hid/devices/*/modalias \
+                     /sys/bus/usb/devices/*/modalias
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+    return 0
+}
+
+# ----------------------------------------------------------------- helpers
+unblock() {
+    for r in /sys/class/rfkill/rfkill*/soft; do
+        [ -w "$r" ] && echo 0 > "$r"
+    done
+}
+
+wifi_ifaces() {
+    for d in /sys/class/net/*; do
+        if [ -d "$d/wireless" ] || [ -d "$d/phy80211" ]; then echo "${d##*/}"; fi
+    done
+}
+
+eth_ifaces() {
+    for d in /sys/class/net/*; do
+        n=${d##*/}
+        [ "$n" = lo ] && continue
+        [ -e "$d/device" ] || continue                       # skip virtual links
+        [ -d "$d/wireless" ] || [ -d "$d/phy80211" ] || echo "$n"
+    done
+}
+
+# pid alive AND still the expected program: a stale pidfile whose pid got
+# reused must not suppress DHCP nor cause wifi-stop to kill a stranger.
+pid_alive() {  # pid, expected comm
+    [ -n "$1" ] || return 1
+    kill -0 "$1" 2>/dev/null || return 1
+    [ "$(cat "/proc/$1/comm" 2>/dev/null)" = "$2" ]
+}
+
+dhcp() {
+    i=$1
+    if [ -f "/run/udhcpc.$i.pid" ] &&
+       pid_alive "$(cat "/run/udhcpc.$i.pid" 2>/dev/null)" udhcpc; then
+        return 0
+    fi
+    ip link set "$i" up 2>/dev/null
+    udhcpc -b -i "$i" -s /etc/l2/udhcpc.script -p "/run/udhcpc.$i.pid" \
+           -t 4 -T 3 -A 5 >/dev/null 2>&1
+}
+
+wifi_start() {
+    i=${1:-}
+    if [ -z "$i" ]; then
+        find_pack >/dev/null 2>&1; load_modules
+        n=0
+        while [ "$n" -lt 8 ] && [ -z "$(wifi_ifaces)" ]; do sleep 1; n=$((n + 1)); done
+        i=$(wifi_ifaces | head -n 1 2>/dev/null)
+        [ -z "$i" ] && i=$(for x in $(wifi_ifaces); do echo "$x"; break; done)
+    fi
+    [ -n "$i" ] || { log "no wifi interface (driver or firmware missing? see dmesg)"; return 1; }
+    # fall back to the installed binary when the pack's copy is unusable
+    [ -x "$WPA" ] || WPA=/bin/wpa_supplicant
+    [ -x "$WPA" ] || { log "wpa_supplicant not installed"; return 1; }
+    unblock
+    ip link set "$i" up 2>/dev/null || { log "cannot bring $i up (rfkill / firmware?)"; return 1; }
+    mkdir -p /run/wpa_supplicant
+    if [ ! -f "$CONF" ]; then
+        {
+            echo "ctrl_interface=/run/wpa_supplicant"
+            echo "update_config=1"
+            [ -n "$COUNTRY" ] && echo "country=$COUNTRY"
+        } > "$CONF"
+        chmod 600 "$CONF"
+    fi
+    if [ ! -S "/run/wpa_supplicant/$i" ]; then
+        "$WPA" -B -i "$i" -c "$CONF" -D nl80211 -P "/run/wpa_supplicant.$i.pid" >/dev/null 2>&1 ||
+            { log "wpa_supplicant failed to start on $i"; return 1; }
+    fi
+    dhcp "$i"
+    log "wifi up on $i"
+}
+
+wifi_stop() {
+    i=${1:-}
+    [ -n "$i" ] || for x in $(wifi_ifaces); do i=$x; break; done
+    [ -n "$i" ] || return 0
+    for p in "/run/udhcpc.$i.pid" "/run/wpa_supplicant.$i.pid"; do
+        if [ -f "$p" ]; then
+            _pid=$(cat "$p" 2>/dev/null)
+            case "$p" in
+                *udhcpc*)        pid_alive "$_pid" udhcpc && kill "$_pid" 2>/dev/null ;;
+                *wpa_supplicant*) pid_alive "$_pid" wpa_supplicant && kill "$_pid" 2>/dev/null ;;
+            esac
+            rm -f "$p"
+        fi
+    done
+    ip addr flush dev "$i" 2>/dev/null
+    ip link set "$i" down 2>/dev/null
+}
+
+status() {
+    echo "hostname: $(hostname)"
+    for d in /sys/class/net/*; do
+        n=${d##*/}
+        kind=eth; [ "$n" = lo ] && kind=loop
+        { [ -d "$d/wireless" ] || [ -d "$d/phy80211" ]; } && kind=wifi
+        st=$(cat "$d/operstate" 2>/dev/null)
+        printf '%-10s %-5s %-8s ' "$n" "$kind" "${st:-?}"
+        ip -o -4 addr show dev "$n" 2>/dev/null | while read -r _ _ _ a _; do printf '%s ' "$a"; done
+        echo
+    done
+    ip -4 route show default 2>/dev/null | sed 's/^/route: /'
+    [ -f /etc/resolv.conf ] && sed -n 's/^nameserver /dns: /p' /etc/resolv.conf
+}
+
+boot() {
+    # Idle-RAM: the default VM watermarks scale with installed RAM and are
+    # subtracted from MemAvailable.  A tiny, mostly-idle system needs only a
+    # small reserve; keep it low so the idle footprint stays under budget.
+    echo 0 > /proc/sys/vm/watermark_scale_factor 2>/dev/null || \
+        echo 1 > /proc/sys/vm/watermark_scale_factor 2>/dev/null
+    echo 128 > /proc/sys/vm/min_free_kbytes 2>/dev/null
+    # On >=4 GiB x86_64 systems, default lowmem_reserve_ratio (256 32 0) reserves
+    # 1/256 of ZONE_NORMAL in ZONE_DMA32 (~3.8 MiB at 4G, ~52 MiB at 16G), which
+    # is subtracted from MemAvailable.  64-bit DMA + dynamic SWIOTLB covers legacy
+    # devices without locking away tens of MiB of DMA32.
+    echo '0 0 0' > /proc/sys/vm/lowmem_reserve_ratio 2>/dev/null
+    echo 100000 > /proc/sys/vm/percpu_pagelist_high_fraction 2>/dev/null
+    ip link set lo up 2>/dev/null
+    mkdir -p /run /media/l2
+    unblock
+    # Load on-demand drivers (hw pack / wifi pack) only for hardware that is
+    # actually present, matched by modalias.  Nothing is loaded at idle otherwise.
+    find_pack >/dev/null 2>&1 && load_modules
+    if [ "$ETH" != off ]; then
+        _pending=""
+        for i in $(eth_ifaces); do
+            ip link set "$i" up 2>/dev/null
+            _pending="$_pending $i"
+        done
+        if [ -n "$_pending" ]; then
+            _n=0
+            while [ "$_n" -lt 15 ] && [ -n "$_pending" ]; do
+                _next=""
+                for i in $_pending; do
+                    if [ "$(cat "/sys/class/net/$i/carrier" 2>/dev/null)" = 1 ]; then
+                        dhcp "$i"
+                    else
+                        _next="$_next $i"
+                    fi
+                done
+                _pending=${_next# }
+                [ -n "$_pending" ] || break
+                sleep 0.2 2>/dev/null || { sleep 1; _n=$((_n + 4)); }
+                _n=$((_n + 1))
+            done
+            for i in $_pending; do
+                ip link set "$i" down 2>/dev/null
+            done
+        fi
+    fi
+    if [ "$WIFI" != off ] && grep -qs '^network=' "$CONF" 2>/dev/null; then
+        wifi_start
+    fi
+    # Drop one-shot boot page cache (ISO/module reads), drain PCP lists, and sync vmstat.
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+    echo 100000 > /proc/sys/vm/percpu_pagelist_high_fraction 2>/dev/null
+    echo 1 > /proc/sys/vm/stat_refresh 2>/dev/null
+    return 0
+}
+
+case "${1:-status}" in
+    boot)        boot ;;
+    status)      status ;;
+    dhcp)        dhcp "${2:?usage: l2net dhcp IFACE}" ;;
+    wifi-start)  wifi_start "${2:-}" ;;
+    wifi-stop)   wifi_stop "${2:-}" ;;
+    modules)     find_pack; load_modules ;;
+    *) echo "usage: l2net boot|status|dhcp IFACE|wifi-start [IF]|wifi-stop [IF]|modules" >&2; exit 2 ;;
+esac
