@@ -72,7 +72,8 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       args (two-pass); **pre-existing rescue bug fixed** (is_ws lacked
       '\n' → last-token l2.rescue=1 never matched). Measurements: binary
       17,184→18,656 B (+8.6%), selftest RSS 48 KiB, **boot-resident 40 KiB**
-      (was 68 — closes mission 22). QEMU PID1 proof on pinned kernel
+      (was 68 — mission 22 CLOSED, dual-confirmed: maiake-f6 auditor
+      independent 36-40 kB). QEMU PID1 proof on pinned kernel
       0fa6cfc8: L2# 12.2 s, clean poweroff. 7/9 C groups + 4 harness groups
       fail-before; 14/14 after. History below.
       Original brief (history): truncation semantics of
@@ -100,6 +101,14 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       after. Binary 88,184→100,472 B (+12 KiB ≤ cap), RSS 168–172 KiB.
       Single-writer assumption documented; concurrency/power-loss stress
       handed off. Signatures/binary-repo design proposals in report.
+      **INDEPENDENT AUDIT PENDING (sign-off gate)**: maiake-f6 fuzz auditor C
+      reviewing 4acfd36 read-only (fail-before/pass-after re-verify, gc
+      liveness edges, fsync ordering windows, --repair invariants, txn
+      rollback, kill-9 at each txn phase). 4acfd36 records LEAD verification
+      only; FINAL W2 sign-off held for their CONFIRM/REFUTE verdicts.
+      Power-loss durability INFERRED from fsync ordering (not fault-injected);
+      dm-flakey needs root+device-mapper (feasibility stated honestly);
+      kill-9 + ordering analysis = deliverable depth, residual gap documented.
       History below.
       Original brief (history): reprioritized 21:1x (amendment #3)
       on peer gapmap `build/campaigns/armageddon-l2pm-gapmap.md` + my
@@ -631,3 +640,11 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   re-stamp against committed build noted. WP2 v2 build in flight (v1
   preserved build-lowram/v1/); 10M outcome + winning lever at landing.
   W6+W7 running.
+- 00:0x maiake-f6: W7 packet delivery concern moot — I read worktree
+  04-rcl2.md directly + launched W7 23:2x (no message dependency).
+  mission-22 dual-closed (40 KiB mine + 36-40 kB theirs). W2 independent
+  fuzz audit (auditor C) IN PROGRESS on 4acfd36: kill-9 per txn phase +
+  adversarial diff review; FINAL W2 sign-off held for CONFIRM/REFUTE
+  (commit records lead verification only — noted pending). Power-loss
+  inferred (dm-flakey root-gated, honesty noted). Makefile untouched.
+  note/qwen1.txt written (608 lines, 6b7e296) per user request.

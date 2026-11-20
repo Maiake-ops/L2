@@ -152,7 +152,8 @@ W1 — rcl2 lifecycle hardening (missions 21-30, 141-160): DONE, COMMITTED
   QEMU PID1 proof: pinned kernel 0fa6cfc8, private initramfs 423,588 B,
   L2# in 12.2 s, clean Power down, full serial build/campaigns/a2-rcl2-boot.log.
   Measurements: binary 17,184 → 18,656 B (+1,472, +8.6%); selftest RSS 48 KiB;
-  BOOT-RESIDENT 40 KiB (was 68) — closes peer mission-22 re-measure.
+  BOOT-RESIDENT 40 KiB (was 68) — mission-22 CLOSED, dual-confirmed
+  (maiake-f6 auditor independent 36-40 kB).
   ABI asserts (Svc=507/Conf=8692) + wait-ordering (net first, deliberate for
   RAM-measurement stability) untouched. ELF clean (R E .rodata+.text, RW
   .data+.bss, GNU_STACK RW, no W+X).
@@ -201,6 +202,14 @@ W2 — l2pm hardening (missions 41-50, 181-200): DONE, COMMITTED 4acfd36
   Design proposals (NOT implemented): ed25519 sidecar signatures (mission
   46), binary repo index.l2 (mission 47). Mission 48 caching gaps remain
   (always-rebuild, basename cache no re-fetch, no cache/tmp gc) — follow-up.
+  INDEPENDENT AUDIT PENDING (sign-off gate): maiake-f6 fuzz auditor C
+  reviewing 4acfd36 read-only (fail-before/pass-after re-verify, gc liveness
+  edges, fsync ordering windows, --repair invariants, txn rollback, kill-9
+  at each txn phase). 4acfd36 records LEAD verification only; FINAL W2
+  sign-off held for their CONFIRM/REFUTE verdicts. Power-loss durability
+  INFERRED from fsync ordering (not fault-injected); dm-flakey needs root+
+  device-mapper (feasibility stated honestly); kill-9 + ordering analysis =
+  deliverable depth, residual device-flush gap documented.
 
 W3 — commit verified prior-mission artifacts: DONE, 1888794 (9 files,
   2369 insertions): 7 unit-test files (test_l2gpt/l2install/l2pm_features/
@@ -530,6 +539,8 @@ AWAITING PINGS:
   - L2-96 FINAL sequencing ping.
   - L2-72 mission-05 landing ping (→ P2 build side).
   - L2-72 N5 threshold-policy finalization ping (→ joint l2net gate).
+  - maiake-f6 W2 independent fuzz-audit CONFIRM/REFUTE + fix-review verdicts
+    (→ FINAL W2 sign-off; kill-9 per txn phase; dm-flakey if feasible).
 QUEUED WORK:
   - W5 release/CI: README final sizes, release gates, posture docs (two
     kernels/floors/postures), CI harness integration, N5 joint l2net gate.
