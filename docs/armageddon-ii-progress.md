@@ -226,6 +226,12 @@ Confirmed findings (none covered by tools/test_l2install.py's 10 tests):
   umounts $MEDIUM (fine on live, leaked on hosts). Fix: umount when !live.
 - Note only: disk_busy misses raw openers (qemu/dd holding the disk without
   mounts); typed confirmation mitigates.
+- **F15 (low, verified via build/out/busybox.applets): `image` mode is
+  host-only** — shipped busybox lacks truncate AND losetup (util-linux).
+  Current `need truncate` error says "run: l2 deps install" (misleading
+  inside the live guest); losetup failure is a generic die. W6: explicit
+  host-only guard + clear message pointing live users to `disk` mode.
+  (Peer finding (f), L2-72 relay; applet list checked by lead.)
 
 Falsified hypotheses (verified, NOT defects — do not "fix"): --efi-size and
 --hostname ARE validated at parse time (l2install:577-580) and preflight
@@ -282,6 +288,11 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   L2-72 lead spot-check). Moot micro-notes recorded: predictable tmp.$$
   fallback only on mktemp failure (root-only threat); unquoted
   ${broadcast:+} safe (inet_ntoa-derived). No changes planned (clean).
+- **MERGE FLAG (l2net)**: maiake-f6 fixed `l2net status` exit code in its
+  WORKTREE (exited 1 without /etc/resolv.conf; if-form, proven with shipped
+  dash). W6 (main tree) touches find_pack/use_pack/probe_modaliases ONLY —
+  NOT status() — so the two fixes are function-disjoint and should merge
+  cleanly; coordinate at merge time (user decision pending).
 
 ## Log
 
@@ -368,3 +379,11 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   (campaigns/engineering base 21031ce vs main cd0f88a+my branch; peer
   will not rebase without direction; surfaced to user, no unilateral
   merge). W1/W2 still running.
+- 22:0x L2-72 FYI: maiake-f6 worktree fixed l2net status() exit code →
+  merge flag recorded (W6 stays out of status(), function-disjoint).
+  Finding (f) VERIFIED by lead against busybox.applets (no truncate/
+  losetup) → F15 added to W6 (host-only guard + clear message). Finding
+  (d) = W7 already queued; their fix shape matches (tmpfs size= cap in
+  mounts_setup). Reproducibility re-confirmation recorded (assembly
+  06a4fd1e, cross-path l2pm efc32819, musl wrapper paths don't leak).
+  W1/W2 still running.
