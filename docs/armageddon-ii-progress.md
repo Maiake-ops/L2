@@ -124,6 +124,19 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       verified by l2net before use — needs l2 build-script edits = L2-72
       deferred lane, coordinate after mission 05. MODULE_SIG = kernel lane +
       user decision. Mission-70 regression test: L2-72 writes after W6 lands.
+      **P2 design caveat (L2-72, accepted)**: installed-disk normal boot has
+      NO initramfs → pin must ALSO live on the ext4 root, written by
+      l2install (my lane) at install time from the verified medium.
+      Resurrection case: if /lib/modules/$KREL is missing on an installed
+      root (kernel upgrade/corruption), find_pack falls through to medium
+      search → root-side pin required, not just live-boot protection.
+      Format contract sketch (agree with L2-72 before P2 implementation):
+      medium `l2/pack-manifest` = sorted "<sha256>  <relpath>" lines over
+      pack files (build side writes, deterministic); pin `/etc/l2/pack-hash`
+      = sha256 of the manifest; live: embedded in initramfs at ISO build;
+      installed: l2install copies from verified medium; l2net: marker →
+      manifest-hash vs pin → per-file hashes of used files → fail-closed.
+      Open: one manifest vs per-pack; host-install pin source = build staging.
 
 Mission mapping 101–300: kernel/boot (101–140) → L2-96; rcl2 (141–160) → W1;
 l2pm (181–200) → W2; build system (201–220) → W2/W5; networking/userland
@@ -253,6 +266,10 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   W5 release docs must reference this posture honestly.
 - rcl2 parser fuzz ownership: W1 (running) owns it; peer mission 67 keeps
   non-rcl2 malformed input; corpus shared on landing (no duplication).
+- udhcpc.script: mission 66 CLOSED with dual citation (my §W6 audit +
+  L2-72 lead spot-check). Moot micro-notes recorded: predictable tmp.$$
+  fallback only on mktemp failure (root-only threat); unquoted
+  ${broadcast:+} safe (inet_ntoa-derived). No changes planned (clean).
 
 ## Log
 
@@ -322,3 +339,10 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   Their ISO-assembly reproducibility evidence recorded for W5. W1 already
   hardening /proc/mounts read path (observed via code comment, not
   transcript). Acks sent both directions.
+- 21:4x L2-72 closures: F1 phasing agreed; P2 caveat accepted (installed
+  boot has no initramfs → l2install propagates pin to ext4 root;
+  /lib/modules-missing fall-through resurrects risk on installed systems).
+  Format-contract sketch recorded, agreement before P2 implementation.
+  Mission 66 closed dual-cited; 67 split recorded (W1 corpus share pending
+  landing); dash fix theirs deferred; they re-stamp W1/W2/W6 post-commits
+  (mission 92). W1/W2 still running.
