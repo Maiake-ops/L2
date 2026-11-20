@@ -60,8 +60,17 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
 
 ## Workstreams (L2-ea)
 
-- [~] W1 rcl2 lifecycle hardening + fault injection (21–30, 141–160) —
-      heavy-coder launched 20:21 (background); scope: truncation semantics of
+- [x] W1 rcl2 lifecycle hardening (21–30, 141–160) — **DONE 22:3x, lead
+      review APPROVED, committed**. file_read EFBIG probe + per-caller
+      policies (config→default shell, cmdline→complete-token trim,
+      mounts→streaming scanner); parser rejects NUL lines/>6 args/overlong
+      args (two-pass); **pre-existing rescue bug fixed** (is_ws lacked
+      '\n' → last-token l2.rescue=1 never matched). Measurements: binary
+      17,184→18,656 B (+8.6%), selftest RSS 48 KiB, **boot-resident 40 KiB**
+      (was 68 — closes mission 22). QEMU PID1 proof on pinned kernel
+      0fa6cfc8: L2# 12.2 s, clean poweroff. 7/9 C groups + 4 harness groups
+      fail-before; 14/14 after. History below.
+      Original brief (history): truncation semantics of
       the committed 2048-byte caps (file_read silently truncates at cap-1,
       main.c:167 — confirmed hazard), g_iobuf lifetime audit, parser fuzz,
       crash/reap/signal/shutdown harness, private-initramfs QEMU boot proof.
@@ -73,8 +82,21 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       no-SA_RESTART/EINTR, async-safe handlers, PID1-never-exits, CGROUPS=n
       → RLIMITs, wait-ordering deliberate) + boot-resident capture (closes
       peer's pending mission-22 re-measure).
-- [~] W2 l2pm hardening (41–50, 181–200) — heavy-coder running (background,
-      parallel to W1, disjoint scope). **Reprioritized 21:1x (amendment #3)**
+- [x] W2 l2pm hardening (41–50, 181–200) — **DONE 22:3x, lead review
+      APPROVED, committed**. P1 fail-safe gc (refuse on unreadable DB/gen;
+      liveness DB+kept gens; keep active+newest 2/profile;
+      --prune-generations legacy opt-in) closes the live-store-deletion
+      chain; P2 fsync file+dir at every temp+rename (19 sites); P3
+      verify --repair (intent-marker rollback completion, DB-from-gen
+      reconstruction, missing manifest never passes, divergence rebuild;
+      store NEVER modified); P4 transactions add/install/remove (restore
+      DB+profile on failure, set-aware multi-remove); P5 dep-version +
+      profile-conflict warnings. 25/33 new tests fail-before, 104/104
+      after. Binary 88,184→100,472 B (+12 KiB ≤ cap), RSS 168–172 KiB.
+      Single-writer assumption documented; concurrency/power-loss stress
+      handed off. Signatures/binary-repo design proposals in report.
+      History below.
+      Original brief (history): reprioritized 21:1x (amendment #3)
       on peer gapmap `build/campaigns/armageddon-l2pm-gapmap.md` + my
       independent verification of all 3 load-bearing findings:
       **P1** gc data-loss chain (DB-only liveness C:2563-2571 + default
@@ -454,3 +476,15 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   invariant + same-release deployment ordering. Mission-70 additions
   suggested. P2 shell-side waits for mission-05 ping; W6-P1 remains
   immediately launchable on agent-slot free. W1/W2 still running.
+- 22:3x **W1+W2 INTEGRATION GATE PASSED**. Lead independent review: full
+  rcl2 diff (EFBIG semantics, streaming scanner chunk-boundary state,
+  two-pass parse 4-token skip, NUL skip, rescue fix) APPROVED; full l2pm
+  diff (1243 lines: fsync ordering, txn fail-closed snapshots/reverse
+  abort, gc refuse-before-delete + keep-rank logic, repair never touches
+  store, security-test adaptation preserves intent) APPROVED. Re-ran
+  myself: make -C rcl2 test, 14+33 harness tests, make check EXIT=0.
+  Evidence spot-checks: 25/33 fail-before log, boot log resident 40 KiB +
+  Power down, 104 OK suites. Wired both harnesses into make check
+  (166 unit tests + 4 C suites green, a2-make-check-integrated.log).
+  Commits: rcl2 (W1), l2pm (W2), Makefile+ledger (wiring) — hashes in
+  git log. W6-P1 launching; W7 awaits maiake-f6 auditor packet.
