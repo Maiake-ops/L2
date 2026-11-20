@@ -65,7 +65,11 @@ const _: () = assert!(core::mem::offset_of!(Conf, svcs) == 580);
 /* -------------------------------------------------------------- helpers -- */
 
 fn is_ws(b: u8) -> bool {
-    b == b' ' || b == b'\t' || b == b'\r' || b == 0x0B || b == 0x0C
+    /* '\n' matters for rcl_rs_bootflags/statm: /proc files end in a newline,
+     * and without it the LAST cmdline token carried a glued-on '\n' and a
+     * trailing "l2.rescue=1"/"single" never matched. Config lines are split
+     * on '\n' before tokenizing, so this is a no-op for rcl_rs_parse. */
+    b == b' ' || b == b'\t' || b == b'\r' || b == b'\n' || b == 0x0B || b == 0x0C
 }
 
 /// Cut a line [start, len) ending at '\n'; the given cursor is advanced past it.
@@ -136,21 +140,29 @@ fn puts(dst: &mut [u8], src: &[u8]) {
 /* ---------------------------------------------------------- directive fns */
 
 /// "service NAME respawn|once|wait PATH [ARG...]"; returns true when a slot
-/// was filled. Unknown modes and too-long paths are skipped without error.
+/// was filled. Unknown modes, too-long paths/args and more than RCL_MAX_ARGS
+/// args skip the whole line without error: silently truncating a path or an
+/// argument (or dropping extra args) would exec something other than what
+/// the config says. Names may still truncate - they are log labels only.
 fn parse_service(conf: &mut Conf, idx: usize, s: &[u8]) -> bool {
     if idx >= RCL_MAX_SVCS {
         return false;
     }
+    /* pass 1: validate every token before touching the slot */
     let mut t = Toks::new(s);
     let _directive = t.next();          /* "service" */
-    let name = t.next();
-    let mtok = t.next();
-    let path = t.next();
-    let (name, mtok, path) = match (name, mtok, path) {
-        (Some(n), Some(m), Some(p)) if !n.is_empty() => (n, m, p),
+    let name = match t.next() {
+        Some(n) if !n.is_empty() => n,
         _ => return false,
     };
-
+    let mtok = match t.next() {
+        Some(m) => m,
+        None => return false,
+    };
+    let path = match t.next() {
+        Some(p) => p,
+        None => return false,
+    };
     let mode = if mtok == b"respawn" {
         RCL_MODE_RESPAWN
     } else if mtok == b"once" {
@@ -160,27 +172,32 @@ fn parse_service(conf: &mut Conf, idx: usize, s: &[u8]) -> bool {
     } else {
         return false;
     };
-
     if path.len() > RCL_PATH_LEN - 1 {
         return false;               /* a truncated path would exec something else */
     }
+    let mut nargs = 0usize;
+    while let Some(a) = t.next() {
+        if nargs >= RCL_MAX_ARGS || a.len() > RCL_ARG_LEN - 1 {
+            return false;
+        }
+        nargs += 1;
+    }
 
+    /* pass 2: fill the slot (line length is bounded by the read capacity,
+     * so re-tokenizing is cheap) */
     let svc = match conf.svcs.get_mut(idx) {
         Some(s) => s,
         None => return false,
     };
     puts(&mut svc.name, name);
     puts(&mut svc.path, path);
-    let mut nargs = 0usize;
-    for k in 0..RCL_MAX_ARGS {
-        match t.next() {
-            Some(a) => {
-                if let Some(dst_arg) = svc.args.get_mut(k) {
-                    puts(dst_arg, a);
-                    nargs += 1;
-                }
-            }
-            None => break,
+    let mut t = Toks::new(s);
+    for _ in 0..4 {
+        let _ = t.next();           /* directive, name, mode, path */
+    }
+    for k in 0..nargs {
+        if let (Some(dst_arg), Some(a)) = (svc.args.get_mut(k), t.next()) {
+            puts(dst_arg, a);
         }
     }
     svc.nargs = nargs as u8;
@@ -292,6 +309,11 @@ pub extern "C" fn rcl_rs_parse(c: *mut Conf, buf: *const u8, len: usize) -> i32 
             Some(l) => l,
             None => continue,
         };
+        /* a NUL inside a token would survive into the C exec strings and
+         * cut paths/args short at the NUL - skip the whole line instead */
+        if line.contains(&0) {
+            continue;
+        }
 
         let mut t = Toks::new(line);
         let d = match t.next() {

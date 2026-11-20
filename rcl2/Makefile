@@ -65,8 +65,23 @@ $(BUILD)/test-supervision.o: verification/test-supervision.c src/main.c src/sysc
 $(BUILD)/test-supervision: $(BUILD)/start.o $(BUILD)/test-supervision.o $(BUILD)/mem.o
 	$(LLD) $(LDFLAGS) -o $@ $^
 
-test: selftest $(BUILD)/test-supervision
+$(BUILD)/test-truncation.o: verification/test-truncation.c src/main.c src/syscalls.h src/rcl.h | $(BUILD)
+	$(CLANG) $(ASFLAGS) -c $(CFLAGS) $< -o $@
+
+# calls conf_load/cmdline_flags -> needs the Rust parser archive
+$(BUILD)/test-truncation: $(BUILD)/start.o $(BUILD)/test-truncation.o $(BUILD)/mem.o $(BUILD)/librcl2rs.a
+	$(LLD) $(LDFLAGS) -o $@ $^
+
+$(BUILD)/test-lifecycle.o: verification/test-lifecycle.c src/main.c src/syscalls.h src/rcl.h | $(BUILD)
+	$(CLANG) $(ASFLAGS) -c $(CFLAGS) $< -o $@
+
+$(BUILD)/test-lifecycle: $(BUILD)/start.o $(BUILD)/test-lifecycle.o $(BUILD)/mem.o
+	$(LLD) $(LDFLAGS) -o $@ $^
+
+test: selftest $(BUILD)/test-supervision $(BUILD)/test-truncation $(BUILD)/test-lifecycle
 	$(BUILD)/test-supervision
+	$(BUILD)/test-truncation
+	$(BUILD)/test-lifecycle
 	@echo "supervision regression tests passed"
 
 clean:

@@ -81,7 +81,11 @@ static volatile unsigned char g_closing;               /* shutdown underway */
 /* log line buffer: only touched from the main loop, never from handlers */
 static char     g_line[512];
 static unsigned g_len;
-/* shared scratch buffer for non-overlapping one-shot reads (mounts, config, cmdline, selftest) */
+/* Shared scratch for one-shot reads (mounts scan, config, cmdline, selftest).
+ * Invariant: rcl2 is single-threaded and every consumer finishes before the
+ * next one starts (boot order: mounts_setup -> conf_load -> cmdline_flags;
+ * --selftest is a separate mode). Nothing retains a pointer into it: the
+ * Rust parser copies into g_conf, every other consumer returns a scalar. */
 static char     g_iobuf[CFG_RAW_CAP];
 
 extern void rcl_sigreturn(void);
@@ -164,16 +168,34 @@ static void sleep_ms(long ms)
     while (r_sys2(SYS_nanosleep, (long)&req, (long)&rem) == -EINTR) req = rem;
 }
 
+/* Read up to cap-1 bytes into buf, NUL-terminate, return the count. When the
+ * file holds more than cap-1 bytes, return -EFBIG instead of truncating
+ * silently (buf still holds the first cap-1 bytes, NUL-terminated): acting on
+ * half a config line, boot flag or mount entry is never safe. Read errors
+ * propagate as negative errno; callers treat any negative result as failure. */
 static int file_read(const char *path, char *buf, int cap)
 {
+    if (cap < 2) return -EINVAL;
     int fd = (int)r_sys3(SYS_open, (long)path, O_RDONLY | O_CLOEXEC, 0);
     if (fd < 0) return fd;
     int got = 0;
     while (got < cap - 1) {
         long r = r_sys3(SYS_read, fd, (long)(buf + got), (long)(cap - 1 - got));
         if (r == -EINTR) continue;
-        if (r <= 0) break;
+        if (r < 0) { r_sys1(SYS_close, fd); return (int)r; }
+        if (r == 0) break;
         got += (int)r;
+    }
+    if (got == cap - 1) {
+        /* one byte past the buffer proves the file did not fit */
+        char probe;
+        long r;
+        do { r = r_sys3(SYS_read, fd, (long)&probe, 1); } while (r == -EINTR);
+        if (r != 0) {
+            r_sys1(SYS_close, fd);
+            buf[got] = 0;
+            return r > 0 ? -EFBIG : (int)r;
+        }
     }
     r_sys1(SYS_close, fd);
     buf[got] = 0;
@@ -191,30 +213,51 @@ static int file_exists(const char *path)
 /* True when /proc/mounts shows "/" mounted read-only: the kernel silently
  * falls back from rw to ro on mount errors (seen on real-hardware photo
  * boots), and an installed L2 needs /etc, /var and /home writable. Returns
- * 0 when /proc/mounts is unreadable so the caller's guard is a no-op then. */
+ * 0 when /proc/mounts is unreadable so the caller's guard is a no-op then.
+ * The file is streamed in g_iobuf-sized chunks and scanned field by field:
+ * on a busy installed system /proc/mounts can exceed any fixed buffer, and
+ * dropping the "/" line would silently disable the ro->rw recovery remount.
+ * Fields are space-separated (the kernel escapes spaces inside mountpoints),
+ * lines end at '\n'; only mountpoint and the start of options are tracked. */
 static int root_mounted_readonly(void)
 {
-    if (file_read("/proc/mounts", g_iobuf, sizeof(g_iobuf)) <= 0) return 0;
+    int fd = (int)r_sys3(SYS_open, (long)"/proc/mounts", O_RDONLY | O_CLOEXEC, 0);
+    if (fd < 0) return 0;
     int ro = 0;
-    for (const char *p = g_iobuf; *p; ) {
-        const char *eol = p;
-        while (*eol && *eol != '\n') eol++;
-        const char *f = p;
-        while (f < eol && *f != ' ') f++;          /* end of device */
-        if (f >= eol) break;
-        const char *mp = ++f;
-        while (f < eol && *f != ' ') f++;          /* end of mountpoint */
-        if (f - mp == 1 && *mp == '/') {           /* a "/" line; last wins */
-            if (f >= eol) break;
-            f++;
-            while (f < eol && *f != ' ') f++;      /* end of fstype */
-            if (f >= eol) break;
-            f++;                                   /* start of options */
-            ro = (f + 2 <= eol && f[0] == 'r' && f[1] == 'o' &&
-                  (f + 2 == eol || f[2] == ',' || f[2] == ' '));
+    int field = 0;                 /* 0 device, 1 mountpoint, 2 fstype, 3 options */
+    int mp_len = 0;                /* mountpoint field length */
+    char mp_first = 0;             /* its first byte */
+    int opt_len = 0;               /* options field length */
+    char opt_head[3] = {0, 0, 0};  /* its first bytes */
+    for (;;) {
+        long r = r_sys3(SYS_read, fd, (long)g_iobuf, (long)sizeof(g_iobuf));
+        if (r == -EINTR) continue;
+        if (r < 0) { r_sys1(SYS_close, fd); return 0; }
+        if (r == 0) break;
+        for (long k = 0; k < r; k++) {
+            char ch = g_iobuf[k];
+            if (ch == '\n') {
+                /* a "/" line: options must start with "ro" (last line wins) */
+                if (mp_len == 1 && mp_first == '/')
+                    ro = (opt_len >= 2 && opt_head[0] == 'r' && opt_head[1] == 'o' &&
+                          (opt_len == 2 || opt_head[2] == ','));
+                field = 0; mp_len = 0; mp_first = 0; opt_len = 0;
+            } else if (ch == ' ') {
+                field++;
+            } else if (field == 1) {
+                if (mp_len == 0) mp_first = ch;
+                mp_len++;
+            } else if (field == 3) {
+                if (opt_len < 3) opt_head[opt_len] = ch;
+                opt_len++;
+            }
         }
-        p = *eol ? eol + 1 : eol;
     }
+    r_sys1(SYS_close, fd);
+    /* a final line without '\n' still counts */
+    if (mp_len == 1 && mp_first == '/')
+        ro = (opt_len >= 2 && opt_head[0] == 'r' && opt_head[1] == 'o' &&
+              (opt_len == 2 || opt_head[2] == ','));
     return ro;
 }
 
@@ -427,6 +470,13 @@ static void conf_default(void)
 static void conf_load(void)
 {
     int n = file_read(CONFIG_PATH, g_iobuf, CFG_RAW_CAP);
+    if (n == -EFBIG) {
+        /* a truncated service line could exec a shortened path prefix:
+         * refuse the whole config and degrade to the default shell */
+        slog("config over capacity - refusing truncated parse");
+        conf_default();
+        return;
+    }
     if (n < 0) {
         slog1("no config at ", CONFIG_PATH);
         conf_default();
@@ -440,6 +490,26 @@ static void conf_load(void)
     }
     slogn("config ", got, " service(s) parsed");
     if (g_conf.nsvc == 0) conf_default();
+}
+
+/* Boot flags from /proc/cmdline. An oversized cmdline is parsed up to the
+ * last complete token: a flag cut mid-token must neither fire spuriously
+ * nor pass silently (the dropped tail is logged). Unreadable -> normal boot. */
+static unsigned cmdline_flags(void)
+{
+    int n = file_read(CMDLINE_PATH, g_iobuf, (int)sizeof(g_iobuf));
+    if (n == -EFBIG) {
+        n = (int)sizeof(g_iobuf) - 1;
+        while (n > 0 && g_iobuf[n - 1] != ' ' && g_iobuf[n - 1] != '\t' &&
+               g_iobuf[n - 1] != '\n')
+            n--;
+        slog("cmdline over capacity - incomplete trailing token dropped");
+    }
+    if (n < 0) {
+        slog("cmdline read failed, assuming normal boot");
+        return 0;
+    }
+    return (unsigned)rcl_rs_bootflags(g_iobuf, (unsigned long)n);
 }
 
 /* ------------------------------------------------- service state machine */
@@ -841,6 +911,10 @@ static const char *selftest_cmdlines[] = {
     "rdinit=/init console=tty0 console=ttyS0,115200 loglevel=4 l2.rescue=1",
     "root=PARTUUID=x rootfstype=ext4 rootwait rw init=/sbin/rcl2 s",
     "root=PARTUUID=x rootfstype=ext4 rw",
+    /* /proc/cmdline always ends in '\n': a rescue flag as the LAST token
+     * must still match (regression: '\n' used to glue onto the token) */
+    "root=PARTUUID=x rw l2.rescue=1\n",
+    "root=PARTUUID=x rw single\n",
 };
 
 static const char *mode_str(unsigned char m)
@@ -858,14 +932,19 @@ static void selftest(int argc, char **argv)
     g_len = 0; putstr(banner); putstr(" (selftest)"); line_out();
 
     const char *confdata = selftest_conf;
+    unsigned long conflen = strlen(selftest_conf);
     const char *label = "builtin";
     if (argc > 2) {
         int n = file_read(argv[2], g_iobuf, (int)sizeof(g_iobuf));
+        if (n == -EFBIG) { slog1("config too large: ", argv[2]); die_ex(1); }
         if (n < 0) { slog1("cannot read ", argv[2]); die_ex(1); }
         confdata = g_iobuf;
+        /* parse the bytes actually read, exactly like conf_load at boot:
+         * strlen would hide everything after an embedded NUL */
+        conflen = (unsigned long)n;
         label = argv[2];
     }
-    long got = rcl_rs_parse(&g_conf, confdata, strlen(confdata));
+    long got = rcl_rs_parse(&g_conf, confdata, conflen);
     slogn("config ", got, " service(s) accepted (bad lines skipped)");
     g_len = 0;
     putstr("hostname="); putstr(g_conf.hostname);
@@ -920,12 +999,7 @@ static void pid1_boot(void)
     hostname_apply();
     env_setup();
 
-    unsigned flags = 0;
-    {
-        int n = file_read(CMDLINE_PATH, g_iobuf, (int)sizeof(g_iobuf));
-        if (n >= 0) flags = (unsigned)rcl_rs_bootflags(g_iobuf, (unsigned long)n);
-        else slog("cmdline read failed, assuming normal boot");
-    }
+    unsigned flags = cmdline_flags();
 
     argv_build();
     svc_state_clear();

@@ -69,6 +69,7 @@ static inline long r_sys6(long nr, long a, long b, long c, long d, long e, long 
 #define EBUSY  16
 #define EINVAL 22
 #define ECHILD 10
+#define EFBIG  27
 
 /* open(2) flags */
 #define O_RDONLY 0
