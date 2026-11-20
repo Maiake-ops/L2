@@ -134,6 +134,18 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       campaign 7). W7 private ISO + W5 claims must pin EVERY staging input
       hash (a2-baseline-artifacts.txt + baseline-artifacts/SHA256SUMS +
       fixed-rcl2 hash), not assume compile reproducibility.
+      **FINAL sequencing (L2-96 coord, 23:3x)**: at FINAL, L2-ea refreshes
+      build/out/rcl2 with the final committed post-W7 build (my lane),
+      coordinated with L2-72's rebuild window (ping protocol); hash+size
+      recorded + shared BEFORE L2-96 re-copies into variant initramfs
+      assembly + sha pin to maiake-f6. Size nuance corrected: W1 binary
+      18,656 B (+1,472 vs build/out's 17,184 — NOT a saving); 40 KiB =
+      boot-resident, selftest 48 KiB. Storage win = W7 carries (~14.5-15 KB
+      target, ~2-3.7 KiB saved; maiake-f6 worktree final 13,544 B); use
+      FINAL measured hash/size for the 10M margin (~550-600K gap).
+      build/out/initramfs-l2 regenerated 21:03 (L2-72 batch, their lane);
+      peer forensics stay pinned to snapshots. W7 /tmp cap closes L2-96
+      variant's inherited WEDGED mempressure expectation.
 - [~] W7 rcl2 live-mode /tmp+/run OOM wedge + D5 OOB fix (maiake-f6 verified
       findings; missions 19/25/29/30 + 101–120) — **LAUNCHED 23:2x as W1-agent
       continuation** (warm runtime). Packet read in full + lead-verified:
@@ -584,3 +596,9 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   Ack sent with verification details + merge reconciliation (D1-D4
   duplicates, my tree canonical). W6 + W7 now both running (2 heavy
   agents, credit cap respected). WP2 10M verification still in flight.
+- 23:3x L2-96 FINAL sequencing coord: build/out/rcl2 refresh at FINAL =
+  my lane (post-W7 committed build), coordinated with L2-72 window;
+  peer re-copies into variant before sha pin. Corrected their margin
+  math: W1 is +1,472 B not a saving; W7 carries give ~2-3.7 KiB; boot-
+  resident vs selftest RSS distinguished. Branch state mutually verified
+  (cooperative de-escalation). W6+W7 running; dispute still user's call.
