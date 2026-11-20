@@ -90,7 +90,7 @@ fn next_token<'a>(s: &'a [u8], i: &mut usize) -> Option<&'a [u8]> {
     while *i < s.len() && !is_ws(s[*i]) {
         *i += 1;
     }
-    Some(&s[start..*i])
+    s.get(start..*i)
 }
 
 struct Toks<'a> {
@@ -121,8 +121,16 @@ fn puts(dst: &mut [u8], src: &[u8]) {
     }
     let cap = dst.len() - 1;
     let m = if src.len() < cap { src.len() } else { cap };
-    dst[..m].copy_from_slice(&src[..m]);
-    dst[m] = 0;
+    let mut k = 0usize;
+    while k < m {
+        if let (Some(d), Some(&b)) = (dst.get_mut(k), src.get(k)) {
+            *d = b;
+        }
+        k += 1;
+    }
+    if let Some(d) = dst.get_mut(m) {
+        *d = 0;
+    }
 }
 
 /* ---------------------------------------------------------- directive fns */
@@ -157,15 +165,20 @@ fn parse_service(conf: &mut Conf, idx: usize, s: &[u8]) -> bool {
         return false;               /* a truncated path would exec something else */
     }
 
-    let svc = &mut conf.svcs[idx];
+    let svc = match conf.svcs.get_mut(idx) {
+        Some(s) => s,
+        None => return false,
+    };
     puts(&mut svc.name, name);
     puts(&mut svc.path, path);
     let mut nargs = 0usize;
     for k in 0..RCL_MAX_ARGS {
         match t.next() {
             Some(a) => {
-                puts(&mut svc.args[k], a);
-                nargs += 1;
+                if let Some(dst_arg) = svc.args.get_mut(k) {
+                    puts(dst_arg, a);
+                    nargs += 1;
+                }
             }
             None => break,
         }
@@ -219,8 +232,10 @@ fn parse_setenv(conf: &mut Conf, s: &[u8]) {
         return;
     }
     let n = conf.nenv as usize;
-    puts(&mut conf.env[n], kv);
-    conf.nenv = (n + 1) as u8;
+    if let Some(slot) = conf.env.get_mut(n) {
+        puts(slot, kv);
+        conf.nenv = (n + 1) as u8;
+    }
 }
 
 fn parse_cad(conf: &mut Conf, s: &[u8]) {
@@ -273,7 +288,10 @@ pub extern "C" fn rcl_rs_parse(c: *mut Conf, buf: *const u8, len: usize) -> i32 
         let from = i;
         let (le, next) = line_end(s, i);
         i = next;
-        let line = &s[from..le];
+        let line = match s.get(from..le) {
+            Some(l) => l,
+            None => continue,
+        };
 
         let mut t = Toks::new(line);
         let d = match t.next() {
@@ -361,10 +379,9 @@ pub extern "C" fn rcl_rs_banner(out: *mut u8, cap: usize) -> usize {
         return 0;
     }
     let dst = unsafe { slice::from_raw_parts_mut(out, cap) };
-    let cap = cap - 1;
-    let m = if BANNER.len() < cap { BANNER.len() } else { cap };
-    dst[..m].copy_from_slice(&BANNER[..m]);
-    dst[m] = 0;
+    let max = cap - 1;
+    let m = if BANNER.len() < max { BANNER.len() } else { max };
+    puts(dst, BANNER);
     m
 }
 

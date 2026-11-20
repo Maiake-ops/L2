@@ -21,9 +21,9 @@ CFLAGS  := -std=c11 -Os -Wall -Wextra \
            -fno-pic -fno-pie -fno-ident -fcf-protection=none
 ASFLAGS := -target x86_64-unknown-linux-gnu
 RFLAGS  := --edition 2021 --crate-type staticlib --crate-name rcl2rs \
-           -O -C panic=abort -C codegen-units=1
+           -C opt-level=z -C panic=abort -C codegen-units=1
 LDFLAGS := -static --build-id=none -z max-page-size=4096 -z noseparate-code \
-           --gc-sections
+           --no-rosegment -z norelro --gc-sections
 
 .PHONY: all clean selftest test size
 all: $(BUILD)/rcl2
