@@ -109,7 +109,7 @@ class Guest:
             self.read(min(0.2, max(0, deadline - time.monotonic())))
 
     def send(self, line):
-        data = line.encode() + b"\r\n"
+        data = line.encode() + b"\n"
         if len(data) > 4000:
             raise Failure("serial command exceeds canonical TTY input limit")
         # Pace input through the emulated UART; large writes can lose bytes.
@@ -292,10 +292,11 @@ def check_kernel(guest):
 
 
 def sample(guest, args, result, samples, phase):
-    output = guest.command("cat /proc/meminfo; echo PIDONE; cat /proc/1/status; "
+    output = guest.command("echo MEMINFO; cat /proc/meminfo; echo PIDONE; cat /proc/1/status; "
                            "echo UPTIME; cat /proc/uptime")
-    memory, sep, status = output.partition("PIDONE\n")
-    if not sep:
+    _, sep0, body = output.partition("MEMINFO\n")
+    memory, sep, status = body.partition("PIDONE\n")
+    if not sep0 or not sep:
         raise Failure("missing memory/PID 1 sample separator")
     info = meminfo(memory)
     rss = re.search(r"^VmRSS:\s+(\d+) kB", status, re.M)

@@ -30,6 +30,7 @@
 #include <sys/stat.h>
 #include <sys/time.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -42,6 +43,31 @@ static char iface[64];
 static int sock = -1;
 static char local_path[108];
 static int color;
+static volatile sig_atomic_t secret_tty_saved;
+static struct termios secret_tty_orig;
+
+static void cleanup_socket(void)
+{
+    if (sock >= 0) {
+        close(sock);
+        sock = -1;
+    }
+    if (local_path[0]) {
+        unlink(local_path);
+        local_path[0] = 0;
+    }
+}
+
+static void on_signal(int sig)
+{
+    if (secret_tty_saved) {
+        tcsetattr(0, TCSANOW, &secret_tty_orig);
+        secret_tty_saved = 0;
+    }
+    if (local_path[0])
+        unlink(local_path);
+    _exit(128 + sig);
+}
 
 #define C(n) (color ? "\033[38;5;" #n "m" : "")
 #define RST (color ? "\033[0m" : "")
@@ -123,8 +149,15 @@ static int ctrl_open(void)
     snprintf(local_path, sizeof local_path, "%s/l2wifi.%d", rd ? dir : "/tmp", (int)getpid());
     snprintf(b.sun_path, sizeof b.sun_path, "%s", local_path);
     unlink(local_path);
-    if (bind(sock, (struct sockaddr *)&b, sizeof b) < 0 ||
-        connect(sock, (struct sockaddr *)&a, sizeof a) < 0) {
+    if (bind(sock, (struct sockaddr *)&b, sizeof b) < 0) {
+        close(sock);
+        sock = -1;
+        unlink(local_path);
+        local_path[0] = 0;
+        return -1;
+    }
+    chmod(local_path, 0600);
+    if (connect(sock, (struct sockaddr *)&a, sizeof a) < 0) {
         close(sock);
         sock = -1;
         unlink(local_path);
@@ -171,11 +204,24 @@ static char *ctrlf(const char *fmt, ...)
 
 static int run_l2net(const char *arg)
 {
-    char cmd[200];
     const char *bin = getenv("L2WIFI_NET") ? getenv("L2WIFI_NET") : "/bin/l2net";
-
-    snprintf(cmd, sizeof cmd, "%s %s %s", bin, arg, iface);
-    return system(cmd);
+    pid_t pid = fork();
+    if (pid < 0)
+        return -1;
+    if (pid == 0) {
+        const char *argv[4];
+        argv[0] = bin;
+        argv[1] = arg;
+        argv[2] = iface[0] ? iface : NULL;
+        argv[3] = NULL;
+        execv(bin, (char *const *)argv);
+        _exit(127);
+    }
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0)
+        if (errno != EINTR)
+            return -1;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
 /* connect to the supervisor, starting it through l2net when needed */
@@ -445,18 +491,39 @@ static int wait_connected(int secs)
     }
     if (strcmp(v, "COMPLETED"))
         return -1;
-    {   /* ask udhcpc for a fresh lease, then wait for an address */
-        char pf[128];
+    {   /* ask udhcpc for a fresh lease only if the pid really belongs to udhcpc */
+        char pf[128], comm_path[64], comm[32] = "";
         FILE *f;
-        int pid;
+        long pid = 0;
 
         snprintf(pf, sizeof pf, "/run/udhcpc.%s.pid", iface);
         f = fopen(pf, "r");
         if (f) {
-            if (fscanf(f, "%d", &pid) == 1)
-                kill(pid, SIGUSR1);
+            if (fscanf(f, "%ld", &pid) != 1)
+                pid = 0;
             fclose(f);
-        } else
+        }
+        if (pid > 1) {
+            snprintf(comm_path, sizeof comm_path, "/proc/%ld/comm", pid);
+            f = fopen(comm_path, "r");
+            if (f) {
+                if (fgets(comm, sizeof comm, f)) {
+                    comm[strcspn(comm, "\r\n")] = 0;
+                    if (strcmp(comm, "udhcpc") != 0)
+                        pid = 0;
+                } else {
+                    pid = 0;
+                }
+                fclose(f);
+            } else {
+                pid = 0;
+            }
+        } else {
+            pid = 0;
+        }
+        if (pid > 1)
+            kill((pid_t)pid, SIGUSR1);
+        else
             run_l2net("dhcp");
     }
     for (i = 0; i < 60; i++) {
@@ -474,6 +541,8 @@ static void read_secret(const char *prompt, char *out, size_t n)
 
     fprintf(stderr, "%s", prompt);
     if (tty) {
+        secret_tty_orig = o;
+        secret_tty_saved = 1;
         t = o;
         t.c_lflag &= ~ECHO;
         tcsetattr(0, TCSANOW, &t);
@@ -482,6 +551,7 @@ static void read_secret(const char *prompt, char *out, size_t n)
         out[0] = 0;
     if (tty) {
         tcsetattr(0, TCSANOW, &o);
+        secret_tty_saved = 0;
         fputc('\n', stderr);
     }
     out[strcspn(out, "\r\n")] = 0;
@@ -493,16 +563,22 @@ static int cmd_connect(const char *ssid, const char *psk, int force_open, const 
     char pass[128] = "";
     int rc, secured;
 
-    if (strlen(ssid) > 32)
-        die("SSID too long (802.11 allows at most 32 bytes)");
+    if (!ssid[0] || strlen(ssid) > 32)
+        die("SSID must be 1-32 bytes");
     ensure_supplicant();
     secured = !force_open && (!known_sec || strcmp(known_sec, "open"));
     if (secured && !psk) {
         read_secret("  passphrase: ", pass, sizeof pass);
         psk = pass;
     }
-    if (secured && (strlen(psk) < 8 || strlen(psk) > 63))
-        die("a WPA passphrase must be 8-63 characters");
+    if (secured) {
+        size_t plen = strlen(psk);
+        if (plen < 8 || plen > 63)
+            die("a WPA passphrase must be 8-63 characters");
+        for (const char *p = psk; *p; p++)
+            if ((unsigned char)*p < 0x20 || (unsigned char)*p == 0x7f)
+                die("passphrase contains invalid control characters");
+    }
 
     /* replace any saved entry with the same SSID */
     {
@@ -531,7 +607,9 @@ static int cmd_connect(const char *ssid, const char *psk, int force_open, const 
     if (!isdigit((unsigned char)id[0]))
         die("ADD_NETWORK failed: %s", r);
     hexenc(ssid, hex, sizeof hex);
-    ctrlf("SET_NETWORK %s ssid %s", id, hex);
+    r = ctrlf("SET_NETWORK %s ssid %s", id, hex);
+    if (strncmp(r, "OK", 2))
+        die("SET_NETWORK ssid failed: %s", r);
     if (secured) {
         /* Escape quotes/backslashes for the wpa_supplicant quoted-string
          * parser; an unescaped '"' would inject extra config fields. */
@@ -545,16 +623,37 @@ static int cmd_connect(const char *ssid, const char *psk, int force_open, const 
         }
         esc[o] = 0;
         r = ctrlf("SET_NETWORK %s psk \"%s\"", id, esc);
+        {
+            volatile char *ve = esc;
+            for (size_t k = 0; k < sizeof esc; k++) ve[k] = 0;
+        }
         if (strncmp(r, "OK", 2))
             die("rejected passphrase: %s", r);
-        if (known_sec && (!strcmp(known_sec, "WPA3") || !strcmp(known_sec, "WPA2/3")))
-            ctrlf("SET_NETWORK %s key_mgmt %s", id, !strcmp(known_sec, "WPA3") ? "SAE" : "WPA-PSK SAE");
-        if (known_sec && !strcmp(known_sec, "WPA3"))
-            ctrlf("SET_NETWORK %s ieee80211w 2", id);
-    } else
-        ctrlf("SET_NETWORK %s key_mgmt NONE", id);
-    ctrlf("ENABLE_NETWORK %s", id);
-    ctrlf("SELECT_NETWORK %s", id);
+        if (known_sec && (!strcmp(known_sec, "WPA3") || !strcmp(known_sec, "WPA2/3"))) {
+            r = ctrlf("SET_NETWORK %s key_mgmt %s", id, !strcmp(known_sec, "WPA3") ? "SAE" : "WPA-PSK SAE");
+            if (strncmp(r, "OK", 2))
+                die("SET_NETWORK key_mgmt failed: %s", r);
+        }
+        if (known_sec && !strcmp(known_sec, "WPA3")) {
+            r = ctrlf("SET_NETWORK %s ieee80211w 2", id);
+            if (strncmp(r, "OK", 2))
+                die("SET_NETWORK ieee80211w failed: %s", r);
+        }
+    } else {
+        r = ctrlf("SET_NETWORK %s key_mgmt NONE", id);
+        if (strncmp(r, "OK", 2))
+            die("SET_NETWORK key_mgmt failed: %s", r);
+    }
+    {
+        volatile char *vp = pass;
+        for (size_t k = 0; k < sizeof pass; k++) vp[k] = 0;
+    }
+    r = ctrlf("ENABLE_NETWORK %s", id);
+    if (strncmp(r, "OK", 2))
+        die("ENABLE_NETWORK failed: %s", r);
+    r = ctrlf("SELECT_NETWORK %s", id);
+    if (strncmp(r, "OK", 2))
+        die("SELECT_NETWORK failed: %s", r);
     printf("  %s*%s connecting to %s ...\n", C(117), RST, ssid);
     rc = wait_connected(20);
     if (rc < 0) {
@@ -673,6 +772,14 @@ int main(int argc, char **argv)
     int i = 1, open_only = 0;
     struct ap aps[MAXNET];
     const char *cmd;
+    struct sigaction sa = {0};
+
+    atexit(cleanup_socket);
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGHUP, &sa, NULL);
 
     color = isatty(1) && !getenv("NO_COLOR");
     while (i < argc && argv[i][0] == '-' && argv[i][1]) {
@@ -730,10 +837,19 @@ int main(int argc, char **argv)
     if (!strcmp(cmd, "down"))
         return run_l2net("wifi-stop");
     if (!strcmp(cmd, "country")) {
-        if (i >= argc || strlen(argv[i]) != 2)
+        if (i >= argc || strlen(argv[i]) != 2 ||
+            !isalpha((unsigned char)argv[i][0]) || !isalpha((unsigned char)argv[i][1]))
             die("usage: l2wifi country XX   (two letters, e.g. TH)");
+        char cc[3] = {
+            (char)toupper((unsigned char)argv[i][0]),
+            (char)toupper((unsigned char)argv[i][1]),
+            0
+        };
         ensure_supplicant();
-        puts(ctrlf("SET country %s", argv[i]));
+        char *res = ctrlf("SET country %s", cc);
+        if (strncmp(res, "OK", 2))
+            die("country rejected: %s", res);
+        puts(res);
         ctrl("SAVE_CONFIG");
         return 0;
     }

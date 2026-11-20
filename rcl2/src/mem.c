@@ -10,7 +10,6 @@
  * ever call it, so a weak, never-returning stub satisfies the reference.
  */
 #include "syscalls.h"
-#include "syscalls.h"
 
 void *memcpy(void *dst, const void *src, unsigned long n);
 void *memmove(void *dst, const void *src, unsigned long n);

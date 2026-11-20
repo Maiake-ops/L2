@@ -37,15 +37,20 @@ check:
 	sh -n l2wm/session/l2session
 	sh -n l2wm/session/l2user
 	sh -n l2wm/session/xterm
-	python3 -m py_compile tools/desktop-runtime.py tools/test-desktop.py
+	python3 -m py_compile tools/desktop-runtime.py tools/test-desktop.py tools/patch-kernel-ram.py
 	python3 tools/ramtest.py --selftest
 	python3 -m unittest discover -s tools -p 'test_stability_harness.py'
+	$(MAKE) -C rcl2 test
+	$(MAKE) -C l2wm test
 	$(MAKE) -C l2pm
 	python3 -m unittest discover -s tools -p 'test_l2pm_security.py'
 	python3 -m unittest discover -s tools -p 'test_l2pm_pipeline.py'
+	python3 -m unittest discover -s tools -p 'test_l2pm_recipe_validation.py'
+	python3 -m unittest discover -s tools -p 'test_l2pm_features.py'
 	python3 -m unittest discover -s tools -p 'test_l2gpt.py'
 	python3 -m unittest discover -s tools -p 'test_l2install.py'
 	$(MAKE) -C l2wifi
+	python3 -m unittest discover -s tools -p 'test_l2wifi.py'
 
 install:
 	./l2install shared
