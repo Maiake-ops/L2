@@ -38,6 +38,13 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
 - 32M forensics (`build/campaigns/boot-forensics-32M.log`): 22252K/32248K
   available, 9060K reserved; percpu 2 MiB chunk mostly freed after fallback;
   printk ring 8K data + 28K meta.
+- **REFINED FLOORS (L2-96 default-ISO matrix, harness commit e24248c on
+  campaigns/armageddon-ii, 39 unit tests OK)**: BIOS floor **14M** (13M
+  OOM); UEFI floor **(64M,128M]** — 64M = Limine high-memory-allocator
+  PANIC in init_memmap (decoded from ANSI-interleaved capture; bootloader
+  layer constraint, not kernel). 16M smoke: used 5560K. Evidence:
+  build/campaigns/lowram-default-matrix/. <10M BIOS target still open —
+  L2-96 lowram-variant heavy-coder running in build-lowram/ lane.
 
 ## Three most important unresolved bottlenecks (evidence above)
 
@@ -196,6 +203,33 @@ attack the right peak). Falsification angles sent to L2-96 (its lane):
 6. 10M log: "Failed to release memory for alloc_low_pages()" even with
    EARLY_DYNAMIC_PAGE_TABLES=16 — early pgt reserve still fails at 10M;
    investigate its managed-page cost.
+
+**OUTCOMES — L2-96 tested all six (22:1x; evidence: build/campaigns/
+lowram-forensics-report.md §Adversarial review + build/lowram-forensics/):**
+1. CONFIRMED: 4G guest pcp high=0 batch=7, min_free=128; l2net's
+   percpu_pagelist_high_fraction=100000 CANNOT re-enable caching
+   (zone_highsize returns 0 under BASE_SMALL). 800-fork burst 0.8 s, zero
+   alloc failures — light loads fine; 16G heavy-throughput → mission 80.
+   Recommendation to mission-05: runtime-gate on totalram_pages. ENDORSED.
+2. QEMU S3 (RTC wakealarm) + SMP2 + poweroff + reboot clean at 256M;
+   real-firmware wakeup/hotplug = residual risk (documented).
+3. CONFIRMED zero-tail invariant (<128 MiB guests only; inert above).
+   Exposure small (PROC_PAGE_MONITOR/page_idle/HWPOISON/CMA/balloon off).
+   Recommendation: map tail page READ-ONLY so stray writes fault again —
+   zero RAM cost. ENDORSED for mission-05.
+4. 8K stacks: VMAP_STACK=y; test-stability --ram 16,32 PASS (churn 1000,
+   fanout, 4 MiB stress, ext4-on-virtio write/clean-reboot/recovery,
+   console restart, no zombies). Resolved at tested depth.
+5. RESOLVED — streaming free sound (rd_fill advances initrd_start=free_end;
+   final free frees unconsumed tail only; 32M accounting exact: 26 msgs,
+   412K = PAGE_ALIGN(421275)). **CORRECTION TO MY NOTE ACCEPTED**:
+   retain_initrd=1 is a SILENT NO-OP by kernel design (handler `if (*str)
+   return 0`, initramfs.c:636) — only the BARE flag works; verified: 0
+   streaming frees, MemTotal −416K, /sys/firmware/initrd present 421275 B
+   mode -r--r-----. My "8×16K oddity" was a truncated capture window.
+6. RESOLVED benign: alloc_low_pages msg = memory_map_top_down() failing to
+   get a 2 MiB-aligned top block (initrd occupies it at 10M) → documented
+   ALIGN_DOWN+BRK fallback; extra early 4K PTEs, NO managed-page loss.
 
 ## W6 audit — l2install (read-only; missions 62/64/66/67/261–280)
 
@@ -387,3 +421,14 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   mounts_setup). Reproducibility re-confirmation recorded (assembly
   06a4fd1e, cross-path l2pm efc32819, musl wrapper paths don't leak).
   W1/W2 still running.
+- 22:1x L2-96 tested ALL SIX W4 angles: 1/3 confirmed (recommendations:
+  runtime-gate pcp/min_free on totalram_pages; RO vmemmap tail page —
+  both endorsed for mission-05), 2/4/5/6 resolved with evidence; MY NOTE
+  CORRECTED (retain_initrd=1 no-op by design, bare flag verified; 8×16K
+  was truncated window). Refined floors recorded: BIOS 14M, UEFI
+  (64M,128M] w/ Limine 64M panic. e24248c (their verified matrix harness)
+  landed on campaigns/armageddon-ii via main-tree commit — branch now
+  carries both sessions' verified commits; main still cd0f88a; merge
+  topology still user decision. Git status shows all lanes active:
+  W1 in rcl2 (incl syscalls.h), W2 NOW EDITING l2pm.c + security suite,
+  L2-72 in kernel.fragment, L2-96 in build-lowram/. No intervention needed.
