@@ -40,11 +40,13 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
   printk ring 8K data + 28K meta.
 - **REFINED FLOORS (L2-96 default-ISO matrix, harness commit e24248c on
   campaigns/armageddon-ii, 39 unit tests OK)**: BIOS floor **14M** (13M
-  OOM); UEFI floor **(64M,128M]** — 64M = Limine high-memory-allocator
-  PANIC in init_memmap (decoded from ANSI-interleaved capture; bootloader
-  layer constraint, not kernel). 16M smoke: used 5560K. Evidence:
-  build/campaigns/lowram-default-matrix/. <10M BIOS target still open —
-  L2-96 lowram-variant heavy-coder running in build-lowram/ lane.
+  OOM); UEFI floor **(96M,128M]** (REFINED 22:5x: maiake-f6 tested 96M
+  FAIL + 48M panic, same Limine init_memmap high-memory-allocator panic
+  class; earlier (64M,128M] bracket superseded; worktree log citations
+  in L2-96 report). Bootloader-layer constraint, not kernel. 16M smoke:
+  used 5560K. Evidence: build/campaigns/lowram-default-matrix/. <10M
+  BIOS target still open — L2-96 WP2 kernel+ISO BUILT, verification in
+  flight; will report which lever broke the 7490 KiB wall.
 
 ## Three most important unresolved bottlenecks (evidence above)
 
@@ -329,6 +331,18 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   machines; zero DMA32 lowmem reserve relies on 64-bit DMA + dynamic SWIOTLB
   — real-hardware 32-bit-DMA devices under pressure need a fault-injection
   test (mission 89). Consider scaling with MemTotal.
+  **JOINT POLICY AGREED (L2-96, 22:5x)**: kernel-side runtime gating
+  (their lane, post-WP2 measured batch) and l2net boot()'s runtime writes
+  (min_free_kbytes=128, lowmem_reserve_ratio=0, pcp fraction=100000) must
+  share ONE threshold policy and LAND TOGETHER, else they fight on big
+  guests. Their design sketch: boot-time l2_small_ram flag
+  (__ro_after_init) for runtime hooks (zone_highsize/batch), direct
+  totalram_pages checks in __init hooks. Compile-time constants
+  (MIN_THREADS, THREAD_SIZE_ORDER) cannot be runtime-gated — 8K stacks
+  stay at all sizes, justified by VMAP_STACK guards + 16M/32M stability
+  PASS (closes W4 angle-4 residual). W6-P1 deliberately EXCLUDES boot()
+  tuning; the joint l2net change is a queued post-WP2 item (W5-era),
+  implemented against their finalized policy — no premature divergence.
 - **udhcpc.script: CLEAN.** router/dns/domain charset-validated (domain
   explicitly treated as untrusted), resolv.conf via mktemp+atomic mv,
   ip/mask/broadcast are binary-derived dotted quads from udhcpc, quoted.
@@ -504,3 +518,11 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   Clarified fragment WIP attribution (L2-72's, not mine) to prevent
   cross-lane disturbance. Variant MODULES=n security property recorded
   for W5. W6 running; W7 queued.
+- 22:5x L2-96: UEFI floor refined (96M,128M] (maiake-f6 96M/48M tests) —
+  ledger updated. N5 JOINT POLICY agreed: one threshold policy, kernel
+  gating + l2net writes land together post-WP2 (their l2_small_ram flag
+  sketch); 8K stacks justified at all sizes (angle-4 closed). W6-P1
+  exclusion of boot() tuning stands; joint item queued W5-era. Merge
+  topology re-agreed (branch = campaign record, main = user's call).
+  WP2 10M kernel+ISO built, verification in flight — result expected.
+  W1/W2 hashes already sent 22:3x (messages crossed). W6 running.
