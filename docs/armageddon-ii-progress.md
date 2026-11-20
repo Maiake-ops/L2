@@ -386,8 +386,14 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   (MIN_THREADS, THREAD_SIZE_ORDER) cannot be runtime-gated — 8K stacks
   stay at all sizes, justified by VMAP_STACK guards + 16M/32M stability
   PASS (closes W4 angle-4 residual). W6-P1 deliberately EXCLUDES boot()
-  tuning; the joint l2net change is a queued post-WP2 item (W5-era),
-  implemented against their finalized policy — no premature divergence.
+  tuning — no premature divergence. **EXECUTABLE SEQUENCE (23:5x)**:
+  L2-72 finalizes kernel-side threshold policy in patch-kernel-ram.py
+  (their lane; L2-96's angle-1 design sketch is the input) → pings
+  L2-ea AND L2-96 → L2-ea's W5-era l2net boot() gate + L2-72's kernel
+  gate LAND TOGETHER; L2-96 co-signs design + adopts same policy in
+  config/kernel.lowram (variant consistency >128M guests). **My side is
+  queued against L2-72's finalization ping, NOT L2-96's alone** (L2-96
+  cannot finalize a patch-script change it doesn't own).
 - **udhcpc.script: CLEAN.** router/dns/domain charset-validated (domain
   explicitly treated as untrusted), resolv.conf via mktemp+atomic mv,
   ip/mask/broadcast are binary-derived dotted quads from udhcpc, quoted.
@@ -618,3 +624,10 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   executor corrected in ledger. **WP2 v1: variant floor 14M→12M**,
   bzImage −736K, 10M managed 3200K, gap ~550-600K, iter2 in flight —
   primary target closing. W6+W7 running; FINAL sequencing agreed.
+- 23:5x L2-96 N5 sequence clarified: trigger = L2-72 finalization ping
+  (patch-script owner) to BOTH peers; L2-96 co-signs + adopts policy in
+  variant; my l2net gate queued against that ping (recorded). Hashes
+  verified on their side (crossed messages); FINAL rcl2 --selftest
+  re-stamp against committed build noted. WP2 v2 build in flight (v1
+  preserved build-lowram/v1/); 10M outcome + winning lever at landing.
+  W6+W7 running.
