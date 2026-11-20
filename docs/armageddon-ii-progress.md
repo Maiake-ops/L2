@@ -97,6 +97,12 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       Reproducibility evidence to cite: maiake-f6 worktree 07-reproducible.md
       — ISO assembly byte-reproducible (2 rebuilds from extracted staging,
       both 06a4fd1e… = baseline), cross-checkout-path l2pm compile identical.
+      **Layer caveat (maiake-f6)**: that proof covers ASSEMBLY only
+      (xorriso + limine-bios-install + MBR-pin given identical staging);
+      compile-layer determinism double-build proof still pending (their
+      campaign 7). W7 private ISO + W5 claims must pin EVERY staging input
+      hash (a2-baseline-artifacts.txt + baseline-artifacts/SHA256SUMS +
+      fixed-rcl2 hash), not assume compile reproducibility.
 - [ ] W7 rcl2 live-mode /tmp OOM wedge (maiake-f6 verified finding; missions
       19/25/29/30 + 101–120 memory-pressure) — **queued as W1 FOLLOW-UP**
       (same agent reuse after W1 lands; W1 mid-edit in main.c). Mechanism
@@ -111,7 +117,13 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       16M UNEDITED. Evidence: worktree build/campaigns/09-baseline-
       mempressure-16M.log. Private ISO under build/a2-* from pinned
       snapshots (assembly proven reproducible) or coordinated build/out
-      window with L2-72. Full handoff packet expected from their auditor.
+      window with L2-72. **Gate definition LOCKED (maiake-f6 ack)**: run
+      tools/test_mempressure.py --iso <fixed-iso> --ram 16M UNEDITED;
+      pass = ENOSPC-at-cap + shell survival + reclaim (three-part).
+      Their auditor's handoff packet (incoming via send_message) covers
+      /tmp AND /run, cap rationale, installer-scratch constraints, idle-
+      cost deltas, line refs re-aligned against CURRENT main-tree main.c
+      (their worktree base predates cd0f88a + W1 edits).
 - [ ] W6 shell safety hardening: l2install + l2net (62/64/66/67/221–240/261–280)
       — queued; reuse a heavy-coder agent after W1/W2 land (credit discipline:
       max 2 concurrent heavy agents). Findings + regression-test scope below.
@@ -346,3 +358,13 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   Mission 66 closed dual-cited; 67 split recorded (W1 corpus share pending
   landing); dash fix theirs deferred; they re-stamp W1/W2/W6 post-commits
   (mission 92). W1/W2 still running.
+- 21:5x maiake-f6 ack: W7 gate locked (ENOSPC-at-cap + shell survival +
+  reclaim, their test unedited); auditor packet will cover /tmp+/run with
+  re-aligned line refs; their agent C exclusively owns l2pm Makefile
+  alignment (hash-identity verification of both paths); their fuzz auditor
+  will CONFIRM/REFUTE gapmap at HEAD + adversarially review W2 P1-P3
+  commits read-only. Assembly-vs-compile determinism caveat recorded
+  (pin all staging hashes). **Merge topology = PENDING USER DECISION**
+  (campaigns/engineering base 21031ce vs main cd0f88a+my branch; peer
+  will not rebase without direction; surfaced to user, no unilateral
+  merge). W1/W2 still running.
