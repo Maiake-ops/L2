@@ -33,15 +33,10 @@ check:
 	sh -n overlay/bin/openssl
 	sh -n overlay/etc/l2/udhcpc.script
 	sh -n overlay/etc/l2/serial-getty
-	sh -n l2wm/session/l2desktop
-	sh -n l2wm/session/l2session
-	sh -n l2wm/session/l2user
-	sh -n l2wm/session/xterm
-	python3 -m py_compile tools/desktop-runtime.py tools/test-desktop.py tools/patch-kernel-ram.py
+	python3 -m py_compile tools/patch-kernel-ram.py
 	python3 tools/ramtest.py --selftest
 	python3 -m unittest discover -s tools -p 'test_stability_harness.py'
 	$(MAKE) -C rcl2 test
-	$(MAKE) -C l2wm test
 	$(MAKE) -C l2pm
 	python3 -m unittest discover -s tools -p 'test_l2pm_security.py'
 	python3 -m unittest discover -s tools -p 'test_l2pm_pipeline.py'

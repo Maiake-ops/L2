@@ -1302,136 +1302,6 @@ build_installpack() {
     say "install pack: $(du -sk "$w" | awk '{print $1}') KiB on the medium, 0 KiB resident (sgdisk mke2fs mkfs.fat limine)"
 }
 
-# X11 is built only when l2wm is requested. Keep target headers/libraries
-# isolated from the host (especially Nix/glibc pkg-config search paths).
-build_l2wm_x11() (
-    local cc=$1 prefix=$BUILD/l2wm-x11
-    local name version group archive dir log
-    [ -f "$prefix/.complete" ] && return 0
-    for name in pkg-config python3 rustc readelf; do
-        have "$name" || die "$name is required to build l2wm"
-    done
-    mkdir -p "$prefix" "$LOGS" "$CACHE" "$SRC"
-    export CC="$cc" CFLAGS="-Os"
-    # xproto.pc uses /usr/include, which pkg-config may filter as a system
-    # path even though the musl compiler cannot see our staged headers.
-    export CPPFLAGS="-I$prefix/usr/include"
-    export LDFLAGS="-static -L$prefix/usr/lib"
-    export PKG_CONFIG_PATH=
-    export PKG_CONFIG_LIBDIR="$prefix/usr/lib/pkgconfig:$prefix/usr/share/pkgconfig"
-    export PKG_CONFIG_SYSROOT_DIR="$prefix"
-    export PYTHON=python3
-    # Ordered: protocol headers, transport headers, generator, auth, XCB, Xlib.
-    for name in xorgproto xtrans xcb_proto xau xcb x11; do
-        case "$name" in
-            xorgproto) version=2025.1; group=proto; archive=xorgproto-$version ;;
-            xtrans) version=1.6.0; group=lib; archive=xtrans-$version ;;
-            xcb_proto) version=1.17.0; group=xcb; archive=xcb-proto-$version ;;
-            xau) version=1.0.12; group=lib; archive=libXau-$version ;;
-            xcb) version=1.17.0; group=xcb; archive=libxcb-$version ;;
-            x11) version=1.8.14; group=lib; archive=libX11-$version ;;
-        esac
-        local url="https://www.x.org/releases/individual/$group/$archive.tar.xz"
-        if [ "$group" = xcb ]; then url="https://xcb.freedesktop.org/dist/$archive.tar.xz"; fi
-        fetch_src "l2wm_$name" "$url" "$CACHE/$archive.tar.xz"
-        dir=$(unpack_src "$CACHE/$archive.tar.xz" "$archive")
-        log=$LOGS/l2wm-$name.log
-        local opts=()
-        case "$name" in
-            xorgproto) opts=(--disable-specs) ;;
-            xtrans) opts=(--disable-docs) ;;
-            xcb_proto) opts=(--disable-devel-docs) ;;
-            xau) opts=(--disable-shared --enable-static) ;;
-            xcb)
-                local py_dirs=("$prefix"/usr/lib/python*/site-packages "$prefix"/usr/lib/python*/dist-packages)
-                [ "${#py_dirs[@]}" -gt 0 ] || die "xcb-proto did not install its Python generator"
-                export PYTHONPATH="${py_dirs[0]}"
-                opts=(--disable-shared --enable-static --disable-devel-docs --disable-doxygen
-                      --disable-xdm-auth --without-launchd
-                      --with-xcb-proto-dir="$prefix/usr/share/xcb"
-                      --with-xcb-proto-python-dir="${py_dirs[0]}") ;;
-            x11) opts=(--disable-shared --enable-static --disable-specs --disable-xf86bigfont
-                       --disable-loadable-i18n --without-xmlto --without-fop
-                       # pkg-config variables are not rebased by PKG_CONFIG_SYSROOT_DIR.
-                       --with-keysymdefdir="$prefix/usr/include/X11") ;;
-        esac
-        step "Building l2wm dependency: $archive (log: $log)"
-        if ! (
-            set -e
-            cd "$dir"
-            ./configure --prefix=/usr --libdir=/usr/lib "${opts[@]}" || exit
-            make -j"$JOBS" -l"$LOAD" || exit
-            make DESTDIR="$prefix" install || exit
-            # Installed libtool metadata embeds /usr/lib dependency paths;
-            # use the staged static archives and pkg-config metadata instead.
-            rm -f "$prefix"/usr/lib/*.la
-        ) >"$log" 2>&1; then
-            ui_logtail "$log" 40
-            die "l2wm dependency $archive failed (log: $log)"
-        fi
-    done
-    touch "$prefix/.complete"
-)
-
-build_l2wm() {
-    local cc prefix=$BUILD/l2wm-x11
-    # A standalone menu selection must work before the rest of the distro.
-    if [ -z "${L2WM_CC:-}" ] && [ ! -f "$SYSROOT/lib/libc.a" ]; then build_musl; fi
-    cc=${L2WM_CC:-$(musl_cc)}
-    build_l2wm_x11 "$cc"
-    mkdir -p "$OUT"
-    make -C "$L2_ROOT/l2wm" clean
-    make -C "$L2_ROOT/l2wm" CC="$cc" \
-        CPPFLAGS="-I$prefix/usr/include" \
-        LDFLAGS="-static -L$prefix/usr/lib" \
-        LDLIBS="${L2WM_LIBS:--lX11 -lxcb -lXau -pthread}"
-    local binary="$L2_ROOT/l2wm/build/l2wm"
-    readelf -h "$binary" >/dev/null || die "l2wm is not a valid ELF binary"
-    if readelf -l "$binary" | grep -q INTERP || readelf -d "$binary" | grep -q NEEDED; then
-        die "l2wm must be statically linked for the minimal rootfs"
-    fi
-    install -m 0755 "$binary" "$OUT/l2wm"
-}
-
-# The desktop is a separate, larger image; the console ISO keeps its budget.
-# Import cached Xorg/xterm runtime files, or use a prepared rootfs overlay.
-install_desktop_runtime() {
-    if [ -n "${L2_DESKTOP_RUNTIME:-}" ]; then
-        [ -f "$L2_DESKTOP_RUNTIME/etc/l2/desktop-runtime.sh" ] \
-            || die "L2_DESKTOP_RUNTIME must contain etc/l2/desktop-runtime.sh"
-        cp -a "$L2_DESKTOP_RUNTIME/." "$ROOTFS/"
-    else
-        python3 "$L2_ROOT/tools/desktop-runtime.py" "$ROOTFS" \
-            || die "desktop runtime unavailable; provide L2_DESKTOP_RUNTIME or cached Nix Xorg, xterm, fbdev, evdev and fonts"
-    fi
-    local script
-    for script in l2desktop l2session l2user xterm; do
-        install -m 0755 "$L2_ROOT/l2wm/session/$script" "$ROOTFS/bin/$script"
-    done
-    "${L2WM_CC:-$(musl_cc)}" -Os -I"$BUILD/l2wm-x11/usr/include" \
-        "$L2_ROOT/tools/desktop-probe.c" -static -L"$BUILD/l2wm-x11/usr/lib" \
-        -lX11 -lxcb -lXau -pthread -o "$ROOTFS/bin/l2-xprobe"
-    chmod 4755 "$ROOTFS/bin/busybox"
-    sed -i 's|^service tty1 .*|service desktop respawn /bin/getty -n -l /bin/l2desktop 0 tty1 linux|' "$ROOTFS/etc/rcl2.conf"
-    printf '\nservice tty2 respawn /bin/getty 0 tty2 linux\n' >> "$ROOTFS/etc/rcl2.conf"
-    printf 'root:!:20454:0:99999:7:::\n' > "$ROOTFS/etc/shadow"
-    chmod 600 "$ROOTFS/etc/shadow"
-    printf '/bin/dash\n/bin/sh\n' > "$ROOTFS/etc/shells"
-    printf 'passwd: files\ngroup: files\nshadow: files\nhosts: files dns\n' > "$ROOTFS/etc/nsswitch.conf"
-    mkdir -p "$ROOTFS/home"
-    chmod 700 "$ROOTFS/root"
-}
-
-build_desktop() (
-    export L2_WITH_DESKTOP=1 L2_WITH_L2WM=1
-    if ! "$OUT/busybox" --list 2>/dev/null | grep -qx passwd; then build_busybox; fi
-    build_rootfs
-    build_initramfs
-    local wifi=0
-    [ ! -d "$BUILD/wifi" ] || wifi=1
-    _make_iso "$OUT/l2-desktop.iso" "${L2_DESKTOP_ISO_LIMIT_MB:-128}" desktop "$wifi"
-)
-
 # --------------------------------------------------------------- rootfs
 build_rootfs() {
     init_epoch
@@ -1439,8 +1309,6 @@ build_rootfs() {
     for f in dash rcl2 l2pm busybox l2wifi; do
         [ -f "$OUT/$f" ] || die "$OUT/$f missing; build it first (l2 build $f)"
     done
-    if [ "${L2_WITH_DESKTOP:-0}" = 1 ]; then L2_WITH_L2WM=1; fi
-    if [ "${L2_WITH_L2WM:-0}" = 1 ]; then build_l2wm; fi
     step "Assembling rootfs"
     rm -rf "$ROOTFS"
     mkdir -p "$ROOTFS"/{bin,etc,proc,sys,dev,tmp,run,root,boot,media/l2,lib/modules} \
@@ -1474,9 +1342,6 @@ build_rootfs() {
     ln -sf bin/rcl2 "$ROOTFS/init"
     install -m 0755 "$OUT/l2pm" "$ROOTFS/bin/l2pm"
     install -m 0755 "$OUT/l2wifi" "$ROOTFS/bin/l2wifi"
-    if [ "${L2_WITH_L2WM:-0}" = 1 ]; then
-        install -m 0755 "$OUT/l2wm" "$ROOTFS/bin/l2wm"
-    fi
     install -m 0755 "$L2_ROOT/l2fetch" "$ROOTFS/bin/l2fetch"
     install -m 0755 "$L2_ROOT/l2install" "$ROOTFS/bin/l2install"
     install -m 0644 "$L2_ROOT/lib/l2ui.sh" "$ROOTFS/l2/lib/l2ui.sh"
@@ -1505,12 +1370,7 @@ PW
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export PS1='L2# '
 if [ "$(id -u)" != 0 ]; then PS1='L2$ '; fi
-if [ "${L2_DESKTOP_LOGIN:-0}" = 1 ]; then
-    unset L2_DESKTOP_LOGIN
-    exec /bin/l2session
-fi
 PF
-    if [ "${L2_WITH_DESKTOP:-0}" = 1 ]; then install_desktop_runtime; fi
     cat > "$ROOTFS/etc/motd" <<'MT'
 
   L2 - tiny Linux for tools
@@ -1694,8 +1554,6 @@ build_one() {
         rcl2)       build_rcl2 ;;
         l2pm)       build_l2pm ;;
         l2wifi)     build_l2wifi ;;
-        l2wm)       build_l2wm ;;
-        desktop)    build_desktop ;;
         libnl)      build_libnl ;;
         wpa|wpa_supplicant) build_wpa ;;
         openssl|ssl) build_openssl ;;
@@ -1737,11 +1595,9 @@ build_all() {
 
 build_components() {
     local sel
-    sel=$(ui_multi "Components to build (space selects, enter confirms)" ${ALL_COMPONENTS/ rootfs/ l2wm rootfs}) || return 0
+    sel=$(ui_multi "Components to build (space selects, enter confirms)" $ALL_COMPONENTS) || return 0
     [ -n "$sel" ] || return 0
     local c
-    local L2_WITH_L2WM=${L2_WITH_L2WM:-0}
-    case " $sel " in *" l2wm "*) L2_WITH_L2WM=1 ;; esac
     for c in $sel; do step "component: $c"; build_one "$c"; done
 }
 
@@ -1912,7 +1768,6 @@ menu() {
             "pick|Choose components to build" \
             "kernel|Kernel settings (wifi families, features, CPUs)" \
             "iso|Rebuild the ISOs only" \
-            "desktop|Build desktop ISO (l2wm, xterm, keyboard and mouse)" \
             "test|Test in QEMU (RAM sweep, BIOS/UEFI boot)" \
             "install|Install L2 to disk or a disk image" \
             "pm|Package manager (l2pm)" \
@@ -1926,7 +1781,6 @@ menu() {
             pick)    build_components ;;
             kernel)  kernel_menu ;;
             iso)     build_iso ;;
-            desktop) build_desktop ;;
             test)    test_menu ;;
             install) "$L2_ROOT/l2install" menu ;;
             pm)      pm_menu ;;
@@ -1945,15 +1799,11 @@ usage() {
     cat <<USAGE
 l2 $APP_VERSION - tiny Linux for tools (gum TUI + reproducible builder)
 
-Optional X11 WM: L2_WITH_L2WM=1 ./l2 build all (builds static X11 dependencies)
-Standalone component: ./l2 build l2wm
-Bootable X11 desktop with xterm: ./l2 build desktop (build/out/l2-desktop.iso)
-
 usage:
   l2                          interactive menu
   l2 deps [install|check]     distro dependency installer / checker
   l2 build [all|COMP...]      components: musl headers kernel busybox dash
-                              rcl2 l2pm l2wifi l2wm desktop libnl wpa openssl
+                              rcl2 l2pm l2wifi libnl wpa openssl
                               firmware wifipack hwpack limine l2gpt e2fsprogs
                               dosfstools installpack rootfs initramfs iso
   l2 kernel [menu|set CONFIG_X=v ...|show|reset]
@@ -1980,8 +1830,6 @@ environment:
   L2_SSL_CA=1|file.pem        ship a CA bundle    L2_OPENSSL_ASM=1  asm (faster, bigger)   OPENSSL_VERSION=x.y.z
   L2_PLAIN=1  L2_ASCII=1  NO_COLOR=1      UI fallbacks
   L2_BUILD_DIR=...  SOURCE_DATE_EPOCH=...  HOST_CC=cc
-  L2_DESKTOP_RUNTIME=...      prepared Xorg/xterm rootfs overlay (default: cached Nix runtime)
-  L2_DESKTOP_ISO_LIMIT_MB=128 desktop image size budget
 USAGE
 }
 

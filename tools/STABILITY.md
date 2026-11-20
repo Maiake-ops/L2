@@ -32,8 +32,7 @@ Sizes below it are exploratory: failures are recorded but do not fail the run.
 Supported configurations must pass every configured boot and check. A lower
 observed boot minimum does not change the declared support floor.
 
-Use the **core ISO**, whose root serial console shows `L2#`. Desktop ISOs with
-interactive account setup are covered by `tools/test-desktop.py`. Installed
+Use the **core ISO**, whose root serial console shows `L2#`. Installed
 system boot and UEFI need the existing installer and `tools/ramtest.py` tests.
 This harness verifies PID 1's executable matches `/sbin/rcl2`, even when its
 process name is `init`.
