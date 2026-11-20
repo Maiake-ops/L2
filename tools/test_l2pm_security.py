@@ -434,8 +434,10 @@ class L2pmSecurity(unittest.TestCase):
         self.install(arc, expect_ok=True)
         sd = self.store_dir(arc)
         self.assertTrue(sd.is_dir())
+        # --prune-generations opts into legacy keep-active-only gc; the
+        # default now keeps rollback history (see test_l2pm_transactions).
         for cmd, want in ((["verify"], 0), (["remove", "testpkg"], 0),
-                          (["verify"], 0), (["gc"], 0)):
+                          (["verify"], 0), (["gc", "--prune-generations"], 0)):
             r = subprocess.run([str(self.bin), *cmd], env=self.env,
                                capture_output=True, text=True)
             self.assertEqual(r.returncode, want, r.stdout + r.stderr)
