@@ -431,15 +431,19 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   ring-0 module-injection surface (F1 class) removed entirely for that
   variant. Default kernel keeps MODULES=y → W6 marker gate + P2 pin
   contract remain necessary there. W5 docs: two kernels, two postures.
-- **Fragment WIP attribution — DISPUTE RESOLVED (23:4x)**: L2-96 RETRACTED
-  its claim, attributed the +32 fragment lines to L2-72's mission-05 agent
-  in its own ledger + reply, and explicitly committed to NOT editing/
-  verifying/reverting them or running main-tree kernel builds. Recorded
-  split governs; no coordination gap remains. Trim batches
-  (FW_LOADER_COMPRESS_ZSTD/TRIM_UNUSED_KSYMS/LTO) handed over to L2-72 as
-  recommendations (zstd/ksymtrim confirmed with their agent; gating/
-  RO-tail under missions 05/80/65; LTO under 80). Commit-refusal policy
-  stands as durable discipline.
+- **Fragment WIP attribution — DISPUTE RESOLVED (23:4x, closed 00:1x)**:
+  Timeline: ~22:10 L2-96 good-faith claim on L2-72's TRANSFER PROPOSAL →
+  ~22:50 RETRACTION (shared ledger "CORRECTION — LANE TRANSFER CLAIM
+  RETRACTED" ~lines 522-546; maiake-f6 verified; L2-72 accepted "dispute
+  fully closed, recorded split stands"). L2-96 confirmed DON'Ts: no
+  fragment/patch-script edits, no main-tree kernel/rootfs/initramfs/iso
+  builds, no commits of L2-72's WIP. Post-WP2 queue VARIANT-ONLY (WP2
+  iteration verification → FINAL re-verification → maiake-f6 cross-matrix).
+  Trim batches (FW_LOADER_COMPRESS_ZSTD/TRIM_UNUSED_KSYMS/LTO) =
+  RECOMMENDATIONS in L2-72's lane (zstd/ksymtrim confirmed with their
+  agent; gating/RO-tail under 05/80/65; LTO under 80). Commit-refusal
+  policy mutual + durable (e24248c followed it: own lane, verified).
+  No reassignment claimed; recorded split governs; no user decision needed.
 - rcl2 parser fuzz ownership: W1 DONE — corpus committed at 1984055
   (tools/test_rcl2_lifecycle.py), shared with L2-72 for mission 67
   (login/su missing-shadow + non-rcl2 inputs remain theirs).
@@ -648,3 +652,10 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   (commit records lead verification only — noted pending). Power-loss
   inferred (dm-flakey root-gated, honesty noted). Makefile untouched.
   note/qwen1.txt written (608 lines, 6b7e296) per user request.
+- 00:1x L2-96 full alignment confirmation: dispute definitively closed.
+  Fair timeline recorded (~22:10 good-faith claim on L2-72 transfer
+  proposal → ~22:50 retraction, shared ledger ~522-546, maiake-f6
+  verified, L2-72 accepted). DON'Ts + variant-only queue + trim-as-
+  recommendations confirmed; commit rule mutual. No user decision needed.
+  W6+W7 running; awaiting WP2 v2 / W2 audit verdicts / mission-05 / N5 /
+  FINAL pings.

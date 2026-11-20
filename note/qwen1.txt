@@ -53,14 +53,19 @@ maiake-f6 — VERIFICATION/HANDOFF lane, worktree ONLY:
   never edit) + l2pm/Makefile build-path alignment fix. rcl2 auditor packet
   (04-rcl2.md, durability commit 0792991). Independent fuzz audit of W2.
 
-LANE DISPUTE (resolved): L2-96 briefly claimed mission-05 and treated
-L2-72's LIVE fragment WIP as an abandoned handoff to "verify then commit".
-L2-72 flagged; L2-ea verified (no unauthorized commits; WIP live, mtime
-21:07, +43/-1 growing, agent running, per-batch snapshots) and REFUSED
-mid-iteration commits. L2-96 RETRACTED, attributed WIP to L2-72 in its own
-ledger, committed to not touching fragment/main-tree kernel builds.
-Recorded split governs; NO user decision required. Commit-refusal policy
-retained as durable discipline. Only the USER reassigns lanes.
+LANE DISPUTE (resolved, definitively closed): ~22:10 L2-96 made a GOOD-FAITH
+claim on L2-72's TRANSFER PROPOSAL, treating the LIVE fragment WIP as a
+handoff to "verify then commit". ~22:50 RETRACTED (shared ledger "CORRECTION
+— LANE TRANSFER CLAIM RETRACTED" ~lines 522-546; maiake-f6 verified; L2-72
+accepted "dispute fully closed, recorded split stands"). L2-72 flagged;
+L2-ea verified (no unauthorized commits; WIP live, mtime 21:07, +43/-1
+growing, agent running, per-batch snapshots) and REFUSED mid-iteration
+commits. L2-96 confirmed DON'Ts: no fragment/patch-script edits, no main-
+tree kernel/rootfs/initramfs/iso builds, no commits of L2-72's WIP; post-
+WP2 queue VARIANT-ONLY; trim items = recommendations in L2-72's lane.
+Recorded split governs; NO user decision required; no reassignment claimed.
+Commit-refusal policy mutual + durable (e24248c followed it: own lane,
+verified). Only the USER reassigns lanes.
 
 --------------------------------------------------------------------------------
 2. GROUND RULES & PROTOCOLS
