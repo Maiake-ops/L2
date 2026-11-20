@@ -512,38 +512,3 @@ does not inflate the footprint. On big machines the kernel's per-RAM structures
 (`mem=`) to hold the footprint down — that is the only way to bound it.
 `tools/ramtest.py` measures via the real ISO (QEMU `-kernel/-initrd` keeps the
 initrd in fw_cfg memory and reads ~1 MiB high).
-
-### Optional tiling window manager
-
-[l2wm](l2wm/README.md) is an optional Rust/C X11 tiling window manager.
-Normal builds exclude it. Use `L2_WITH_L2WM=1 ./l2 build all` to include it,
-or `./l2 build l2wm` to build just the component. The builder downloads and builds static X11 dependencies automatically; the
-target needs an X server and terminal installed separately.
-
-For a complete bootable desktop, run `./l2 build desktop` and boot
-`build/out/l2-desktop.iso`. It includes Xorg with framebuffer/evdev drivers,
-l2wm, xterm, keyboard maps and fonts, plus the Wi-Fi pack when available.
-First boot asks for a username, user password and administrator password,
-then requires login before opening the desktop. Use `su -` for administration
-and `passwd` to change a password. Live-session accounts are preserved by
-`l2install`; booting the live ISO again starts with fresh accounts.
-
-Super+Return opens another terminal, Super+j/k changes focus, Super+q closes
-a window and Super+Escape logs out. Move the mouse into a window to focus it.
-Ctrl+Alt+F2 opens a password-protected text console; Ctrl+Alt+F7 returns to X.
-The `l2.desktop=0` kernel argument starts a text login instead of X.
-
-The desktop builder imports cached Nix Xorg, xterm, xauth, fbdev, evdev,
-ncurses and font packages without downloading or requiring a running Nix
-daemon. It copies their runtime libraries and data into the image, preserving
-absolute paths; the target needs no Nix installation. Imported files are
-recorded in `/etc/l2/desktop-runtime.sha256`. Other build hosts can supply a
-prepared rootfs overlay with `L2_DESKTOP_RUNTIME=/path/to/runtime`, including
-`etc/l2/desktop-runtime.sh` with the Xorg, module, xterm and xauth paths.
-This image has its own 128 MiB size budget (`L2_DESKTOP_ISO_LIMIT_MB`) and needs
-more RAM than the console system. Use at least 256 MiB. It uses the firmware
-framebuffer (`/dev/fb0`) and input devices present when the session starts;
-hardware without a framebuffer falls back to a text login.
-Run `python3 tools/test-desktop.py` for the QEMU desktop integration test.
-Add `--check-install` to verify account and home-directory preservation with
-a temporary installation inside the guest.

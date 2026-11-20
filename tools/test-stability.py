@@ -562,7 +562,7 @@ def main(argv=None):
               "configuration": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
               "iso_bytes": args.iso.stat().st_size, "matrix": [], "errors": [],
               "filesystem": {"status": "SKIP" if args.skip_filesystem else "NOT_RUN"},
-              "limitations": ["BIOS core ISO only; desktop login and UEFI need their existing dedicated tests",
+              "limitations": ["BIOS core ISO only; UEFI needs its existing dedicated tests",
                               "bounded pressure, not deliberate OOM or process-limit exhaustion",
                               "invalid configuration tested via parser selftest, not a changed PID 1 boot config",
                               "console crash/respawn tested; failed service startup is not injected",
