@@ -134,9 +134,9 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       campaign 7). W7 private ISO + W5 claims must pin EVERY staging input
       hash (a2-baseline-artifacts.txt + baseline-artifacts/SHA256SUMS +
       fixed-rcl2 hash), not assume compile reproducibility.
-- [ ] W7 rcl2 live-mode /tmp OOM wedge (maiake-f6 verified finding; missions
-      19/25/29/30 + 101–120 memory-pressure) — **queued as W1 FOLLOW-UP**
-      (same agent reuse after W1 lands; W1 mid-edit in main.c). Mechanism
+- [~] W7 rcl2 live-mode /tmp+/run OOM wedge + D5 OOB fix (maiake-f6 verified
+      findings; missions 19/25/29/30 + 101–120) — **LAUNCHED 23:2x as W1-agent
+      continuation** (warm runtime). Packet read in full + lead-verified:
       confirmed: main.c:330-338 mounts /run+/tmp tmpfs ONLY when
       /etc/l2/installed exists → live /tmp uncapped rootfs → 16M guest
       /tmp fill OOM-kills console dash, respawn also killed (~2.6 MiB
@@ -155,9 +155,24 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       /tmp AND /run, cap rationale, installer-scratch constraints, idle-
       cost deltas, line refs re-aligned against CURRENT main-tree main.c
       (their worktree base predates cd0f88a + W1 edits).
-- [ ] W6 shell safety hardening: l2install + l2net (62/64/66/67/221–240/261–280)
-      — queued; reuse a heavy-coder agent after W1/W2 land (credit discipline:
-      max 2 concurrent heavy agents). Findings + regression-test scope below.
+      **Launch scope**: H1 sysinfo caps (/tmp 12.5% clamp 2-16 MiB, /run
+      6.25% clamp 1-8 MiB; installed branch byte-identical; floor
+      degradation; ksysinfo layout + scratch_opt bounds lead-verified);
+      H2/D5 console_has_ttys OOB (CWE-125) — lead traced repro
+      craft="x\0\0ttyS0" i=7 window past NUL → wrong TERM; strlen-bounded
+      fix + ported repro with attribution. Carries ACCEPTED conditional on
+      full re-verification: -Oz + force-unwind-tables=no (−3.7 KB, no-CFI
+      trade documented), rss_report g_iobuf reuse (−256 B bss), probe-byte
+      refinement (whitespace-only probe ⇒ non-truncation: max-length
+      cmdline/config parse fully; EFBIG kept for genuine cuts; stop-set
+      aligned to is_ws), selective test-supervision ports (iobuf_aliasing,
+      conf_exact_fit, console_ttys; conf_truncated adapt/drop). Gate:
+      their test_mempressure.py UNEDITED on private ISO (pinned staging)
+      + test-live-install 256M + idle delta ≤~64 KiB. §10 heavy-test
+      follow-ups routed to verification tier; README → W5.
+- [~] W6 shell safety hardening: l2install + l2net (62/64/66/67/221–240/261–280)
+      — **LAUNCHED 22:4x** (heavy-coder, background; P1 scope, 8 findings,
+      fail-before/pass-after required; P2 deferred per co-signed contract).
       udhcpc.script audited CLEAN (no changes needed). Peer F1 write-up:
       docs/armageddon/61-69-security-posture.md (exploit: attacker CD in sr0
       wins loop order over USB boot medium). **Phased fix**: P1 (my lane) =
@@ -560,3 +575,12 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   will ping at mission-05 landing → P2 build-side starts. Hashes noted
   as durable in ledger + git log (messages may be held for user review).
   W6 running; W7 queued; WP2 verification in flight.
+- 23:2x maiake-f6 W7 packet arrived (worktree 04-rcl2.md, commit 0792991).
+  Lead read §1-§10 in full; D5 OOB independently traced + confirmed at
+  main.c:719-726; H1 patch design verified (ksysinfo layout, option-builder
+  bounds, floor degradation, cap rationale vs OOM point). W7 LAUNCHED as
+  W1-agent continuation with locked gate verbatim + carries accepted
+  conditionally (−Oz/unwind flags, rss reuse, probe-byte refinement).
+  Ack sent with verification details + merge reconciliation (D1-D4
+  duplicates, my tree canonical). W6 + W7 now both running (2 heavy
+  agents, credit cap respected). WP2 10M verification still in flight.
