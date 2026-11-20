@@ -52,8 +52,8 @@ struct ksa { unsigned long handler; unsigned long flags; unsigned long restorer;
 #define DEFAULT_HOSTNAME "L2"
 #define DEFAULT_SHELL    "/bin/dash"
 
-#define CFG_RAW_CAP     8192         /* raw config read capacity  */
-#define CMDLINE_CAP     4096         /* kernel cmdline buffer     */
+#define CFG_RAW_CAP     2048         /* raw config read capacity  */
+#define CMDLINE_CAP     2048         /* kernel cmdline buffer     */
 
 #define SB_FLOOR_MS     1000         /* respawn backoff floor     */
 #define SB_STABLE_MS    30000UL      /* backoff reset threshold   */
@@ -81,6 +81,8 @@ static volatile unsigned char g_closing;               /* shutdown underway */
 /* log line buffer: only touched from the main loop, never from handlers */
 static char     g_line[512];
 static unsigned g_len;
+/* shared scratch buffer for non-overlapping one-shot reads (mounts, config, cmdline, selftest) */
+static char     g_iobuf[CFG_RAW_CAP];
 
 extern void rcl_sigreturn(void);
 void rcl_enter(unsigned long *sp);
@@ -192,10 +194,9 @@ static int file_exists(const char *path)
  * 0 when /proc/mounts is unreadable so the caller's guard is a no-op then. */
 static int root_mounted_readonly(void)
 {
-    static char buf[2048];
-    if (file_read("/proc/mounts", buf, sizeof(buf)) <= 0) return 0;
+    if (file_read("/proc/mounts", g_iobuf, sizeof(g_iobuf)) <= 0) return 0;
     int ro = 0;
-    for (const char *p = buf; *p; ) {
+    for (const char *p = g_iobuf; *p; ) {
         const char *eol = p;
         while (*eol && *eol != '\n') eol++;
         const char *f = p;
@@ -425,14 +426,13 @@ static void conf_default(void)
 
 static void conf_load(void)
 {
-    static char raw[CFG_RAW_CAP];
-    int n = file_read(CONFIG_PATH, raw, CFG_RAW_CAP);
+    int n = file_read(CONFIG_PATH, g_iobuf, CFG_RAW_CAP);
     if (n < 0) {
         slog1("no config at ", CONFIG_PATH);
         conf_default();
         return;
     }
-    long got = rcl_rs_parse(&g_conf, raw, (unsigned long)n);
+    long got = rcl_rs_parse(&g_conf, g_iobuf, (unsigned long)n);
     if (got < 0) {
         slog1("config parse failed: ", CONFIG_PATH);
         conf_default();
@@ -852,8 +852,7 @@ static const char *mode_str(unsigned char m)
 
 static void selftest(int argc, char **argv)
 {
-    static char banner[80];
-    static char body[2048];
+    char banner[80];
 
     rcl_rs_banner(banner, sizeof(banner));
     g_len = 0; putstr(banner); putstr(" (selftest)"); line_out();
@@ -861,9 +860,9 @@ static void selftest(int argc, char **argv)
     const char *confdata = selftest_conf;
     const char *label = "builtin";
     if (argc > 2) {
-        int n = file_read(argv[2], body, (int)sizeof(body));
+        int n = file_read(argv[2], g_iobuf, (int)sizeof(g_iobuf));
         if (n < 0) { slog1("cannot read ", argv[2]); die_ex(1); }
-        confdata = body;
+        confdata = g_iobuf;
         label = argv[2];
     }
     long got = rcl_rs_parse(&g_conf, confdata, strlen(confdata));
@@ -906,7 +905,6 @@ static void pid1_boot(void) __attribute__((noreturn));
 static void pid1_boot(void)
 {
     char banner[80];
-    char cmd[CMDLINE_CAP];
 
     signals_setup();
     rcl_rs_banner(banner, sizeof(banner));
@@ -924,8 +922,8 @@ static void pid1_boot(void)
 
     unsigned flags = 0;
     {
-        int n = file_read(CMDLINE_PATH, cmd, (int)sizeof(cmd));
-        if (n >= 0) flags = (unsigned)rcl_rs_bootflags(cmd, (unsigned long)n);
+        int n = file_read(CMDLINE_PATH, g_iobuf, (int)sizeof(g_iobuf));
+        if (n >= 0) flags = (unsigned)rcl_rs_bootflags(g_iobuf, (unsigned long)n);
         else slog("cmdline read failed, assuming normal boot");
     }
 
