@@ -14,10 +14,7 @@ AGENTS.md
 graphify-out
 /website/
 notes/
-.gitignore
 /build-lowram/cache/
 *.qcow2
-*.o
 *.ko
 *.tar.xz
-/build-lowram/cache/
