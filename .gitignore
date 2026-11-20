@@ -13,3 +13,5 @@ my_disk.qcow2
 AGENTS.md
 graphify-out
 /website/
+notes/
+.gitignore
