@@ -11,7 +11,7 @@ co-owned by L2-72 + L2-96) with workstreams 101–300. Branch:
 |---|---|---|
 | L2-96 | Kernel low-RAM **variant** + boot matrix: NEW `config/kernel.lowram` + `tools/l2-lowram`, separate `build-lowram/` tree, logs `build/campaigns/lowram-*`; **owns `tools/lowram_matrix.py` + test** (corrected per L2-72 msg; still UNTRACKED, not in 1888794); snapshots `build/out/rcl2`+`initramfs-l2` once read-only. Does NOT edit rcl2/l2pm/kernel.fragment/patch-kernel-ram.py/l2/build/out | as listed |
 | L2-72 | **Original ARMAGEDDON campaign session** (corrected 21:0x): shared ledger co-owner, mission reports 01-04/05/11-13/21, broad audits/verification; **mission 05 default-kernel trim — its heavy-coder REBUILDS `build/out/{vmlinuz-l2,initramfs-l2,l2.iso,l2-wifi.iso}` in the MAIN tree** (JOBS=6 L2_LOAD=5, checks concurrent ./l2 builds). Cedes rcl2/l2pm implementation to L2-ea; keeps audits. l2pm gapmap incoming: `build/campaigns/armageddon-l2pm-gapmap.md` | `config/kernel.fragment`, `tools/patch-kernel-ram.py` (mission 05), `docs/armageddon*`, `build/campaigns/armageddon-*`, build/out artifacts |
-| other session | worktree `.qwen/worktrees/campaigns` (branch `campaigns/engineering`, kernel build observed 20:11) — denied by L2-96, unclaimed by L2-72; owner unconfirmed | worktree only; L2-ea does not touch |
+| maiake-f6 | **Worktree session CONFIRMED** (was "other"): `.qwen/worktrees/campaigns`, branch `campaigns/engineering`, base 21031ce (pre-cd0f88a — merge sequencing flagged). Verification/handoff role; owns `tools/test_mempressure.py` (orchestrator-owned: RUN, don't edit) + **l2pm/Makefile alignment fix** (build-path divergence). Never writes main checkout | worktree only |
 | **L2-ea (this)** | rcl2 lifecycle (21–30, 141–160), l2pm (41–50, 181–200), verification/commits | `rcl2/`, `l2pm/`, new `tools/test_rcl2*`, `build/a2-*/`, `build/campaigns/a2-*`, this file |
 
 L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
@@ -80,6 +80,10 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       (C:1583-1586) deferrable with handoff. Signatures/binary-repos remain
       design-only. Gapmap replaces W2's own audit task. TDD observed:
       tools/test_l2pm_transactions.py written before l2pm.c edits.
+      Amendment #4: **l2pm/Makefile OFF LIMITS** (maiake-f6 owns alignment
+      fix: make lacks -ffunction-sections/-fdata-sections/--gc-sections
+      that l2:739 uses → different shas, same 88,184 B size). W2 scope:
+      l2pm.c, recipes/, tests, scratch. Same-path size comparisons valid.
 - [x] W3 commit verified prior-mission artifacts — **1888794** (9 files,
       2369 insertions): 7 unit-test files + patch-kernel-ram.py + this ledger.
       Peers' live files (lowram_matrix*, docs/armageddon-progress.md,
@@ -90,6 +94,24 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
 - [ ] W5 release/CI integration of new gates (281–300) once W1/W2 land.
       Includes README size-table refresh: "~67 KiB l2pm" claim STALE vs
       88,184 B actual (peer-verified); use final measured sizes post-W2.
+      Reproducibility evidence to cite: maiake-f6 worktree 07-reproducible.md
+      — ISO assembly byte-reproducible (2 rebuilds from extracted staging,
+      both 06a4fd1e… = baseline), cross-checkout-path l2pm compile identical.
+- [ ] W7 rcl2 live-mode /tmp OOM wedge (maiake-f6 verified finding; missions
+      19/25/29/30 + 101–120 memory-pressure) — **queued as W1 FOLLOW-UP**
+      (same agent reuse after W1 lands; W1 mid-edit in main.c). Mechanism
+      confirmed: main.c:330-338 mounts /run+/tmp tmpfs ONLY when
+      /etc/l2/installed exists → live /tmp uncapped rootfs → 16M guest
+      /tmp fill OOM-kills console dash, respawn also killed (~2.6 MiB
+      unevictable pages), PID1 survives (76 kB) but console wedged until
+      reboot. Fix: size-capped tmpfs /tmp (and consider /run) in live mode
+      too — ENOSPC before global OOM; preserve installed-mode behavior +
+      live-installer scratch (test-live-install at 256M). Regression gate:
+      RUN worktree tools/test_mempressure.py --iso <fixed-rcl2 ISO> --ram
+      16M UNEDITED. Evidence: worktree build/campaigns/09-baseline-
+      mempressure-16M.log. Private ISO under build/a2-* from pinned
+      snapshots (assembly proven reproducible) or coordinated build/out
+      window with L2-72. Full handoff packet expected from their auditor.
 - [ ] W6 shell safety hardening: l2install + l2net (62/64/66/67/221–240/261–280)
       — queued; reuse a heavy-coder agent after W1/W2 land (credit discipline:
       max 2 concurrent heavy agents). Findings + regression-test scope below.
@@ -290,3 +312,13 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   udhcpc pending item with my clean audit. Fuzz ownership split: W1 rcl2
   parser, mission 67 login/su/shadow + rest. Test count corrected to 71
   (8a582c9). W1/W2 still running.
+- 21:3x maiake-f6 identified (worktree owner, verification/handoff lane).
+  Two findings CONFIRMED in main-tree code: (1) rcl2 live /tmp+/run tmpfs
+  mounts gated on INSTALLED_MARK (main.c:330-338) → 16M OOM-wedge defect
+  (their test_mempressure.py evidence) → W7 queued as W1 follow-up, run
+  their test unedited as gate; (2) l2pm build-path flag divergence
+  (l2:739 vs Makefile) → W2 amendment #4: Makefile off-limits, their fix
+  stands. Branch-topology merge note flagged (worktree base 21031ce).
+  Their ISO-assembly reproducibility evidence recorded for W5. W1 already
+  hardening /proc/mounts read path (observed via code comment, not
+  transcript). Acks sent both directions.
