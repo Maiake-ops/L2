@@ -99,16 +99,17 @@ def accel():
 
 def measure(args, size_s):
     kib = parse_size(size_s)
+    nic = [] if getattr(args, "with_nic", False) else ["-nic", "none"]
     if getattr(args, "iso", None):
         # Boot the real ISO: QEMU's -kernel/-initrd path keeps the initrd in
         # fw_cfg memory and reads ~1 MiB high, so the ISO is authoritative.
         cmd = ["qemu-system-x86_64", "-m", size_s, "-smp", "2", "-display", "none",
                "-serial", "stdio", "-monitor", "none", "-no-reboot",
-               "-cdrom", args.iso, "-boot", "d"] + accel()
+               "-cdrom", args.iso, "-boot", "d"] + nic + accel()
     else:
         cmd = ["qemu-system-x86_64", "-m", size_s, "-smp", "2", "-display", "none", "-serial", "stdio",
                "-monitor", "none", "-no-reboot", "-kernel", args.kernel, "-initrd", args.initrd,
-               "-append", f"rdinit=/init console=ttyS0,115200 panic=-1 {args.cmdline}"] + accel()
+               "-append", f"rdinit=/init console=ttyS0,115200 panic=-1 {args.cmdline}"] + nic + accel()
     g = Guest(cmd)
     try:
         if not g.read_until(PROMPT, args.timeout):
@@ -168,8 +169,9 @@ def boot_medium(args):
     if not have("qemu-system-x86_64"):
         raise SystemExit("qemu-system-x86_64 not found")
     medium = args.iso or args.disk
+    nic = [] if getattr(args, "with_nic", False) else ["-nic", "none"]
     cmd = ["qemu-system-x86_64", "-m", args.ram, "-smp", "2", "-display", "none", "-serial", "stdio",
-           "-monitor", "none", "-no-reboot"] + accel()
+           "-monitor", "none", "-no-reboot"] + nic + accel()
     if args.iso:
         cmd += ["-cdrom", args.iso, "-boot", "d"]
     else:
@@ -220,6 +222,7 @@ def main():
     ap.add_argument("--timeout", type=int, default=180); ap.add_argument("--settle", type=float, default=25.0)
     ap.add_argument("--iso"); ap.add_argument("--disk"); ap.add_argument("--ram", default="256")
     ap.add_argument("--uefi", action="store_true"); ap.add_argument("--ovmf")
+    ap.add_argument("--with-nic", action="store_true")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:

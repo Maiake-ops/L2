@@ -40,7 +40,7 @@ find_pack() {
     # No block device at all (initramfs-only boot, no medium): nothing to find,
     # so do not spend ~10s retrying.  Real hardware always has a boot device.
     _any=0
-    for d in /dev/sr[0-9] /dev/sd[a-z] /dev/vd[a-z] /dev/nvme[0-9]n[0-9]; do
+    for d in /dev/sr[0-9] /dev/sd[a-z] /dev/vd[a-z] /dev/nvme[0-9]n[0-9] /dev/mmcblk[0-9]; do
         [ -b "$d" ] && { _any=1; break; }
     done
     [ "$_any" = 0 ] && return 1
@@ -48,7 +48,8 @@ find_pack() {
     n=0
     while [ "$n" -lt 10 ]; do
         for d in ${L2_PACK_DEV:-} /dev/sr0 /dev/sr1 /dev/sd[a-z] /dev/sd[a-z][0-9] \
-                 /dev/vd[a-z] /dev/vd[a-z][0-9] /dev/nvme[0-9]n[0-9] /dev/nvme[0-9]n[0-9]p[0-9]; do
+                 /dev/vd[a-z] /dev/vd[a-z][0-9] /dev/nvme[0-9]n[0-9] /dev/nvme[0-9]n[0-9]p[0-9] \
+                 /dev/mmcblk[0-9] /dev/mmcblk[0-9]p[0-9]; do
             [ -b "$d" ] || continue
             mount -t iso9660 -o ro "$d" /media/l2 2>/dev/null || continue
             if [ -d /media/l2/l2/wifi ]; then use_pack /media/l2/l2/wifi; return 0; fi
@@ -73,13 +74,31 @@ use_pack() {
 }
 
 # Load only modules whose alias matches a device that exists.
-load_modules() {
-    [ -f "/lib/modules/$KREL/modules.alias" ] || return 0
-    for f in /sys/bus/pci/devices/*/modalias /sys/bus/usb/devices/*/modalias; do
+# Two passes: host/platform buses first (creates i2c/hid/usb child buses),
+# then child buses.
+probe_modaliases() {
+    _list=""
+    for f in "$@"; do
         [ -r "$f" ] || continue
         read -r a < "$f" || continue
-        modprobe -q "$a" 2>/dev/null
+        [ -n "$a" ] || continue
+        case " $_list " in
+            *" $a "*) ;;
+            *) _list="$_list $a" ;;
+        esac
     done
+    # shellcheck disable=SC2086
+    [ -n "$_list" ] && modprobe -a -q $_list 2>/dev/null
+    return 0
+}
+
+load_modules() {
+    [ -f "/lib/modules/$KREL/modules.alias" ] || return 0
+    probe_modaliases /sys/bus/pci/devices/*/modalias /sys/bus/usb/devices/*/modalias \
+                     /sys/bus/acpi/devices/*/modalias /sys/bus/platform/devices/*/modalias
+    probe_modaliases /sys/bus/i2c/devices/*/modalias /sys/bus/hid/devices/*/modalias \
+                     /sys/bus/usb/devices/*/modalias
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
     return 0
 }
 
@@ -185,6 +204,7 @@ status() {
         ip -o -4 addr show dev "$n" 2>/dev/null | while read -r _ _ _ a _; do printf '%s ' "$a"; done
         echo
     done
+    ip -4 route show default 2>/dev/null | sed 's/^/route: /'
     [ -f /etc/resolv.conf ] && sed -n 's/^nameserver /dns: /p' /etc/resolv.conf
 }
 
@@ -192,8 +212,15 @@ boot() {
     # Idle-RAM: the default VM watermarks scale with installed RAM and are
     # subtracted from MemAvailable.  A tiny, mostly-idle system needs only a
     # small reserve; keep it low so the idle footprint stays under budget.
-    echo 1 > /proc/sys/vm/watermark_scale_factor 2>/dev/null
-    echo 256 > /proc/sys/vm/min_free_kbytes 2>/dev/null
+    echo 0 > /proc/sys/vm/watermark_scale_factor 2>/dev/null || \
+        echo 1 > /proc/sys/vm/watermark_scale_factor 2>/dev/null
+    echo 128 > /proc/sys/vm/min_free_kbytes 2>/dev/null
+    # On >=4 GiB x86_64 systems, default lowmem_reserve_ratio (256 32 0) reserves
+    # 1/256 of ZONE_NORMAL in ZONE_DMA32 (~3.8 MiB at 4G, ~52 MiB at 16G), which
+    # is subtracted from MemAvailable.  64-bit DMA + dynamic SWIOTLB covers legacy
+    # devices without locking away tens of MiB of DMA32.
+    echo '0 0 0' > /proc/sys/vm/lowmem_reserve_ratio 2>/dev/null
+    echo 100000 > /proc/sys/vm/percpu_pagelist_high_fraction 2>/dev/null
     ip link set lo up 2>/dev/null
     mkdir -p /run /media/l2
     unblock
@@ -201,15 +228,39 @@ boot() {
     # actually present, matched by modalias.  Nothing is loaded at idle otherwise.
     find_pack >/dev/null 2>&1 && load_modules
     if [ "$ETH" != off ]; then
+        _pending=""
         for i in $(eth_ifaces); do
             ip link set "$i" up 2>/dev/null
-            sleep 2                                    # carrier takes a moment
-            [ "$(cat "/sys/class/net/$i/carrier" 2>/dev/null)" = 1 ] && dhcp "$i"
+            _pending="$_pending $i"
         done
+        if [ -n "$_pending" ]; then
+            _n=0
+            while [ "$_n" -lt 15 ] && [ -n "$_pending" ]; do
+                _next=""
+                for i in $_pending; do
+                    if [ "$(cat "/sys/class/net/$i/carrier" 2>/dev/null)" = 1 ]; then
+                        dhcp "$i"
+                    else
+                        _next="$_next $i"
+                    fi
+                done
+                _pending=${_next# }
+                [ -n "$_pending" ] || break
+                sleep 0.2 2>/dev/null || { sleep 1; _n=$((_n + 4)); }
+                _n=$((_n + 1))
+            done
+            for i in $_pending; do
+                ip link set "$i" down 2>/dev/null
+            done
+        fi
     fi
     if [ "$WIFI" != off ] && grep -qs '^network=' "$CONF" 2>/dev/null; then
         wifi_start
     fi
+    # Drop one-shot boot page cache (ISO/module reads), drain PCP lists, and sync vmstat.
+    echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
+    echo 100000 > /proc/sys/vm/percpu_pagelist_high_fraction 2>/dev/null
+    echo 1 > /proc/sys/vm/stat_refresh 2>/dev/null
     return 0
 }
 

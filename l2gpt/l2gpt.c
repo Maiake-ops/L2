@@ -364,14 +364,28 @@ static uint64_t size_sectors(const char *s) {
     return parse_u64(s);
 }
 
+/* Strict partition number parse: 1..NPARTS, digits only, no trailing chars. */
+static int parse_part_num(const char *s, size_t len) {
+    if (len == 0) die("bad partition number: ''");
+    unsigned long v = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (s[i] < '0' || s[i] > '9')
+            die("bad partition number: %.*s", (int)len, s);
+        v = v * 10 + (unsigned long)(s[i] - '0');
+        if (v > NPARTS)
+            die("partition number out of range: %.*s", (int)len, s);
+    }
+    if (v < 1) die("partition number out of range: %.*s", (int)len, s);
+    return (int)v;
+}
+
 static void op_new(const char *arg) {
     char *tmp = strdup(arg);
     if (!tmp) die("out of memory");
     char *ns = tmp, *ss = strchr(tmp, ':'), *es = ss ? strchr(ss + 1, ':') : NULL;
     if (!ss || !es) die("bad -n argument: %s (want N:START:END)", arg);
     *ss++ = 0; *es++ = 0;
-    int n = atoi(ns);
-    if (n < 1 || n > NPARTS) die("partition number out of range: %s", ns);
+    int n = parse_part_num(ns, strlen(ns));
     n--;
     if (!have_gpt) new_gpt();
     if (part_used(n)) die("partition %d already exists", n + 1);
@@ -380,10 +394,18 @@ static void op_new(const char *arg) {
                     es[0] == '+' ? size_sectors(es + 1) : size_sectors(es);
     uint64_t start = strcmp(ss, "0") == 0 ? first_free(need) : size_sectors(ss);
     if (start < FIRST_USE) start = FIRST_USE;
+    if (start > last_use)
+        die("start sector %llu past last usable sector %llu",
+            (unsigned long long)start, (unsigned long long)last_use);
     uint64_t end;
     if (strcmp(es, "0") == 0) end = last_use;
-    else if (es[0] == '+') end = start + size_sectors(es + 1) - 1;
-    else end = size_sectors(es);
+    else if (es[0] == '+') {
+        uint64_t sz = size_sectors(es + 1);
+        if (sz == 0) die("partition size cannot be zero");
+        end = (sz - 1 > last_use - start) ? last_use : start + sz - 1;
+    } else {
+        end = size_sectors(es);
+    }
     if (end > last_use) end = last_use;
     if (start > end || start < FIRST_USE)
         die("invalid partition range %llu..%llu", (unsigned long long)start, (unsigned long long)end);
@@ -418,8 +440,8 @@ static const struct typecode types[] = {
 static int part_no(const char *arg, const char *opt) {
     const char *colon = strchr(arg, ':');
     if (!colon) die("bad -%s argument: %s (want N:VALUE)", opt, arg);
-    int n = atoi(arg);
-    if (n < 1 || n > NPARTS || !part_used(n - 1))
+    int n = parse_part_num(arg, (size_t)(colon - arg));
+    if (!part_used(n - 1))
         die("no such partition: %.*s", (int)(colon - arg), arg);
     return n - 1;
 }
@@ -571,7 +593,7 @@ int main(int argc, char **argv) {
         if (strcmp(a, "--zap-all") == 0) { do_zap = 1; continue; }
         if (strcmp(a, "-p") == 0) { do_print = 1; continue; }
         if (strcmp(a, "-v") == 0) { do_verify = 1; continue; }
-        if (strcmp(a, "-i") == 0) { if (++i >= argc) die("-i needs an argument"); info_n = atoi(argv[i]); continue; }
+        if (strcmp(a, "-i") == 0) { if (++i >= argc) die("-i needs an argument"); info_n = parse_part_num(argv[i], strlen(argv[i])); continue; }
         if (a[1] && strchr("ntcuU", a[1]) && !a[2]) {
             if (++i >= argc) die("%s needs an argument", a);
             continue;                   /* applied in the second pass below */

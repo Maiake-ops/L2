@@ -12,8 +12,11 @@ with an X server and xinit installed. Do not run alongside another WM.
 `make -C l2wm test` tests the Rust layout without X11 dependencies.
 
 Super+Return launches xterm (override the executable with L2WM_TERMINAL).
-Super+j/k changes focus, Super+q closes the focused client, and Super+Escape
-exits. Pointer entry also changes focus. Num Lock assumes the usual Mod2 mapping.
+Super+j/k changes focus (active windows have a `#7ebae4` border), Super+m swaps
+the focused window into the master slot, Super+h/l resizes the master split,
+Super+f toggles monocle (fullscreen) layout, Super+q closes the focused client,
+and Super+Escape exits. Pointer entry also changes focus. Num Lock assumes the
+usual Mod2 mapping.
 
 ## Optional L2 integration
 

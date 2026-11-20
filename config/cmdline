@@ -1,1 +1,1 @@
-loglevel=4 dhash_entries=8192 ihash_entries=8192 mhash_entries=512 mphash_entries=512 thash_entries=256 uhash_entries=128
+loglevel=4 dhash_entries=2048 ihash_entries=2048 mhash_entries=128 mphash_entries=128 thash_entries=128 uhash_entries=128

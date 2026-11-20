@@ -213,7 +213,7 @@ lock_get() {
 
 lock_set() {
     local k=$1 v=$2 tmp
-    tmp=$(mktemp)
+    tmp=$(mktemp "$LOCK.XXXXXX")
     if [ -r "$LOCK" ]; then
         awk -F= -v k="$k" -v v="$v" '
             BEGIN { done = 0 }
@@ -224,7 +224,8 @@ lock_set() {
     else
         printf '%s=%s\n' "$k" "$v" > "$tmp"
     fi
-    mv "$tmp" "$LOCK"
+    chmod 0644 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$LOCK"
 }
 
 init_epoch() {
@@ -536,6 +537,60 @@ build_headers() {
     job_end 0
 }
 
+check_kernel_dropped() {
+    local cfg=${1:-$OUT/kernel.config}
+    [ -f "$cfg" ] || return 0
+    local frags=("$L2_ROOT/config/kernel.fragment")
+    [ -s "$KLOCAL" ] && frags+=("$KLOCAL")
+    local dropped=$LOGS/kernel-dropped.txt
+    mkdir -p "$LOGS"
+    awk '
+        FNR == NR {
+            if ($0 ~ /^CONFIG_[A-Za-z0-9_]+=/) {
+                eq = index($0, "=")
+                s = substr($0, 1, eq - 1)
+                got[s] = substr($0, eq + 1)
+            } else if ($0 ~ /^# CONFIG_[A-Za-z0-9_]+ is not set$/) {
+                s = $2
+                got[s] = "n"
+            }
+            next
+        }
+        {
+            sub(/[[:space:]]+$/, "")
+            if ($0 ~ /^# CONFIG_[A-Za-z0-9_]+ is not set$/) {
+                s = $2
+                if (!(s in want)) order[++n] = s
+                want[s] = "n"
+                next
+            }
+            sub(/[[:space:]]+#.*/, "")
+            sub(/[[:space:]]+$/, "")
+            if ($0 ~ /^CONFIG_[A-Za-z0-9_]+=/) {
+                eq = index($0, "=")
+                s = substr($0, 1, eq - 1)
+                v = substr($0, eq + 1)
+                if (!(s in want)) order[++n] = s
+                want[s] = v
+            }
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                s = order[i]
+                v = want[s]
+                if (v == "n") {
+                    if (s in got && got[s] != "n")
+                        printf "%s=n (got %s)\n", s, got[s]
+                } else {
+                    g = (s in got) ? got[s] : "absent"
+                    if (g != v)
+                        printf "%s=%s (got %s)\n", s, v, g
+                }
+            }
+        }
+    ' "$cfg" "${frags[@]}" > "$dropped"
+}
+
 build_kernel() {
     init_epoch
     if [ "$DISTRO" = nixos ]; then
@@ -556,31 +611,34 @@ build_kernel() {
     rm -rf "$dir"; mkdir -p "$SRC"
     step "Extracting linux $ver"
     tar -xf "$CACHE/linux-$ver.tar.xz" -C "$SRC"
+    python3 "$L2_ROOT/tools/patch-kernel-ram.py" "$dir" || die "kernel RAM patch failed"
     log=$LOGS/kernel.log
     stamp=$(date -u -d "@$EPOCH" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '2026-01-01 00:00:00')
     local frags=("$L2_ROOT/config/kernel.fragment")
     [ -s "$KLOCAL" ] && frags+=("$KLOCAL")
     [ -s "$KLOCAL" ] && say "applying local overrides: $KLOCAL"
+    local norm_frags=() f nf i=0
+    for f in "${frags[@]}"; do
+        nf=$dir/.l2-frag-$i
+        sed -E 's/^(CONFIG_[A-Za-z0-9_]+)=n([[:space:]]*(#.*)?)$/# \1 is not set/' "$f" > "$nf"
+        norm_frags+=("$nf")
+        i=$((i + 1))
+    done
     job_begin "Configuring linux $ver (tinyconfig + L2 fragment)" "$log"
     if ! (
         cd "$dir"
         export KBUILD_BUILD_TIMESTAMP="$stamp" KBUILD_BUILD_USER=l2 KBUILD_BUILD_HOST=l2 KBUILD_BUILD_VERSION=1
         make tinyconfig
-        scripts/kconfig/merge_config.sh -m .config "${frags[@]}" >/dev/null 2>&1 \
-            || cat "${frags[@]}" >> .config
+        scripts/kconfig/merge_config.sh -m .config "${norm_frags[@]}" >/dev/null 2>&1 \
+            || cat "${norm_frags[@]}" >> .config
         make olddefconfig
         scripts/config --set-str LOCALVERSION "-l2" 2>/dev/null || true
-    ) >"$log" 2>&1; then job_end 1; ui_logtail "$log" 60; die "kernel configure failed (log: $log)"; fi
+    ) >"$log" 2>&1; then rm -f "${norm_frags[@]}"; job_end 1; ui_logtail "$log" 60; die "kernel configure failed (log: $log)"; fi
+    rm -f "${norm_frags[@]}"
     job_end 0
     # symbols that did not survive olddefconfig (renamed, missing dependency)
-    local dropped=$LOGS/kernel-dropped.txt s v want got
-    : > "$dropped"
-    while IFS='=' read -r s v; do
-        case "$s" in CONFIG_*) ;; *) continue ;; esac
-        [ "$v" = n ] && continue
-        got=$(sed -n "s/^$s=//p" "$dir/.config")
-        [ "$got" = "$v" ] || printf '%s=%s (got %s)\n' "$s" "$v" "${got:-absent}" >> "$dropped"
-    done < <(cat "${frags[@]}")
+    check_kernel_dropped "$dir/.config"
+    local dropped=$LOGS/kernel-dropped.txt
     if [ -s "$dropped" ]; then
         warn "$(wc -l < "$dropped") fragment symbols were dropped or changed by this kernel (see $dropped)"
         head -n 6 "$dropped" | sed 's/^/    /' >&2
@@ -634,8 +692,8 @@ build_dash() {
     if ! (
         cd "$dir"
         ./configure --prefix=/usr --bindir=/bin --sysconfdir=/etc --localstatedir=/var \
-            CC="$cc" CFLAGS="-static -Os -ffile-prefix-map=$PWD=. -fdebug-prefix-map=$PWD=." \
-            LDFLAGS="-static"
+            CC="$cc" CFLAGS="-static -Os -ffunction-sections -fdata-sections -ffile-prefix-map=$PWD=. -fdebug-prefix-map=$PWD=." \
+            LDFLAGS="-static -Wl,--gc-sections"
         make -j"$JOBS" -l"$LOAD"
     ) >"$log" 2>&1; then
         job_end 1; ui_logtail "$log" 60
@@ -643,6 +701,7 @@ build_dash() {
     fi
     job_end 0
     install -m 0755 "$dir/src/dash" "$OUT/dash"
+    have strip && strip -s "$OUT/dash" 2>/dev/null || true
     say "dash: $OUT/dash ($(stat -c%s "$OUT/dash") bytes)"
 }
 
@@ -677,7 +736,7 @@ build_l2pm() {
     cc=$(musl_cc)
     job_begin "Building l2pm (static, -Os)" "$log"
     if ! (
-        "$cc" -std=c11 -Os -static \
+        "$cc" -std=c11 -Os -static -ffunction-sections -fdata-sections -Wl,--gc-sections -Wall -Wextra \
             -ffile-prefix-map="$L2_ROOT/l2pm=/l2/src/l2pm" \
             -fdebug-prefix-map="$L2_ROOT/l2pm=/l2/src/l2pm" \
             -o "$OUT/l2pm" "$L2_ROOT/l2pm/l2pm.c"
@@ -736,7 +795,7 @@ BB_APPLETS="AWK BASENAME BB_ARCH BLKID CAL CAT CHGRP CHMOD CHOWN CHROOT CLEAR CM
     FEATURE_IP_ADDRESS FEATURE_IP_LINK FEATURE_IP_ROUTE
     FEATURE_MODUTILS_ALIAS FEATURE_MOUNT_FLAGS FEATURE_MOUNT_FSTAB FEATURE_MOUNT_LOOP
     FEATURE_FDISK_WRITABLE FEATURE_FANCY_SLEEP FEATURE_GREP_CONTEXT FEATURE_UTMP
-    FEATURE_PS_WIDE FEATURE_PS_LONG FEATURE_TOP_CPU_USAGE_PERCENTAGE FEATURE_SEAMLESS_GZ
+    FEATURE_PS_WIDE FEATURE_PS_LONG FEATURE_TOP_CPU_USAGE_PERCENTAGE FEATURE_SEAMLESS_GZ FEATURE_SEAMLESS_XZ
     FEATURE_TAR_CREATE FEATURE_TAR_AUTODETECT"
 build_busybox() {
     init_epoch; build_headers
@@ -749,6 +808,10 @@ build_busybox() {
     job_begin "Building busybox $ver (core toolset + udhcpc ip modprobe mount fdisk)" "$log"
     if ! (
         cd "$dir"
+        # Skip finit_module on compressed modules (.ko.xz/.ko.gz) so the kernel
+        # does not log "Invalid ELF header magic" before userland decompression.
+        sed -i 's#int fd = open(filename, O_RDONLY | O_CLOEXEC);#int fd = is_suffixed_with(filename, ".ko") ? open(filename, O_RDONLY | O_CLOEXEC) : -1;#' modutils/modutils.c
+        grep -q 'is_suffixed_with(filename, ".ko")' modutils/modutils.c || { echo "busybox: modutils.c finit_module patch did not match" >&2; exit 1; }
         make allnoconfig
         # busybox kconfig IGNORES duplicate assignments, so appending over the
         # allnoconfig lines silently loses them.  Replace each line in place;
@@ -781,6 +844,12 @@ CONFIG_FEATURE_DEFAULT_PASSWD_ALGO="sha512"
 CONFIG_LAST_ID=60000
 CONFIG_FIRST_SYSTEM_ID=100
 CONFIG_LAST_SYSTEM_ID=999
+CONFIG_DEFAULT_MODULES_DIR="/lib/modules"
+CONFIG_DEFAULT_DEPMOD_FILE="modules.dep"
+CONFIG_FEATURE_LESS_MAXLINES=9999999
+CONFIG_UDHCPC_DEFAULT_SCRIPT="/etc/l2/udhcpc.script"
+CONFIG_UDHCPC_DEFAULT_INTERFACE="eth0"
+CONFIG_UNAME_OSNAME="GNU/Linux"
 $(for a in $BB_APPLETS; do printf 'CONFIG_%s=y\n' "$a"; done)
 CFG
         yes "" | make oldconfig >/dev/null
@@ -789,6 +858,7 @@ CFG
             grep -q "^CONFIG_$a=y" .config || missing="$missing $a"
         done
         [ -z "$missing" ] || { echo "busybox: dropped by oldconfig:$missing" >&2; exit 1; }
+        grep -q '^CONFIG_DEFAULT_MODULES_DIR="/lib/modules"' .config || { echo "busybox: DEFAULT_MODULES_DIR lost" >&2; exit 1; }
         make -j"$JOBS" -l"$LOAD" CC="$cc" HOSTCC="${HOST_CC:-cc}" SKIP_STRIP=y \
             EXTRA_CFLAGS="-Os -ffile-prefix-map=$PWD=." LDFLAGS=-static busybox
     ) >"$log" 2>&1; then job_end 1; ui_logtail "$log" 60; die "busybox build failed (log: $log)"; fi
@@ -868,7 +938,7 @@ build_l2wifi() {
     local cc log=$LOGS/l2wifi.log
     cc=$(musl_cc)
     job_begin "Building l2wifi (static C)" "$log"
-    if ! ( "$cc" -std=c11 -Os -static -Wno-format-truncation \
+    if ! ( "$cc" -std=c11 -Os -static -ffunction-sections -fdata-sections -Wl,--gc-sections -Wno-format-truncation \
             -o "$OUT/l2wifi" "$L2_ROOT/l2wifi/l2wifi.c" && strip -s "$OUT/l2wifi" 2>/dev/null; ) >"$log" 2>&1; then
         job_end 1; ui_logtail "$log"; die "l2wifi build failed"
     fi
@@ -1023,7 +1093,7 @@ build_firmware() {
     # xz-compress (kernel FW_LOADER_COMPRESS_XZ); regulatory.db must stay plain
     if [ "${L2_FW_COMPRESS:-1}" = 1 ] && have xz; then
         find "$dest" -type f ! -name 'regulatory.db*' ! -name '*.xz' ! -name '*.zst' \
-            -exec xz -9e --check=crc32 -f {} + 2>>"$log" || warn "some firmware could not be compressed"
+            -exec xz --lzma2=preset=9e,dict=256KiB --check=crc32 -f {} + 2>>"$log" || warn "some firmware could not be compressed"
     fi
     find "$dest" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
     [ "$n" -gt 0 ] || warn "no firmware matched in $root (families: $fams)"
@@ -1040,6 +1110,10 @@ build_wifipack() {
     [ -d "$BUILD/modroot/lib/modules/$krel" ] || die "no modules built (CONFIG_MODULES?) - run: l2 build kernel"
     rm -rf "$w"; mkdir -p "$w/bin" "$w/lib/modules" "$w/lib/firmware"
     cp -a "$BUILD/modroot/lib/modules/$krel" "$w/lib/modules/"
+    if [ "${L2_MOD_COMPRESS:-1}" = 1 ] && have xz && depmod --version 2>/dev/null | grep -q '+XZ'; then
+        find "$w/lib/modules/$krel/kernel" -name '*.ko' -exec xz --lzma2=preset=9e,dict=256KiB --check=crc32 -f {} +
+        depmod -b "$w" "$krel" || die "depmod failed on wifipack"
+    fi
     [ -d "$BUILD/firmware" ] && cp -a "$BUILD/firmware/." "$w/lib/firmware/" || warn "no firmware tree (l2 build firmware): chips that need firmware will not work"
     local b
     for b in wpa_supplicant wpa_cli; do
@@ -1053,10 +1127,10 @@ build_wifipack() {
 # On-demand hardware drivers (I2C HID touchpads, exFAT, old USB, ACPI video).
 # Kept OUT of the RAM-resident initramfs and shipped on the medium (l2/hw) /
 # installed root, so they cost nothing at idle.  The wifi pack is a superset.
-HW_MODULE_DIRS="drivers/i2c drivers/hid drivers/usb/host drivers/acpi drivers/platform fs/exfat drivers/net/ethernet drivers/net/usb"
+HW_MODULE_DIRS="drivers/i2c drivers/hid drivers/usb/host drivers/usb/storage drivers/acpi drivers/platform fs/exfat drivers/net/ethernet drivers/net/usb"
 build_hwpack() {
     init_epoch
-    local krel w=$BUILD/hw d
+    local krel w=$BUILD/hw d dep
     krel=$(cat "$OUT/kernelrelease" 2>/dev/null) || die "kernel not built (no kernelrelease)"
     [ -d "$BUILD/modroot/lib/modules/$krel" ] || die "no modules built - run: l2 build kernel"
     rm -rf "$w"; mkdir -p "$w/lib/modules/$krel/kernel"
@@ -1067,8 +1141,52 @@ build_hwpack() {
             cp -a "$msrc/kernel/$d" "$mdst/kernel/$d"
         fi
     done
+    # Copy transitive dependencies (e.g. libphy/mdio_bus for r8169, mii for usbnet).
+    if [ -f "$msrc/modules.dep" ]; then
+        while IFS= read -r dep; do
+            [ -f "$msrc/$dep" ] || continue
+            if [ ! -f "$mdst/$dep" ]; then
+                mkdir -p "$mdst/$(dirname "$dep")"
+                cp -a "$msrc/$dep" "$mdst/$dep"
+            fi
+        done < <(awk -F: '
+            NR == FNR { have[$0] = 1; q[++qn] = $0; next }
+            {
+                mod = $1
+                sub(/^[ \t]+/, "", $2)
+                deps[mod] = $2
+            }
+            END {
+                i = 1
+                while (i <= qn) {
+                    n = split(deps[q[i]], a, /[ \t]+/)
+                    for (j = 1; j <= n; j++) {
+                        if (a[j] != "" && !(a[j] in have)) {
+                            have[a[j]] = 1
+                            q[++qn] = a[j]
+                            print a[j]
+                        }
+                    }
+                    i++
+                }
+            }
+        ' <(cd "$mdst" && find kernel -name '*.ko') "$msrc/modules.dep")
+    fi
     cp -a "$msrc"/modules.builtin "$msrc"/modules.order "$mdst/" 2>/dev/null || true
-    have depmod && depmod -b "$w" "$krel" 2>/dev/null || true
+    if [ "${L2_MOD_COMPRESS:-1}" = 1 ] && have xz && depmod --version 2>/dev/null | grep -q '+XZ'; then
+        find "$mdst/kernel" -name '*.ko' -exec xz --lzma2=preset=9e,dict=256KiB --check=crc32 -f {} +
+    fi
+    if have depmod; then
+        depmod -b "$w" "$krel" || die "depmod failed on hwpack"
+    fi
+    if [ -f "$mdst/modules.dep" ]; then
+        local mod_re
+        for mod_re in 'r8169\.ko(\.xz)?:' 'usbnet\.ko(\.xz)?:'; do
+            if grep -Eq "$mod_re" "$mdst/modules.dep" && ! grep -Eq "${mod_re}[ \t]*[^ \t]" "$mdst/modules.dep"; then
+                die "hwpack modules.dep missing dependencies for $mod_re"
+            fi
+        done
+    fi
     find "$w" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
     say "hw pack: $(du -sk "$w" | awk '{print $1}') KiB  (on-demand hardware drivers)"
 }
@@ -1327,9 +1445,12 @@ build_rootfs() {
     rm -rf "$ROOTFS"
     mkdir -p "$ROOTFS"/{bin,etc,proc,sys,dev,tmp,run,root,boot,media/l2,lib/modules} \
              "$ROOTFS"/usr \
-             "$ROOTFS"/l2/{store,var/db/installed,var/profiles/default,cache,src,recipes,lib} \
+             "$ROOTFS"/l2/{store,var/db/installed,var/profiles,cache,src,recipes,lib} \
              "$ROOTFS"/etc/l2 \
-             "$ROOTFS"/l2/var/profiles/default/{bin,sbin,usr/bin,usr/sbin}
+             "$ROOTFS"/l2/var/profiles/default-0-link/{bin,sbin,usr/bin,usr/sbin}
+    printf 'profile\n' > "$ROOTFS/l2/var/profiles/default-0-link/.l2pm-profile"
+    : > "$ROOTFS/l2/var/profiles/default-0-link/.l2pm-gen"
+    ln -s default-0-link "$ROOTFS/l2/var/profiles/default"
     ln -s bin "$ROOTFS/sbin"
     ln -s /l2/var/profiles/default/usr/bin "$ROOTFS/usr/bin"
     ln -s /l2/var/profiles/default/usr/sbin "$ROOTFS/usr/sbin"
@@ -1349,8 +1470,8 @@ build_rootfs() {
     for f in poweroff reboot halt; do ln -sf shutdown "$ROOTFS/bin/$f"; done
     install -m 0755 "$OUT/dash" "$ROOTFS/bin/dash"
     ln -sf dash "$ROOTFS/bin/sh"
-    install -m 0755 "$OUT/rcl2" "$ROOTFS/init"
     install -m 0755 "$OUT/rcl2" "$ROOTFS/bin/rcl2"
+    ln -sf bin/rcl2 "$ROOTFS/init"
     install -m 0755 "$OUT/l2pm" "$ROOTFS/bin/l2pm"
     install -m 0755 "$OUT/l2wifi" "$ROOTFS/bin/l2wifi"
     if [ "${L2_WITH_L2WM:-0}" = 1 ]; then
@@ -1379,6 +1500,7 @@ root:x:0:0:root:/root:/bin/dash
 PW
     printf 'root:x:0:\n' > "$ROOTFS/etc/group"
     printf 'L2\n' > "$ROOTFS/etc/hostname"
+    printf '127.0.0.1 localhost L2\n::1 localhost\n' > "$ROOTFS/etc/hosts"
     cat > "$ROOTFS/etc/profile" <<'PF'
 export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export PS1='L2# '
@@ -1553,7 +1675,7 @@ _make_iso() {
 build_iso() {
     init_epoch
     local out=${1:-$OUT/l2.iso}
-    step "Core ISO (kernel + initramfs + ssl pack on the medium, no wifi pack)"
+    step "Core ISO (kernel + initramfs + hw/install packs, no wifi pack)"
     _make_iso "$out" "$L2_ISO_LIMIT_MB" core 0
     if [ -d "$BUILD/wifi" ] && [ -z "${1:-}" ]; then
         step "Wi-Fi ISO (same RAM footprint; modules + firmware stay on the medium)"
@@ -1755,6 +1877,7 @@ doctor() {
     printf '\n'
     deps_check || true
     printf '\n'; dashboard
+    check_kernel_dropped "$OUT/kernel.config"
     if [ -s "$LOGS/kernel-dropped.txt" ]; then
         warn "kernel symbols dropped by olddefconfig (hardware support may be missing):"
         sed 's/^/    /' "$LOGS/kernel-dropped.txt" >&2
@@ -1830,8 +1953,9 @@ usage:
   l2                          interactive menu
   l2 deps [install|check]     distro dependency installer / checker
   l2 build [all|COMP...]      components: musl headers kernel busybox dash
-                              rcl2 l2pm l2wifi libnl wpa openssl firmware wifipack limine
-                              l2gpt e2fsprogs dosfstools installpack rootfs initramfs iso
+                              rcl2 l2pm l2wifi l2wm desktop libnl wpa openssl
+                              firmware wifipack hwpack limine l2gpt e2fsprogs
+                              dosfstools installpack rootfs initramfs iso
   l2 kernel [menu|set CONFIG_X=v ...|show|reset]
                               kernel settings (config/kernel.local)
   l2 iso [out.iso]            core ISO (<${L2_ISO_LIMIT_MB} MiB) and, if a wifi pack exists, l2-wifi.iso

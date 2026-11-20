@@ -52,7 +52,11 @@ for event in /sys/class/input/event*; do
     [ -r "$event/device/capabilities/ev" ] || continue
     read -r ev < "$event/device/capabilities/ev"
     key=0
-    for word in $(cat "$event/device/capabilities/key"); do key=$word; done
+    if [ -r "$event/device/capabilities/key" ]; then
+        for word in $(cat "$event/device/capabilities/key"); do key=$word; done
+    fi
+    case "$ev" in ''|*[!0-9a-fA-F]*) ev=0 ;; esac
+    case "$key" in ''|*[!0-9a-fA-F]*) key=0 ;; esac
     kind=
     # KEY_A is bit 30 in the lowest word; EV_REL/EV_ABS mark pointers.
     if [ "$((0x$key & 0x40000000))" -ne 0 ]; then kind=Keyboard

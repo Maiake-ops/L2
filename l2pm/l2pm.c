@@ -180,22 +180,45 @@ static int rm_rf(const char *path)
     return unlink(path);
 }
 
-static int write_file(const char *path, const void *buf, size_t n)
+static int write_all(int fd, const void *buf, size_t n)
 {
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    if (fd < 0) return -1;
     const unsigned char *p = buf;
     while (n) {
         ssize_t w = write(fd, p, n);
         if (w < 0) {
             if (errno == EINTR) continue;
-            close(fd);
             return -1;
         }
+        if (w == 0) return -1;
         p += (size_t)w;
         n -= (size_t)w;
     }
-    return close(fd);
+    return 0;
+}
+
+static int write_file(const char *path, const void *buf, size_t n)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return -1;
+    int rc = write_all(fd, buf, n);
+    if (close(fd) != 0 && rc == 0) rc = -1;
+    return rc;
+}
+
+static int write_file_atomic(const char *path, const void *buf, size_t n)
+{
+    const char *sl = strrchr(path, '/');
+    char *tmp;
+    if (!sl) tmp = fmt(".%s.tmp-%ld", path, (long)getpid());
+    else if (sl == path) tmp = fmt("/.%s.tmp-%ld", sl + 1, (long)getpid());
+    else tmp = fmt("%.*s/.%s.tmp-%ld", (int)(sl - path), path, sl + 1, (long)getpid());
+    if (write_file(tmp, buf, n) != 0 || rename(tmp, path) != 0) {
+        unlink(tmp);
+        free(tmp);
+        return -1;
+    }
+    free(tmp);
+    return 0;
 }
 
 /* Upper bound for metadata files (db entries, .l2pm/info, /proc files).
@@ -225,7 +248,7 @@ static char *read_small(const char *path)
 
 static int valid_name(const char *s)
 {
-    if (!s || !*s) return 0;
+    if (!s || !*s || s[0] == '.') return 0;
     for (; *s; s++)
         if (!isalnum((unsigned char)*s) && !strchr("._+-", *s)) return 0;
     return 1;
@@ -369,6 +392,21 @@ static int hash_file(const char *path, char out[65])
 
 struct pathlist { char **v; size_t n, cap; };
 
+static void pl_free(struct pathlist *l)
+{
+    for (size_t i = 0; i < l->n; i++) free(l->v[i]);
+    free(l->v);
+    l->v = NULL;
+    l->n = l->cap = 0;
+}
+
+static int pl_has(const struct pathlist *l, const char *s)
+{
+    for (size_t i = 0; i < l->n; i++)
+        if (!strcmp(l->v[i], s)) return 1;
+    return 0;
+}
+
 static void pl_add(struct pathlist *l, const char *s)
 {
     if (l->n == l->cap) {
@@ -437,6 +475,11 @@ static int tar_add_file(int fd, const char *base, const char *rel, long long epo
     char *full = fmt("%s/%s", base, rel);
     struct stat st;
     if (lstat(full, &st) != 0) { free(full); return -1; }
+    if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
+        fprintf(stderr, "l2pm: unsupported file type in archive: %s\n", full);
+        free(full);
+        return -1;
+    }
 
     char name[MAXREL];
     snprintf(name, sizeof(name), "%s%s", rel, S_ISDIR(st.st_mode) ? "/" : "");
@@ -447,8 +490,6 @@ static int tar_add_file(int fd, const char *base, const char *rel, long long epo
         return -1;
     }
 
-    /* Read the symlink target first so the header size and the payload
-     * always agree (and no uninitialized bytes reach the archive). */
     char *link = NULL;
     if (S_ISLNK(st.st_mode)) {
         link = xmalloc((size_t)st.st_size + 1);
@@ -461,8 +502,8 @@ static int tar_add_file(int fd, const char *base, const char *rel, long long epo
         }
     }
 
-    long long sz = S_ISREG(st.st_mode) ? (long long)st.st_size
-                 : S_ISLNK(st.st_mode) ? (long long)strlen(link) : 0;
+    /* USTAR symlinks (type '2') store target in linkname and have size 0. */
+    long long sz = S_ISREG(st.st_mode) ? (long long)st.st_size : 0;
     /* 11 octal digits is the ustar size field limit; put_octal would
      * silently truncate anything larger and produce a corrupt archive. */
     if (sz > 077777777777LL) {
@@ -495,7 +536,7 @@ static int tar_add_file(int fd, const char *base, const char *rel, long long epo
     hdr[154] = 0;
     hdr[155] = ' ';
 
-    if (write(fd, hdr, 512) != 512) { free(link); free(full); return -1; }
+    if (write_all(fd, hdr, 512) != 0) { free(link); free(full); return -1; }
 
     if (S_ISREG(st.st_mode)) {
         int in = open(full, O_RDONLY | O_CLOEXEC);
@@ -506,16 +547,15 @@ static int tar_add_file(int fd, const char *base, const char *rel, long long epo
             ssize_t r = read(in, buf, (size_t)(left < (long long)sizeof(buf) ? left : (long long)sizeof(buf)));
             if (r < 0) { if (errno == EINTR) continue; close(in); free(link); free(full); return -1; }
             if (r == 0) break;
-            if (write(fd, buf, (size_t)r) != r) { close(in); free(link); free(full); return -1; }
+            if (write_all(fd, buf, (size_t)r) != 0) { close(in); free(link); free(full); return -1; }
             left -= r;
         }
         close(in);
+        if (left != 0) { free(link); free(full); return -1; }
         char zero[512];
         memset(zero, 0, sizeof(zero));
         size_t pad = (size_t)((512 - (sz % 512)) % 512);
-        if (pad && write(fd, zero, pad) != (ssize_t)pad) { free(link); free(full); return -1; }
-    } else if (S_ISLNK(st.st_mode) && sz > 0) {
-        if (write(fd, link, (size_t)sz) != sz) { free(link); free(full); return -1; }
+        if (pad && write_all(fd, zero, pad) != 0) { free(link); free(full); return -1; }
     }
     free(link);
     free(full);
@@ -536,9 +576,9 @@ static int tar_dir(const char *dir, const char *out, long long epoch)
     if (rc == 0) {
         char zero[1024];
         memset(zero, 0, sizeof(zero));
-        if (write(fd, zero, sizeof(zero)) != (ssize_t)sizeof(zero)) rc = -1;
+        if (write_all(fd, zero, sizeof(zero)) != 0) rc = -1;
     }
-    close(fd);
+    if (close(fd) != 0 && rc == 0) rc = -1;
     for (size_t i = 0; i < l.n; i++) free(l.v[i]);
     free(l.v);
     if (rc != 0) unlink(out);
@@ -897,8 +937,10 @@ static int parse_recipe(const char *path, struct recipe *r)
     char *line = NULL;
     size_t cap = 0;
     ssize_t n;
+    size_t line_number = 0;
     while ((n = getline(&line, &cap, f)) >= 0) {
         (void)n;
+        line_number++;
         char *s = trim(line);
         if (!*s || *s == '#') continue;
         char *eq = strchr(s, '=');
@@ -906,18 +948,31 @@ static int parse_recipe(const char *path, struct recipe *r)
         *eq = 0;
         char *k = trim(s);
         char *v = trim(eq + 1);
-        if (!strcmp(k, "name")) snprintf(r->name, sizeof(r->name), "%s", v);
-        else if (!strcmp(k, "version")) snprintf(r->version, sizeof(r->version), "%s", v);
-        else if (!strcmp(k, "source")) snprintf(r->source, sizeof(r->source), "%s", v);
-        else if (!strcmp(k, "sha256")) snprintf(r->sha256, sizeof(r->sha256), "%s", v);
-        else if (!strcmp(k, "source_dir") || !strcmp(k, "srcdir")) snprintf(r->srcdir, sizeof(r->srcdir), "%s", v);
-        else if (!strcmp(k, "build")) snprintf(r->build, sizeof(r->build), "%s", v);
-        else if (!strcmp(k, "deps")) snprintf(r->deps, sizeof(r->deps), "%s", v);
+        char *dst = NULL;
+        size_t size = 0;
+        if (!strcmp(k, "name")) { dst = r->name; size = sizeof(r->name); }
+        else if (!strcmp(k, "version")) { dst = r->version; size = sizeof(r->version); }
+        else if (!strcmp(k, "source")) { dst = r->source; size = sizeof(r->source); }
+        else if (!strcmp(k, "sha256")) { dst = r->sha256; size = sizeof(r->sha256); }
+        else if (!strcmp(k, "source_dir") || !strcmp(k, "srcdir")) { dst = r->srcdir; size = sizeof(r->srcdir); }
+        else if (!strcmp(k, "build")) { dst = r->build; size = sizeof(r->build); }
+        else if (!strcmp(k, "deps")) { dst = r->deps; size = sizeof(r->deps); }
         else if (!strcmp(k, "epoch")) r->epoch = strtoll(v, NULL, 10);
-        else if (!strcmp(k, "repo")) snprintf(r->repo, sizeof(r->repo), "%s", v);
-        else if (!strcmp(k, "ref")) snprintf(r->ref, sizeof(r->ref), "%s", v);
-        else if (!strcmp(k, "compile")) snprintf(r->compile, sizeof(r->compile), "%s", v);
-        else if (!strcmp(k, "install")) snprintf(r->install, sizeof(r->install), "%s", v);
+        else if (!strcmp(k, "repo")) { dst = r->repo; size = sizeof(r->repo); }
+        else if (!strcmp(k, "ref")) { dst = r->ref; size = sizeof(r->ref); }
+        else if (!strcmp(k, "compile")) { dst = r->compile; size = sizeof(r->compile); }
+        else if (!strcmp(k, "install")) { dst = r->install; size = sizeof(r->install); }
+        if (dst) {
+            size_t len = strlen(v);
+            if (len >= size) {
+                fprintf(stderr, "l2pm: recipe %s:%zu: %s exceeds %zu bytes\n",
+                        path, line_number, k, size - 1);
+                free(line);
+                fclose(f);
+                return -1;
+            }
+            memcpy(dst, v, len + 1);
+        }
     }
     free(line);
     fclose(f);
@@ -1053,10 +1108,11 @@ static int fetch_source(const struct recipe *r, const char *cache, const char *s
         file = fmt("%s/%s", cache, base);
         if (access(file, R_OK) != 0) {
             char *q = shq(r->source);
+            char *qf = shq(file);
             char *cmd = fmt("curl -fL --retry 3 --connect-timeout 20 -o %s %s || wget -O %s %s",
-                            shq(file), q, shq(file), q);
+                            qf, q, qf, q);
             int rc = run_shell(cmd, NULL, 0);
-            free(cmd); free(q);
+            free(cmd); free(q); free(qf);
             if (rc != 0) { free(file); return -1; }
         }
     }
@@ -1173,9 +1229,10 @@ static int fetch_repo(const struct recipe *r, const char *cache, const char *src
     char *gdir = fmt("%s/git/%s", cache, r->name);
     struct stat st;
     if (stat(gdir, &st) != 0) {
-        char *cmd = fmt("git clone --quiet %s %s", shq(r->repo), shq(gdir));
+        char *qr = shq(r->repo), *qg = shq(gdir);
+        char *cmd = fmt("git clone --quiet %s %s", qr, qg);
         int rc = run_shell(cmd, NULL, 0);
-        free(cmd);
+        free(cmd); free(qr); free(qg);
         if (rc != 0) {
             fprintf(stderr, "l2pm: git clone failed: %s\n", r->repo);
             free(gdir);
@@ -1186,9 +1243,10 @@ static int fetch_repo(const struct recipe *r, const char *cache, const char *src
         if (run_shell("git fetch --quiet origin", gdir, 1) != 0)
             fprintf(stderr, "l2pm: git fetch failed; using the cached clone (offline?)\n");
     }
-    char *cmd = fmt("git checkout --quiet --detach %s", shq(r->ref));
+    char *qref = shq(r->ref);
+    char *cmd = fmt("git checkout --quiet --detach %s", qref);
     int rc = run_shell(cmd, gdir, 0);
-    free(cmd);
+    free(cmd); free(qref);
     if (rc != 0) {
         fprintf(stderr, "l2pm: git checkout of ref '%s' failed\n", r->ref);
         free(gdir);
@@ -1203,9 +1261,10 @@ static int fetch_repo(const struct recipe *r, const char *cache, const char *src
     char *gitmeta = fmt("%s/.git", srcdir);
     rm_rf(gitmeta);
     free(gitmeta);
-    cmd = fmt("find %s -exec touch -h -d @%lld {} +", shq(srcdir), r->epoch);
+    char *qs = shq(srcdir);
+    cmd = fmt("find %s -exec touch -h -d @%lld {} +", qs, r->epoch);
     rc = run_shell(cmd, NULL, 1);
-    free(cmd);
+    free(cmd); free(qs);
     free(gdir);
     if (rc != 0) {
         fprintf(stderr, "l2pm: mtime normalization failed\n");
@@ -1349,7 +1408,8 @@ static int db_write(const char *name, const char *version, const char *hash,
     int n = snprintf(buf, sizeof(buf),
                      "name=%s\nversion=%s\nhash=%s\nstore=%s\ndeps=%s\n",
                      name, version, hash, store, deps ? deps : "");
-    int rc = write_file(db, buf, (size_t)n);
+    if (n < 0 || (size_t)n >= sizeof(buf)) { free(db); return -1; }
+    int rc = write_file_atomic(db, buf, (size_t)n);
     free(db);
     return rc;
 }
@@ -1383,6 +1443,8 @@ static char **db_names(size_t *count)
         struct dirent *e;
         while ((e = readdir(d))) {
             if (e->d_name[0] == '.') continue;
+            size_t len = strlen(e->d_name);
+            if (len > 9 && !strcmp(e->d_name + len - 9, ".manifest")) continue;
             if (n == cap) { cap = cap ? cap * 2 : 16; v = xrealloc(v, cap * sizeof(*v)); }
             v[n++] = xstrdup(e->d_name);
         }
@@ -1397,6 +1459,110 @@ static char **db_names(size_t *count)
 static int cmp_db_name(const void *a, const void *b)
 {
     return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static int parse_deps_list(const char *deps_str, struct pathlist *out)
+{
+    if (!deps_str || !*deps_str) return 0;
+    char *copy = xstrdup(deps_str);
+    for (char *p = copy; *p; p++)
+        if (*p == ',') *p = ' ';
+    char *save = NULL;
+    for (char *tok = strtok_r(copy, " \t\r\n", &save); tok; tok = strtok_r(NULL, " \t\r\n", &save)) {
+        if (!valid_name(tok)) {
+            fprintf(stderr, "l2pm: invalid dependency name '%s'\n", tok);
+            free(copy);
+            return -1;
+        }
+        if (!pl_has(out, tok)) pl_add(out, tok);
+    }
+    free(copy);
+    return 0;
+}
+
+static int is_installed(const char *name)
+{
+    char *p = l2path("var/db/installed/%s", name);
+    int ok = access(p, F_OK) == 0;
+    free(p);
+    return ok;
+}
+
+static int manifest_collect(const char *store, struct pathlist *lines)
+{
+    struct pathlist paths = {0};
+    walk(store, "", &paths);
+    if (paths.n) qsort(paths.v, paths.n, sizeof(*paths.v), cmpstr);
+    for (size_t i = 0; i < paths.n; i++) {
+        const char *rel = paths.v[i];
+        char *full = fmt("%s/%s", store, rel);
+        struct stat st;
+        if (lstat(full, &st) != 0) {
+            free(full);
+            pl_free(&paths);
+            pl_free(lines);
+            return -1;
+        }
+        if (S_ISDIR(st.st_mode)) {
+            char *ln = fmt("D\t%s", rel);
+            pl_add(lines, ln);
+            free(ln);
+        } else if (S_ISLNK(st.st_mode)) {
+            char *tgt = xmalloc((size_t)st.st_size + 1);
+            ssize_t r = readlink(full, tgt, (size_t)st.st_size + 1);
+            if (r < 0) {
+                free(tgt); free(full);
+                pl_free(&paths); pl_free(lines);
+                return -1;
+            }
+            tgt[r] = 0;
+            char *ln = fmt("L\t%s\t%s", rel, tgt);
+            pl_add(lines, ln);
+            free(ln);
+            free(tgt);
+        } else if (S_ISREG(st.st_mode)) {
+            char hx[65];
+            if (hash_file(full, hx) != 0) {
+                free(full);
+                pl_free(&paths); pl_free(lines);
+                return -1;
+            }
+            char *ln = fmt("F\t%s\t%s", rel, hx);
+            pl_add(lines, ln);
+            free(ln);
+        } else {
+            free(full);
+            pl_free(&paths);
+            pl_free(lines);
+            return -1;
+        }
+        free(full);
+    }
+    pl_free(&paths);
+    return 0;
+}
+
+static int manifest_write(const char *name, const char *store)
+{
+    struct pathlist lines = {0};
+    if (manifest_collect(store, &lines) != 0) return -1;
+    size_t total = 0;
+    for (size_t i = 0; i < lines.n; i++) total += strlen(lines.v[i]) + 1;
+    char *buf = xmalloc(total + 1);
+    size_t off = 0;
+    for (size_t i = 0; i < lines.n; i++) {
+        size_t len = strlen(lines.v[i]);
+        memcpy(buf + off, lines.v[i], len);
+        off += len;
+        buf[off++] = '\n';
+    }
+    buf[off] = 0;
+    char *mp = l2path("var/db/installed/%s.manifest", name);
+    int rc = write_file_atomic(mp, buf, off);
+    free(mp);
+    free(buf);
+    pl_free(&lines);
+    return rc;
 }
 
 static int link_tree(const char *store, const char *profile)
@@ -1422,38 +1588,160 @@ static int link_tree(const char *store, const char *profile)
         }
         free(src); free(dst);
     }
-    for (size_t i = 0; i < l.n; i++) free(l.v[i]);
-    free(l.v);
+    pl_free(&l);
+    return rc;
+}
+
+static int parse_gen_for_profile(const char *entry, const char *profile, long *out_gen)
+{
+    size_t plen = strlen(profile);
+    size_t elen = strlen(entry);
+    if (elen <= plen + 6) return 0;
+    if (strncmp(entry, profile, plen) != 0 || entry[plen] != '-') return 0;
+    if (strcmp(entry + elen - 5, "-link") != 0) return 0;
+    const char *num = entry + plen + 1;
+    const char *end = entry + elen - 5;
+    if (num >= end) return 0;
+    for (const char *p = num; p < end; p++)
+        if (!isdigit((unsigned char)*p)) return 0;
+    char *tmp = xmalloc((size_t)(end - num) + 1);
+    memcpy(tmp, num, (size_t)(end - num));
+    tmp[end - num] = 0;
+    errno = 0;
+    long v = strtol(tmp, NULL, 10);
+    free(tmp);
+    if (errno == ERANGE || v < 0) return 0;
+    *out_gen = v;
+    return 1;
+}
+
+static int parse_any_gen_link(const char *entry, char **out_profile, long *out_gen)
+{
+    size_t elen = strlen(entry);
+    if (elen < 7 || strcmp(entry + elen - 5, "-link") != 0) return 0;
+    const char *end = entry + elen - 5;
+    const char *p = end;
+    while (p > entry && isdigit((unsigned char)p[-1])) p--;
+    if (p == end || p == entry || p[-1] != '-') return 0;
+    size_t plen = (size_t)((p - 1) - entry);
+    if (plen == 0) return 0;
+    char *prof = xmalloc(plen + 1);
+    memcpy(prof, entry, plen);
+    prof[plen] = 0;
+    if (!valid_name(prof)) { free(prof); return 0; }
+    long v = 0;
+    if (!parse_gen_for_profile(entry, prof, &v)) { free(prof); return 0; }
+    *out_profile = prof;
+    *out_gen = v;
+    return 1;
+}
+
+static int switch_profile_symlink(const char *pdir, const char *profile, const char *target_rel)
+{
+    char *tmp_lnk = fmt("%s/.%s.link-%ld", pdir, profile, (long)getpid());
+    unlink(tmp_lnk);
+    if (symlink(target_rel, tmp_lnk) != 0) {
+        free(tmp_lnk);
+        return -1;
+    }
+    char *cur = fmt("%s/%s", pdir, profile);
+    struct stat st;
+    int rc = 0;
+    if (lstat(cur, &st) == 0 && S_ISDIR(st.st_mode)) {
+        char *old = fmt("%s/.%s.old-%ld", pdir, profile, (long)getpid());
+        rm_rf(old);
+        if (rename(cur, old) != 0 || rename(tmp_lnk, cur) != 0) {
+            unlink(tmp_lnk);
+            rc = -1;
+        } else {
+            rm_rf(old);
+        }
+        free(old);
+    } else if (rename(tmp_lnk, cur) != 0) {
+        unlink(tmp_lnk);
+        rc = -1;
+    }
+    free(cur);
+    free(tmp_lnk);
     return rc;
 }
 
 static int rebuild_profile(const char *profile)
 {
     if (!valid_name(profile)) { fprintf(stderr, "l2pm: bad profile name\n"); return -1; }
-    char *dir = l2path("var/profiles/%s", profile);
-    rm_rf(dir);
-    if (mkdir_p(dir, 0755) != 0) { free(dir); return -1; }
+    char *pdir = l2path("var/profiles");
+    if (mkdir_p(pdir, 0755) != 0) { free(pdir); return -1; }
+
+    long max_gen = 0;
+    DIR *d = opendir(pdir);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            long g = 0;
+            if (parse_gen_for_profile(e->d_name, profile, &g) && g > max_gen)
+                max_gen = g;
+        }
+        closedir(d);
+    }
+    long next = max_gen + 1;
+
+    char *stage = fmt("%s/.%s-%ld-tmp-%ld", pdir, profile, next, (long)getpid());
+    rm_rf(stage);
+    if (mkdir_p(stage, 0755) != 0) { free(stage); free(pdir); return -1; }
+
     /* Stable PATH directories even before the first package is installed.
      * The L2 rootfs points /usr/bin at this tree. */
     const char *stddirs[] = { "bin", "sbin", "usr/bin", "usr/sbin", NULL };
     for (int i = 0; stddirs[i]; i++) {
-        char *p = fmt("%s/%s", dir, stddirs[i]);
+        char *p = fmt("%s/%s", stage, stddirs[i]);
         mkdir_p(p, 0755);
         free(p);
     }
+
+    char *genfile = fmt("%s/.l2pm-gen", stage);
+    FILE *gf = fopen(genfile, "w");
+    if (!gf) { free(genfile); rm_rf(stage); free(stage); free(pdir); return -1; }
+
     size_t n = 0;
     char **names = db_names(&n);
+    int rc = 0;
     for (size_t i = 0; i < n; i++) {
+        char *ver = db_get(names[i], "version");
+        char *hash = db_get(names[i], "hash");
         char *store = db_get(names[i], "store");
-        if (store) { link_tree(store, dir); free(store); }
+        char *deps = db_get(names[i], "deps");
+        if (store && link_tree(store, stage) != 0) rc = -1;
+        if (fprintf(gf, "%s\t%s\t%s\t%s\t%s\n",
+                    names[i],
+                    ver ? ver : "",
+                    hash ? hash : "",
+                    store ? store : "",
+                    deps ? deps : "") < 0) rc = -1;
+        free(ver); free(hash); free(store); free(deps);
         free(names[i]);
     }
     free(names);
-    char *marker = fmt("%s/.l2pm-profile", dir);
-    write_file(marker, "profile\n", 8);
+    if (fclose(gf) != 0) rc = -1;
+    free(genfile);
+
+    char *marker = fmt("%s/.l2pm-profile", stage);
+    if (write_file(marker, "profile\n", 8) != 0) rc = -1;
     free(marker);
-    free(dir);
-    return 0;
+
+    char *gen_rel = fmt("%s-%ld-link", profile, next);
+    char *gen_dir = fmt("%s/%s", pdir, gen_rel);
+    if (rc == 0) {
+        rm_rf(gen_dir);
+        if (rename(stage, gen_dir) != 0) rc = -1;
+    }
+    if (rc == 0 && switch_profile_symlink(pdir, profile, gen_rel) != 0) rc = -1;
+    if (rc != 0) rm_rf(stage);
+
+    free(gen_dir);
+    free(gen_rel);
+    free(stage);
+    free(pdir);
+    return rc;
 }
 
 /* ------------------------------------------------------------- commands */
@@ -1553,9 +1841,10 @@ static char *recipe_repo_fetch(const char *name)
         char *repo = l2path("var/recipe-repo");
         struct stat st;
         if (stat(repo, &st) != 0) {
-            char *cmd = fmt("git clone --quiet %s %s", shq(base), shq(repo));
+            char *qb = shq(base), *qr = shq(repo);
+            char *cmd = fmt("git clone --quiet %s %s", qb, qr);
             int rc = run_shell(cmd, NULL, 0);
-            free(cmd);
+            free(cmd); free(qb); free(qr);
             if (rc != 0) {
                 fprintf(stderr, "l2pm: cannot clone recipe repository %s\n", base);
                 free(repo); free(dest);
@@ -1571,9 +1860,10 @@ static char *recipe_repo_fetch(const char *name)
                 free(repo); free(dest);
                 return NULL;
             }
-            char *cmd = fmt("git checkout --quiet --detach %s", shq(ref));
+            char *qref = shq(ref);
+            char *cmd = fmt("git checkout --quiet --detach %s", qref);
             int rc = run_shell(cmd, repo, 0);
-            free(cmd);
+            free(cmd); free(qref);
             if (rc != 0) {
                 fprintf(stderr, "l2pm: recipe repo checkout of '%s' failed\n", ref);
                 free(repo); free(dest);
@@ -1590,9 +1880,10 @@ static char *recipe_repo_fetch(const char *name)
         char *src = fmt("%s/%s.recipe", repo, name);
         int have = access(src, R_OK) == 0;
         if (have) {
-            char *cp = fmt("cp %s %s", shq(src), shq(dest));
+            char *qs = shq(src), *qd = shq(dest);
+            char *cp = fmt("cp %s %s", qs, qd);
             int rc = run_shell(cp, NULL, 1);
-            free(cp);
+            free(cp); free(qs); free(qd);
             have = rc == 0;
         }
         free(src);
@@ -1624,9 +1915,9 @@ static char *recipe_repo_fetch(const char *name)
 }
 
 /* Resolve a recipe argument.  Local locations always win; a bare name that
- * is not found locally is looked up in L2PM_RECIPE_REPO (if set), and
- * *remote is set so the caller can apply the trust gate. */
-static char *resolve_recipe(const char *arg, int *remote)
+ * is not found locally is looked up in `from_dir` (for sibling dependencies)
+ * and then in L2PM_RECIPE_REPO (if set), setting *remote for trust gating. */
+static char *resolve_recipe_from(const char *arg, const char *from_dir, int *remote)
 {
     struct stat st;
     *remote = 0;
@@ -1656,9 +1947,19 @@ static char *resolve_recipe(const char *arg, int *remote)
     p = fmt("%s.recipe", arg);
     if (stat(p, &st) == 0 && S_ISREG(st.st_mode)) return p;
     free(p);
+    if (from_dir && *from_dir && !is_path) {
+        p = fmt("%s/%s.recipe", from_dir, arg);
+        if (stat(p, &st) == 0 && S_ISREG(st.st_mode)) return p;
+        free(p);
+    }
     p = recipe_repo_fetch(arg);
     if (p) { *remote = 1; return p; }
     return NULL;
+}
+
+static char *resolve_recipe(const char *arg, int *remote)
+{
+    return resolve_recipe_from(arg, NULL, remote);
 }
 
 static int cmd_build(int argc, char **argv)
@@ -1754,7 +2055,18 @@ static int install_tar(const char *file, const char *profile)
         free(tmp2);
     }
     free(tmp);
+    struct pathlist decl_deps = {0};
+    if (parse_deps_list(deps, &decl_deps) == 0) {
+        for (size_t i = 0; i < decl_deps.n; i++) {
+            if (strcmp(decl_deps.v[i], name) != 0 && !is_installed(decl_deps.v[i])) {
+                fprintf(stderr, "l2pm: warning: missing dependency '%s' for %s\n",
+                        decl_deps.v[i], name);
+            }
+        }
+    }
+    pl_free(&decl_deps);
     if (db_write(name, ver, hash, store, deps) != 0) { free(store); return 1; }
+    if (manifest_write(name, store) != 0) { free(store); return 1; }
     if (rebuild_profile(profile) != 0) { free(store); return 1; }
     printf("installed %s %s -> %s\n", name, ver, store);
     free(store);
@@ -1769,52 +2081,143 @@ static int cmd_install(int argc, char **argv)
         else if (!file) file = argv[i];
         else die("install: unexpected argument %s", argv[i]);
     }
+    if (!valid_name(profile)) die("install: bad profile name");
     if (!file) die("install: missing package");
     return install_tar(file, profile);
+}
+
+static int add_recipe_rec(const char *arg, const char *from_dir, const char *profile,
+                          int trust, int no_deps, struct pathlist *stack, int depth)
+{
+    if (depth > 32) {
+        fprintf(stderr, "l2pm: dependency depth limit exceeded at %s\n", arg);
+        return 1;
+    }
+    int remote = 0;
+    char *recipe_path = resolve_recipe_from(arg, from_dir, &remote);
+    if (!recipe_path) {
+        fprintf(stderr, "l2pm: add: recipe not found: %s\n", arg);
+        return 1;
+    }
+    struct recipe r;
+    if (parse_recipe(recipe_path, &r) != 0) { free(recipe_path); return 1; }
+    if (pl_has(stack, r.name)) {
+        fprintf(stderr, "l2pm: dependency cycle detected: %s\n", r.name);
+        free(recipe_path);
+        return 1;
+    }
+    ensure_layout();   /* trust store lives under var/ */
+    if (trust_gate(recipe_path, remote, trust) != 0) { free(recipe_path); return 1; }
+    free(recipe_path);
+
+    pl_add(stack, r.name);
+    if (!no_deps && r.deps[0]) {
+        struct pathlist deps = {0};
+        if (parse_deps_list(r.deps, &deps) != 0) {
+            pl_free(&deps);
+            free(stack->v[--stack->n]);
+            return 1;
+        }
+        for (size_t i = 0; i < deps.n; i++) {
+            const char *dep = deps.v[i];
+            if (pl_has(stack, dep)) {
+                fprintf(stderr, "l2pm: dependency cycle detected: %s\n", dep);
+                pl_free(&deps);
+                free(stack->v[--stack->n]);
+                return 1;
+            }
+            if (!is_installed(dep)) {
+                if (add_recipe_rec(dep, remote ? NULL : r.base, profile, trust, no_deps, stack, depth + 1) != 0) {
+                    pl_free(&deps);
+                    free(stack->v[--stack->n]);
+                    return 1;
+                }
+            }
+        }
+        pl_free(&deps);
+    }
+
+    char *cache = l2path("cache");
+    char *tar = fmt("%s/%s-%s.l2p", cache, r.name, r.version);
+    free(cache);
+    int rc = 0;
+    if (build_once(&r, tar) != 0) rc = 1;
+    if (rc == 0 && install_tar(tar, profile) != 0) rc = 1;
+    free(tar);
+    free(stack->v[--stack->n]);
+    return rc;
 }
 
 static int cmd_add(int argc, char **argv)
 {
     const char *arg = NULL, *profile = "default";
-    int trust = 0;
+    int trust = 0, no_deps = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile = argv[++i];
         else if (!strcmp(argv[i], "--trust")) trust = 1;
+        else if (!strcmp(argv[i], "--no-deps")) no_deps = 1;
         else if (!arg) arg = argv[i];
         else die("add: unexpected argument %s", argv[i]);
     }
+    if (!valid_name(profile)) die("add: bad profile name");
     if (!arg) die("add: missing recipe");
-    int remote = 0;
-    char *recipe_path = resolve_recipe(arg, &remote);
-    if (!recipe_path) die("add: recipe not found: %s", arg);
-    struct recipe r;
-    if (parse_recipe(recipe_path, &r) != 0) { free(recipe_path); return 1; }
-    ensure_layout();   /* trust store lives under var/ */
-    if (trust_gate(recipe_path, remote, trust) != 0) { free(recipe_path); return 1; }
-    free(recipe_path);
-    char *cache = l2path("cache");
-    char *tar = fmt("%s/%s-%s.l2p", cache, r.name, r.version);
-    free(cache);
-    if (build_once(&r, tar) != 0) { free(tar); return 1; }
-    int rc = install_tar(tar, profile);
-    free(tar);
+    struct pathlist stack = {0};
+    int rc = add_recipe_rec(arg, NULL, profile, trust, no_deps, &stack, 0);
+    pl_free(&stack);
     return rc;
 }
 
 static int cmd_remove(int argc, char **argv)
 {
     const char *name = NULL, *profile = "default";
+    int force = 0;
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile = argv[++i];
+        else if (!strcmp(argv[i], "--force")) force = 1;
         else if (!name) name = argv[i];
         else die("remove: unexpected argument %s", argv[i]);
     }
+    if (!valid_name(profile)) die("remove: bad profile name");
     if (!name) die("remove: missing package");
     if (!valid_name(name)) die("remove: bad package name");
     char *db = l2path("var/db/installed/%s", name);
+    if (access(db, F_OK) != 0) {
+        fprintf(stderr, "l2pm: %s is not installed\n", name);
+        free(db);
+        return 1;
+    }
+    if (!force) {
+        size_t n = 0;
+        char **names = db_names(&n);
+        struct pathlist rdeps = {0};
+        for (size_t i = 0; i < n; i++) {
+            if (strcmp(names[i], name) != 0) {
+                char *dstr = db_get(names[i], "deps");
+                struct pathlist parsed = {0};
+                if (dstr && parse_deps_list(dstr, &parsed) == 0 && pl_has(&parsed, name))
+                    pl_add(&rdeps, names[i]);
+                pl_free(&parsed);
+                free(dstr);
+            }
+            free(names[i]);
+        }
+        free(names);
+        if (rdeps.n > 0) {
+            fprintf(stderr, "l2pm: cannot remove %s; required by:", name);
+            for (size_t i = 0; i < rdeps.n; i++) fprintf(stderr, " %s", rdeps.v[i]);
+            fprintf(stderr, " (use --force to override)\n");
+            pl_free(&rdeps);
+            free(db);
+            return 1;
+        }
+        pl_free(&rdeps);
+    }
     if (unlink(db) != 0) { fprintf(stderr, "l2pm: %s is not installed\n", name); free(db); return 1; }
     free(db);
-    rebuild_profile(profile);
+    char *mp = l2path("var/db/installed/%s.manifest", name);
+    unlink(mp);
+    free(mp);
+    if (rebuild_profile(profile) != 0) return 1;
     printf("removed %s\n", name);
     return 0;
 }
@@ -1837,12 +2240,52 @@ static int cmd_list(void)
 static int cmd_info(int argc, char **argv)
 {
     if (argc < 1) die("info: missing package");
+    if (!valid_name(argv[0])) die("info: bad package name");
     char *p = l2path("var/db/installed/%s", argv[0]);
     char *txt = read_small(p);
     free(p);
     if (!txt) die("info: %s is not installed", argv[0]);
     fputs(txt, stdout);
     free(txt);
+    return 0;
+}
+
+static int verify_manifest(const char *name, const char *store, char *reason, size_t rcap)
+{
+    char *mp = l2path("var/db/installed/%s.manifest", name);
+    char *txt = read_small(mp);
+    free(mp);
+    if (!txt) return 0; /* legacy install without manifest */
+    struct pathlist exp = {0};
+    char *save = NULL;
+    for (char *line = strtok_r(txt, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        if (*line) pl_add(&exp, line);
+    }
+    free(txt);
+
+    struct pathlist act = {0};
+    if (manifest_collect(store, &act) != 0) {
+        snprintf(reason, rcap, "unreadable store tree");
+        pl_free(&exp);
+        return -1;
+    }
+    size_t min_n = exp.n < act.n ? exp.n : act.n;
+    for (size_t i = 0; i < min_n; i++) {
+        if (strcmp(exp.v[i], act.v[i]) != 0) {
+            snprintf(reason, rcap, "modified or missing entry");
+            pl_free(&exp);
+            pl_free(&act);
+            return -1;
+        }
+    }
+    if (exp.n != act.n) {
+        snprintf(reason, rcap, act.n > exp.n ? "unexpected entry in store" : "missing entry in store");
+        pl_free(&exp);
+        pl_free(&act);
+        return -1;
+    }
+    pl_free(&exp);
+    pl_free(&act);
     return 0;
 }
 
@@ -1859,12 +2302,16 @@ static int cmd_verify(void)
             bad++;
         } else {
             char nm[128], vv[128], dd[1024];
+            char reason[128] = "";
             if (read_info(store, nm, sizeof(nm), vv, sizeof(vv), dd, sizeof(dd)) != 0 ||
                 strcmp(nm, names[i]) != 0) {
                 printf("BROKEN %s: metadata mismatch\n", names[i]);
                 bad++;
             } else if (ver && strcmp(vv, ver) != 0) {
                 printf("BROKEN %s: version mismatch\n", names[i]);
+                bad++;
+            } else if (verify_manifest(names[i], store, reason, sizeof(reason)) != 0) {
+                printf("BROKEN %s: store integrity check failed (%s)\n", names[i], reason);
                 bad++;
             } else {
                 printf("ok %s %s\n", names[i], vv);
@@ -1876,47 +2323,319 @@ static int cmd_verify(void)
     return bad ? 1 : 0;
 }
 
-static int path_referenced(const char *store)
+struct gen_pkg {
+    char *name;
+    char *version;
+    char *hash;
+    char *store;
+    char *deps;
+};
+
+static void free_gen_pkgs(struct gen_pkg *pkgs, size_t n)
 {
-    size_t n = 0;
-    char **names = db_names(&n);
-    int found = 0;
-    for (size_t i = 0; i < n && !found; i++) {
-        char *s = db_get(names[i], "store");
-        if (s && !strcmp(s, store)) found = 1;
-        free(s);
+    for (size_t i = 0; i < n; i++) {
+        free(pkgs[i].name);
+        free(pkgs[i].version);
+        free(pkgs[i].hash);
+        free(pkgs[i].store);
+        free(pkgs[i].deps);
     }
-    for (size_t i = 0; i < n; i++) free(names[i]);
-    free(names);
-    return found;
+    free(pkgs);
 }
 
-static int cmd_gc(void)
+static int read_gen_file(const char *gen_dir, struct gen_pkg **out_pkgs, size_t *out_n)
 {
+    char *gp = fmt("%s/.l2pm-gen", gen_dir);
+    char *txt = read_small(gp);
+    free(gp);
+    if (!txt) return -1;
+    struct gen_pkg *v = NULL;
+    size_t n = 0, cap = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(txt, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+        if (!*line) continue;
+        char *t1 = strchr(line, '\t');
+        char *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
+        char *t3 = t2 ? strchr(t2 + 1, '\t') : NULL;
+        if (!t1 || !t2 || !t3) {
+            free(txt);
+            free_gen_pkgs(v, n);
+            return -1;
+        }
+        *t1++ = 0;
+        *t2++ = 0;
+        *t3++ = 0;
+        char *t4 = strchr(t3, '\t');
+        const char *deps = "";
+        if (t4) { *t4++ = 0; deps = t4; }
+        if (n == cap) { cap = cap ? cap * 2 : 16; v = xrealloc(v, cap * sizeof(*v)); }
+        v[n].name = xstrdup(line);
+        v[n].version = xstrdup(t1);
+        v[n].hash = xstrdup(t2);
+        v[n].store = xstrdup(t3);
+        v[n].deps = xstrdup(deps);
+        n++;
+    }
+    free(txt);
+    *out_pkgs = v;
+    *out_n = n;
+    return 0;
+}
+
+static int cmp_long(const void *a, const void *b)
+{
+    long x = *(const long *)a, y = *(const long *)b;
+    return (x > y) - (x < y);
+}
+
+static int read_active_gen(const char *pdir, const char *profile, char *target, size_t cap, long *out_gen)
+{
+    char *cur = fmt("%s/%s", pdir, profile);
+    ssize_t r = readlink(cur, target, cap - 1);
+    free(cur);
+    if (r < 0) { target[0] = 0; return -1; }
+    target[r] = 0;
+    return parse_gen_for_profile(target, profile, out_gen) ? 0 : -1;
+}
+
+static int cmd_generations(int argc, char **argv)
+{
+    const char *profile = "default";
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile = argv[++i];
+        else die("generations: unexpected argument %s", argv[i]);
+    }
+    if (!valid_name(profile)) die("generations: bad profile name");
+    char *pdir = l2path("var/profiles");
+    char cur_target[MAXPATH] = "";
+    long cur_gen = -1;
+    read_active_gen(pdir, profile, cur_target, sizeof(cur_target), &cur_gen);
+
+    DIR *d = opendir(pdir);
+    long *gens = NULL;
+    size_t n = 0, cap = 0;
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            long g = 0;
+            if (parse_gen_for_profile(e->d_name, profile, &g)) {
+                if (n == cap) { cap = cap ? cap * 2 : 16; gens = xrealloc(gens, cap * sizeof(*gens)); }
+                gens[n++] = g;
+            }
+        }
+        closedir(d);
+    }
+    if (n) qsort(gens, n, sizeof(*gens), cmp_long);
+    for (size_t i = 0; i < n; i++) {
+        char *gdir = fmt("%s/%s-%ld-link", pdir, profile, gens[i]);
+        struct gen_pkg *pkgs = NULL;
+        size_t pn = 0;
+        if (read_gen_file(gdir, &pkgs, &pn) == 0) free_gen_pkgs(pkgs, pn);
+        free(gdir);
+        char rel[256];
+        snprintf(rel, sizeof(rel), "%s-%ld-link", profile, gens[i]);
+        printf("%ld\t%zu package(s)%s\n", gens[i], pn,
+               !strcmp(cur_target, rel) ? "\t(current)" : "");
+    }
+    if (!n) fprintf(stderr, "(no generations for profile %s)\n", profile);
+    free(gens);
+    free(pdir);
+    return 0;
+}
+
+static int cmd_rollback(int argc, char **argv)
+{
+    const char *profile = "default", *gen_arg = NULL;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--profile") && i + 1 < argc) profile = argv[++i];
+        else if (!gen_arg) gen_arg = argv[i];
+        else die("rollback: unexpected argument %s", argv[i]);
+    }
+    if (!valid_name(profile)) die("rollback: bad profile name");
+
+    char *pdir = l2path("var/profiles");
+    char cur_target[MAXPATH] = "";
+    long cur_gen = -1;
+    if (read_active_gen(pdir, profile, cur_target, sizeof(cur_target), &cur_gen) != 0) {
+        free(pdir);
+        die("rollback: no active generation for profile %s", profile);
+    }
+
+    long target_gen = -1;
+    if (gen_arg) {
+        if (!*gen_arg) { free(pdir); die("rollback: invalid generation"); }
+        for (const char *p = gen_arg; *p; p++)
+            if (!isdigit((unsigned char)*p)) { free(pdir); die("rollback: invalid generation '%s'", gen_arg); }
+        errno = 0;
+        target_gen = strtol(gen_arg, NULL, 10);
+        if (errno == ERANGE || target_gen < 0) { free(pdir); die("rollback: invalid generation '%s'", gen_arg); }
+    } else {
+        DIR *d = opendir(pdir);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d))) {
+                long g = 0;
+                if (parse_gen_for_profile(e->d_name, profile, &g) && g < cur_gen && g > target_gen)
+                    target_gen = g;
+            }
+            closedir(d);
+        }
+        if (target_gen < 0) {
+            free(pdir);
+            die("rollback: no previous generation for profile %s", profile);
+        }
+    }
+
+    char *target_rel = fmt("%s-%ld-link", profile, target_gen);
+    char *target_dir = fmt("%s/%s", pdir, target_rel);
+    if (!is_dir(target_dir)) {
+        free(target_dir); free(target_rel); free(pdir);
+        die("rollback: generation %ld does not exist for profile %s", target_gen, profile);
+    }
+
+    struct gen_pkg *pkgs = NULL;
+    size_t pn = 0;
+    if (read_gen_file(target_dir, &pkgs, &pn) != 0) {
+        free(target_dir); free(target_rel); free(pdir);
+        die("rollback: generation %ld has no valid metadata", target_gen);
+    }
+    for (size_t i = 0; i < pn; i++) {
+        if (!valid_name(pkgs[i].name) || !valid_name(pkgs[i].version) || !is_dir(pkgs[i].store)) {
+            fprintf(stderr, "l2pm: rollback: store path missing for %s (%s); run gc with --keep-generations to preserve old generations\n",
+                    pkgs[i].name, pkgs[i].store);
+            free_gen_pkgs(pkgs, pn);
+            free(target_dir); free(target_rel); free(pdir);
+            return 1;
+        }
+    }
+    free(target_dir);
+
+    if (switch_profile_symlink(pdir, profile, target_rel) != 0) {
+        free_gen_pkgs(pkgs, pn);
+        free(target_rel); free(pdir);
+        die("rollback: failed to switch profile symlink");
+    }
+    free(target_rel);
+    free(pdir);
+
+    /* Synchronize var/db/installed with the rolled-back generation. */
+    size_t cur_n = 0;
+    char **cur_names = db_names(&cur_n);
+    for (size_t i = 0; i < cur_n; i++) {
+        int keep = 0;
+        for (size_t j = 0; j < pn; j++)
+            if (!strcmp(cur_names[i], pkgs[j].name)) { keep = 1; break; }
+        if (!keep) {
+            char *db = l2path("var/db/installed/%s", cur_names[i]);
+            char *mp = l2path("var/db/installed/%s.manifest", cur_names[i]);
+            unlink(db);
+            unlink(mp);
+            free(db);
+            free(mp);
+        }
+        free(cur_names[i]);
+    }
+    free(cur_names);
+
+    for (size_t j = 0; j < pn; j++) {
+        if (db_write(pkgs[j].name, pkgs[j].version, pkgs[j].hash, pkgs[j].store, pkgs[j].deps) != 0 ||
+            manifest_write(pkgs[j].name, pkgs[j].store) != 0) {
+            free_gen_pkgs(pkgs, pn);
+            die("rollback: failed to update package database");
+        }
+    }
+    free_gen_pkgs(pkgs, pn);
+    printf("rolled back %s to generation %ld\n", profile, target_gen);
+    return 0;
+}
+
+static int cmd_gc(int argc, char **argv)
+{
+    int keep_gens = 0;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--keep-generations")) keep_gens = 1;
+        else die("gc: unexpected argument %s", argv[i]);
+    }
+
+    char *pdir = l2path("var/profiles");
+    struct pathlist live_stores = {0};
+
+    size_t dbn = 0;
+    char **names = db_names(&dbn);
+    for (size_t i = 0; i < dbn; i++) {
+        char *s = db_get(names[i], "store");
+        if (s && !pl_has(&live_stores, s)) pl_add(&live_stores, s);
+        free(s);
+        free(names[i]);
+    }
+    free(names);
+
+    DIR *pd = opendir(pdir);
+    if (pd) {
+        struct dirent *e;
+        while ((e = readdir(pd))) {
+            if (e->d_name[0] == '.') continue;
+            char *prof = NULL;
+            long g = 0;
+            if (!parse_any_gen_link(e->d_name, &prof, &g)) continue;
+            char active_rel[MAXPATH] = "";
+            long ag = -1;
+            int have_active = read_active_gen(pdir, prof, active_rel, sizeof(active_rel), &ag) == 0;
+            int is_active = have_active && !strcmp(active_rel, e->d_name);
+            char *gdir = fmt("%s/%s", pdir, e->d_name);
+            if (!keep_gens && !is_active) {
+                rm_rf(gdir);
+            } else if (keep_gens) {
+                struct gen_pkg *pkgs = NULL;
+                size_t pn = 0;
+                if (read_gen_file(gdir, &pkgs, &pn) == 0) {
+                    for (size_t j = 0; j < pn; j++)
+                        if (*pkgs[j].store && !pl_has(&live_stores, pkgs[j].store))
+                            pl_add(&live_stores, pkgs[j].store);
+                    free_gen_pkgs(pkgs, pn);
+                }
+            }
+            free(gdir);
+            free(prof);
+        }
+        closedir(pd);
+    }
+    free(pdir);
+
     char *dir = l2path("store");
     DIR *d = opendir(dir);
-    if (!d) { free(dir); return 0; }
-    size_t n = 0, cap = 0;
-    char **v = NULL;
+    if (!d) { pl_free(&live_stores); free(dir); return 0; }
+    struct pathlist entries = {0};
     struct dirent *e;
     while ((e = readdir(d))) {
         if (e->d_name[0] == '.') continue;
-        if (n == cap) { cap = cap ? cap * 2 : 16; v = xrealloc(v, cap * sizeof(*v)); }
-        v[n++] = xstrdup(e->d_name);
+        pl_add(&entries, e->d_name);
     }
     closedir(d);
-    qsort(v, n, sizeof(*v), cmp_db_name);
+    if (entries.n) qsort(entries.v, entries.n, sizeof(*entries.v), cmp_db_name);
     int removed = 0;
-    for (size_t i = 0; i < n; i++) {
-        char *full = fmt("%s/%s", dir, v[i]);
-        if (!path_referenced(full)) { rm_rf(full); removed++; }
+    for (size_t i = 0; i < entries.n; i++) {
+        char *full = fmt("%s/%s", dir, entries.v[i]);
+        if (!pl_has(&live_stores, full)) { rm_rf(full); removed++; }
         free(full);
-        free(v[i]);
     }
-    free(v);
+    pl_free(&entries);
+    pl_free(&live_stores);
     free(dir);
     printf("gc: removed %d store path(s)\n", removed);
     return 0;
+}
+
+static void collect_recipes_in(const char *dir, const char *needle, struct pathlist *out)
+{
+    DIR *d = opendir(dir);
+    if (!d) return;
+    struct dirent *e;
+    while ((e = readdir(d))) {
+        if (e->d_name[0] == '.') continue;
+        if (!*needle || strstr(e->d_name, needle)) pl_add(out, e->d_name);
+    }
+    closedir(d);
 }
 
 static int cmd_search(int argc, char **argv)
@@ -1924,15 +2643,18 @@ static int cmd_search(int argc, char **argv)
     const char *needle = argc ? argv[0] : "";
     const char *env = getenv("L2PM_RECIPES");
     char *dir = (env && *env) ? xstrdup(env) : l2path("recipes");
-    DIR *d = opendir(dir);
-    if (!d) { free(dir); return 0; }
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] == '.') continue;
-        if (!*needle || strstr(e->d_name, needle)) printf("%s\n", e->d_name);
-    }
-    closedir(d);
+    char *repo = l2path("var/recipe-repo");
+    struct pathlist found = {0};
+    collect_recipes_in(dir, needle, &found);
+    collect_recipes_in(repo, needle, &found);
     free(dir);
+    free(repo);
+    if (found.n) qsort(found.v, found.n, sizeof(*found.v), cmpstr);
+    for (size_t i = 0; i < found.n; i++) {
+        if (i > 0 && !strcmp(found.v[i], found.v[i - 1])) continue;
+        printf("%s\n", found.v[i]);
+    }
+    pl_free(&found);
     return 0;
 }
 
@@ -1978,8 +2700,10 @@ static int cmd_selftest(void)
     mkdir_p(sub, 0755);
     char *f1 = fmt("%s/hello", tree);
     char *f2 = fmt("%s/sub/world", sub);
+    char *lnk = fmt("%s/link", tree);
     write_file(f1, "hello\n", 6);
     write_file(f2, "world\n", 6);
+    symlink("hello", lnk);
     char *tar1 = fmt("%s/a.l2p", tmp);
     char *tar2 = fmt("%s/b.l2p", tmp);
     char *out = fmt("%s/out", tmp);
@@ -1991,13 +2715,18 @@ static int cmd_selftest(void)
     char *g1 = fmt("%s/hello", out);
     char *got = rc ? NULL : read_small(g1);
     if (!rc && (!got || strcmp(got, "hello\n"))) rc = 1;
+    char *gl = fmt("%s/link", out);
+    char lbuf[64];
+    ssize_t lr = rc ? -1 : readlink(gl, lbuf, sizeof(lbuf) - 1);
+    if (!rc && (lr < 0 || (lbuf[lr] = 0, strcmp(lbuf, "hello") != 0))) rc = 1;
+    free(gl);
     free(got); free(g1);
     long rss = self_rss_kb();
     printf("sha256: ok\nreproducible tar: %s\nrss: %ld KiB (budget 10240)\n",
            rc ? "FAILED" : "ok", rss);
     rm_rf(tmp);
-    free(f1); free(f2); free(tar1); free(tar2); free(out); free(sub); free(tree); free(tmp);
-    if (ownroot) { rmdir(selftmp); }
+    free(lnk); free(f1); free(f2); free(tar1); free(tar2); free(out); free(sub); free(tree); free(tmp);
+    if (ownroot) { rm_rf(selftmp); }
     return rc;
 }
 
@@ -2007,10 +2736,12 @@ static void usage(void)
         "l2pm %s - L2 package manager\n"
         "usage:\n"
         "  l2pm build <recipe> [-o file.l2p] [--check] [--trust]\n"
-        "  l2pm add <recipe> [--profile default] [--trust]\n"
+        "  l2pm add <recipe> [--profile default] [--trust] [--no-deps]\n"
         "  l2pm install <file.l2p> [--profile default]\n"
-        "  l2pm remove <name> [--profile default]\n"
-        "  l2pm list | info <name> | verify | gc | search [text]\n"
+        "  l2pm remove <name> [--profile default] [--force]\n"
+        "  l2pm list | info <name> | verify | search [text]\n"
+        "  l2pm generations [--profile default] | rollback [GEN] [--profile default]\n"
+        "  l2pm gc [--keep-generations]\n"
         "  l2pm hash <file> | tar <dir> <out> [--epoch N]\n"
         "  l2pm selftest\n"
         "recipe steps: 1 repo (git source clone)  2 fetch/extract  3 compile  4 install\n"
@@ -2037,7 +2768,9 @@ int main(int argc, char **argv)
     if (!strcmp(cmd, "list") || !strcmp(cmd, "ls")) return cmd_list();
     if (!strcmp(cmd, "info")) return cmd_info(argc, argv);
     if (!strcmp(cmd, "verify")) return cmd_verify();
-    if (!strcmp(cmd, "gc")) return cmd_gc();
+    if (!strcmp(cmd, "generations")) return cmd_generations(argc, argv);
+    if (!strcmp(cmd, "rollback")) return cmd_rollback(argc, argv);
+    if (!strcmp(cmd, "gc")) return cmd_gc(argc, argv);
     if (!strcmp(cmd, "search")) return cmd_search(argc, argv);
     if (!strcmp(cmd, "selftest")) return cmd_selftest();
 

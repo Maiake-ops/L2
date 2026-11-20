@@ -97,10 +97,16 @@ static void putstr(const char *s)
 }
 static void putnum(long n)
 {
-    char tmp[20];
+    char tmp[24];
     unsigned k = 0;
-    if (n < 0) { putstr("-"); n = -n; }
-    do { tmp[k++] = (char)('0' + (n % 10)); n /= 10; } while (n && k < sizeof(tmp));
+    unsigned long u;
+    if (n < 0) {
+        putstr("-");
+        u = (unsigned long)(-(n + 1)) + 1UL;
+    } else {
+        u = (unsigned long)n;
+    }
+    do { tmp[k++] = (char)('0' + (u % 10)); u /= 10; } while (u && k < sizeof(tmp));
     while (k && g_len + 1 < sizeof(g_line)) g_line[g_len++] = tmp[--k];
 }
 static void line_out(void)
@@ -188,6 +194,7 @@ static int root_mounted_readonly(void)
 {
     static char buf[2048];
     if (file_read("/proc/mounts", buf, sizeof(buf)) <= 0) return 0;
+    int ro = 0;
     for (const char *p = buf; *p; ) {
         const char *eol = p;
         while (*eol && *eol != '\n') eol++;
@@ -196,18 +203,18 @@ static int root_mounted_readonly(void)
         if (f >= eol) break;
         const char *mp = ++f;
         while (f < eol && *f != ' ') f++;          /* end of mountpoint */
-        if (f - mp == 1 && *mp == '/') {           /* the "/" line */
+        if (f - mp == 1 && *mp == '/') {           /* a "/" line; last wins */
             if (f >= eol) break;
             f++;
             while (f < eol && *f != ' ') f++;      /* end of fstype */
             if (f >= eol) break;
             f++;                                   /* start of options */
-            return f + 2 <= eol && f[0] == 'r' && f[1] == 'o' &&
-                   (f + 2 == eol || f[2] == ',' || f[2] == ' ');
+            ro = (f + 2 <= eol && f[0] == 'r' && f[1] == 'o' &&
+                  (f + 2 == eol || f[2] == ',' || f[2] == ' '));
         }
         p = *eol ? eol + 1 : eol;
     }
-    return 0;
+    return ro;
 }
 
 static int streq(const char *a, const char *b)
@@ -510,14 +517,16 @@ static void svc_schedule_backoff(unsigned i, int st)
     line_out();
 }
 
-/* reap every dead child; map service pids to supervision state */
-static void reap_children(void)
+/* reap every dead child; map service pids to supervision state.
+ * Returns 1 when no children remain (-ECHILD), 0 otherwise. */
+static int reap_children(void)
 {
     for (;;) {
         int st = 0;
         long pid = r_sys4(SYS_wait4, -1L, (long)&st, WNOHANG, 0);
         if (pid == -EINTR) continue;
-        if (pid <= 0) break;                            /* EAGAIN/ECHILD: none */
+        if (pid == -ECHILD) return 1;
+        if (pid <= 0) return 0;                         /* 0/EAGAIN: live children remain */
         unsigned hit = RCL_MAX_SVCS;
         for (unsigned i = 0; i < g_conf.nsvc; i++)
             if (g_pid[i] == pid) { hit = i; break; }
@@ -597,7 +606,7 @@ static void rescue_shell(void)
     envp[0] = e_path; envp[1] = e_home; envp[2] = e_term; envp[3] = e_ps1; envp[4] = 0;
     argv[0] = (char *)DEFAULT_SHELL;
 
-    slog("L2 recovery shell. Use l2 help, l2 reboot or l2 poweroff.");
+    slog("L2 recovery shell. Commands: l2fetch, l2net, l2install, poweroff, reboot.");
 
     for (;;) {
         take_actions();          /* pendings honored even while respawning shells */
@@ -633,8 +642,8 @@ static const char *console_banner(void)
 {
     /* exactly L2's console wording */
     if (file_exists(INSTALLED_MARK))
-        return "L2 installed system ready\nType l2 help for commands.";
-    return "L2 live system ready\nType l2 help for commands. RAM-only session: changes are lost at shutdown.";
+        return "L2 installed system ready\nCommands: l2fetch, l2net, l2wifi, l2pm, poweroff, reboot.";
+    return "L2 live system ready\nCommands: l2fetch, l2net, l2wifi, l2install, poweroff. RAM-only session: changes are lost at shutdown.";
 }
 
 static int console_has_ttys(const char *dev)
@@ -725,6 +734,7 @@ static void reboot_now(unsigned cmd)
     r_sys0(SYS_sync);
     sleep_ms(100);
     r_sys0(SYS_sync);
+    r_sys5(SYS_mount, 0L, (long)"/", 0L, (long)(MS_REMOUNT | MS_RDONLY), 0L);
     long r = r_sys4(SYS_reboot, (long)REBOOT_MAGIC1, (long)REBOOT_MAGIC2, (long)cmd, 0);
     if (r != 0) {
         g_len = 0; putstr("rcl2: reboot syscall failed (errno "); putnum(-r); putstr(")");
@@ -756,13 +766,18 @@ static void shutdown_run(const char *why, unsigned cmd)
     r_sys2(SYS_kill, -1L, SIGTERM);          /* everything else, pid1 gets none */
 
     unsigned long until = now_ms() + GRACE_TERM_MS;
-    while (now_ms() < until) { sleep_ms(200); reap_children(); }
+    while (now_ms() < until) {
+        if (reap_children()) break;
+        sleep_ms(100);
+    }
 
     r_sys2(SYS_kill, -1L, SIGKILL);
     until = now_ms() + GRACE_KILL_MS;
     while (now_ms() < until) {
         int zz = 0;
-        while (r_sys4(SYS_wait4, -1L, (long)&zz, WNOHANG, 0) > 0) zz = 0;
+        long w;
+        while ((w = r_sys4(SYS_wait4, -1L, (long)&zz, WNOHANG, 0)) > 0) zz = 0;
+        if (w == -ECHILD) break;
         sleep_ms(100);
     }
 

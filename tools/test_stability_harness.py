@@ -129,6 +129,39 @@ for line in sys.stdin:
         with self.assertRaisesRegex(stability.Failure, "guest fault"):
             self.guest().command("guest-fault")
 
+    def test_send_uses_single_newline(self):
+        written = bytearray()
+
+        class FakeStdin:
+            def write(self, data):
+                written.extend(data)
+
+            def flush(self):
+                pass
+
+        guest = object.__new__(stability.Guest)
+        guest.process = SimpleNamespace(stdin=FakeStdin())
+        guest.healthy = lambda: None
+        guest.read = lambda timeout=0.01: False
+        guest.send("echo ok")
+        self.assertEqual(bytes(written), b"echo ok\n")
+
+    def test_sample_handles_prompt_before_meminfo_marker(self):
+        class FakeGuest:
+            def command(self, script):
+                return ("L2# echo MEMINFO; ...\n"
+                        "L2# MEMINFO\n"
+                        "MemTotal: 10000 kB\nMemFree: 9000 kB\nMemAvailable: 8800 kB\n"
+                        "PIDONE\nVmRSS: 72 kB\nUPTIME\n12.34 20.00\n")
+
+        args = SimpleNamespace(output=self.root, budget_kib=10240)
+        result = {"ram_mib": 256, "errors": []}
+        samples = []
+        row = stability.sample(FakeGuest(), args, result, samples, "idle")
+        self.assertEqual(row["used_kib"], 1200)
+        self.assertEqual(row["pid1_rss_kib"], 72)
+        self.assertEqual(result["errors"], [])
+
 
 class ArgumentsTests(unittest.TestCase):
     def test_invalid_matrix_and_nonfinite_soak_are_rejected(self):
