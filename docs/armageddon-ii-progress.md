@@ -66,13 +66,20 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       no-SA_RESTART/EINTR, async-safe handlers, PID1-never-exits, CGROUPS=n
       → RLIMITs, wait-ordering deliberate) + boot-resident capture (closes
       peer's pending mission-22 re-measure).
-- [~] W2 l2pm transaction/consistency hardening (41–50, 181–200) — heavy-coder
-      launched 20:3x (background, parallel to W1, disjoint write scope).
-      Audit-first: generations/rollback/gc/verify/search ALREADY exist
-      (l2pm.c:1639-2552); real gaps = multi-package transaction atomicity,
-      DB/profile torn-state recovery, solver edges; signatures + binary repos
-      = design proposals only. W1 amended: rcl2-scoped tests only; lead runs
-      full make check after both land.
+- [~] W2 l2pm hardening (41–50, 181–200) — heavy-coder running (background,
+      parallel to W1, disjoint scope). **Reprioritized 21:1x (amendment #3)**
+      on peer gapmap `build/campaigns/armageddon-l2pm-gapmap.md` + my
+      independent verification of all 3 load-bearing findings:
+      **P1** gc data-loss chain (DB-only liveness C:2563-2571 + default
+      inactive-gen rm_rf C:2586-2588 + zero fsync ⇒ power-loss→corrupt-DB→
+      gc deletes LIVE store; torn rollback re-sync C:2541-2545 feeds same
+      path) → gen-file liveness always, fail-safe gc, keep-last-N default;
+      **P2** fsync ordering + generalize .l2pm-gen re-sync (C:2346-2382);
+      **P3** missing-manifest silent pass (C:2258) → warn/reconstruct + fsck;
+      P4 transaction rollback, P5 solver edges + link_tree last-wins
+      (C:1583-1586) deferrable with handoff. Signatures/binary-repos remain
+      design-only. Gapmap replaces W2's own audit task. TDD observed:
+      tools/test_l2pm_transactions.py written before l2pm.c edits.
 - [x] W3 commit verified prior-mission artifacts — **1888794** (9 files,
       2369 insertions): 7 unit-test files + patch-kernel-ram.py + this ledger.
       Peers' live files (lowram_matrix*, docs/armageddon-progress.md,
@@ -80,7 +87,9 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
 - [~] W4 adversarial review (kernel-maintainer hat): cd0f88a ELF audit clean;
       kernel RAM patchset review findings below (read-only, L2-96's lane);
       l2install security audit done (findings below) → fixes queued as W6
-- [ ] W5 release/CI integration of new gates (281–300) once W1/W2 land
+- [ ] W5 release/CI integration of new gates (281–300) once W1/W2 land.
+      Includes README size-table refresh: "~67 KiB l2pm" claim STALE vs
+      88,184 B actual (peer-verified); use final measured sizes post-W2.
 - [ ] W6 shell safety hardening: l2install + l2net (62/64/66/67/221–240/261–280)
       — queued; reuse a heavy-coder agent after W1/W2 land (credit discipline:
       max 2 concurrent heavy agents). Findings + regression-test scope below.
@@ -234,3 +243,12 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   boot-resident capture added. Read peer audit docs/armageddon/21-rcl2-
   lifecycle.md (mission 21 DONE; gap map 22-30; CGROUPS=n ⇒ RLIMITs).
   Correction sent: cd0f88a was committed on main, branch created after.
+- 21:1x L2-72 delivered l2pm gapmap (missions 41-50, file:line evidence).
+  Lead independently CONFIRMED: gc DB-only liveness + default gen deletion
+  + zero fsync = power-loss→live-store-deletion chain; verify legacy-manifest
+  silent pass; link_tree last-wins. W2 amended (#3): P1 gc safety, P2 fsync
+  ordering/.l2pm-gen truth, P3 fsck+manifest, P4/P5 deferrable; gapmap
+  replaces its audit task. Ack sent to L2-72 with re-verification results.
+  Agent progress observed via git status (not transcripts): W1 wrote
+  rcl2/verification/test-truncation.c + test-lifecycle.c, Makefile touched;
+  W2 wrote tools/test_l2pm_transactions.py (l2pm.c still pristine).
