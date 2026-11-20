@@ -352,8 +352,18 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   KASLR/STRICT_RWX/IBT/INIT_STACK_ALL_ZERO/VMAP_STACK on. Enabling any
   hardening trades against 10 MiB ISO / 15 MiB idle budgets — measure first.
   W5 release docs must reference this posture honestly.
-- rcl2 parser fuzz ownership: W1 (running) owns it; peer mission 67 keeps
-  non-rcl2 malformed input; corpus shared on landing (no duplication).
+- **Lowram variant security property (L2-96)**: variant kernel sets
+  MODULES=n → no module loading at all, no hw pack on l2-lowram.iso →
+  ring-0 module-injection surface (F1 class) removed entirely for that
+  variant. Default kernel keeps MODULES=y → W6 marker gate + P2 pin
+  contract remain necessary there. W5 docs: two kernels, two postures.
+- **Fragment WIP attribution clarified to L2-96**: uncommitted
+  config/kernel.fragment (+32) is L2-72's mission-05 work, NOT L2-ea's
+  (never edited it); L2-96's kernel queue must coordinate with L2-72
+  before verifying/touching it.
+- rcl2 parser fuzz ownership: W1 DONE — corpus committed at 1984055
+  (tools/test_rcl2_lifecycle.py), shared with L2-72 for mission 67
+  (login/su missing-shadow + non-rcl2 inputs remain theirs).
 - udhcpc.script: mission 66 CLOSED with dual citation (my §W6 audit +
   L2-72 lead spot-check). Moot micro-notes recorded: predictable tmp.$$
   fallback only on mktemp failure (root-only threat); unquoted
@@ -488,3 +498,9 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   (166 unit tests + 4 C suites green, a2-make-check-integrated.log).
   Commits: rcl2 (W1), l2pm (W2), Makefile+ledger (wiring) — hashes in
   git log. W6-P1 launching; W7 awaits maiake-f6 auditor packet.
+- 22:4x W6-P1 heavy-coder launched (8 findings, fail-before/pass-after
+  required). L2-96 'correction to correction' resolved: no dispute —
+  1888794 claim was accurate when sent; e24248c already recorded 22:1x.
+  Clarified fragment WIP attribution (L2-72's, not mine) to prevent
+  cross-lane disturbance. Variant MODULES=n security property recorded
+  for W5. W6 running; W7 queued.
