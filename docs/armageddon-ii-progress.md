@@ -45,8 +45,11 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
   class; earlier (64M,128M] bracket superseded; worktree log citations
   in L2-96 report). Bootloader-layer constraint, not kernel. 16M smoke:
   used 5560K. Evidence: build/campaigns/lowram-default-matrix/. <10M
-  BIOS target still open — L2-96 WP2 kernel+ISO BUILT, verification in
-  flight; will report which lever broke the 7490 KiB wall.
+  BIOS target still open — **WP2 v1 PROGRESS (23:4x): variant BIOS floor
+  14M→12M** (bzImage −736K; managed at 10M 1152K→3200K); 10M gap now
+  ~550-600K managed headroom, iteration 2 in flight; lever report at
+  WP2 landing. Default-kernel floor remains 14M (L2-72 mission-05 trim
+  may move it). Two kernels, two floors — W5 docs distinguish.
 
 ## Three most important unresolved bottlenecks (evidence above)
 
@@ -373,7 +376,8 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   — real-hardware 32-bit-DMA devices under pressure need a fault-injection
   test (mission 89). Consider scaling with MemTotal.
   **JOINT POLICY AGREED (L2-96, 22:5x)**: kernel-side runtime gating
-  (their lane, post-WP2 measured batch) and l2net boot()'s runtime writes
+  (executor L2-72, missions 05/80/65 — ownership clarified 23:4x post-
+  retraction; L2-96 = variant iteration only) and l2net boot()'s runtime writes
   (min_free_kbytes=128, lowmem_reserve_ratio=0, pcp fraction=100000) must
   share ONE threshold policy and LAND TOGETHER, else they fight on big
   guests. Their design sketch: boot-time l2_small_ram flag
@@ -412,10 +416,15 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   ring-0 module-injection surface (F1 class) removed entirely for that
   variant. Default kernel keeps MODULES=y → W6 marker gate + P2 pin
   contract remain necessary there. W5 docs: two kernels, two postures.
-- **Fragment WIP attribution clarified to L2-96**: uncommitted
-  config/kernel.fragment (+32) is L2-72's mission-05 work, NOT L2-ea's
-  (never edited it); L2-96's kernel queue must coordinate with L2-72
-  before verifying/touching it.
+- **Fragment WIP attribution — DISPUTE RESOLVED (23:4x)**: L2-96 RETRACTED
+  its claim, attributed the +32 fragment lines to L2-72's mission-05 agent
+  in its own ledger + reply, and explicitly committed to NOT editing/
+  verifying/reverting them or running main-tree kernel builds. Recorded
+  split governs; no coordination gap remains. Trim batches
+  (FW_LOADER_COMPRESS_ZSTD/TRIM_UNUSED_KSYMS/LTO) handed over to L2-72 as
+  recommendations (zstd/ksymtrim confirmed with their agent; gating/
+  RO-tail under missions 05/80/65; LTO under 80). Commit-refusal policy
+  stands as durable discipline.
 - rcl2 parser fuzz ownership: W1 DONE — corpus committed at 1984055
   (tools/test_rcl2_lifecycle.py), shared with L2-72 for mission 67
   (login/su missing-shadow + non-rcl2 inputs remain theirs).
@@ -602,3 +611,10 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   math: W1 is +1,472 B not a saving; W7 carries give ~2-3.7 KiB; boot-
   resident vs selftest RSS distinguished. Branch state mutually verified
   (cooperative de-escalation). W6+W7 running; dispute still user's call.
+- 23:4x **DISPUTE RESOLVED**: L2-96 retracted (own ledger + reply to
+  L2-72), commits to not touching fragment/main-tree kernel builds;
+  recorded split governs; user decision no longer required (split
+  unchanged). Trim-batch ownership → L2-72 (05/80/65/80); N5 kernel
+  executor corrected in ledger. **WP2 v1: variant floor 14M→12M**,
+  bzImage −736K, 10M managed 3200K, gap ~550-600K, iter2 in flight —
+  primary target closing. W6+W7 running; FINAL sequencing agreed.
