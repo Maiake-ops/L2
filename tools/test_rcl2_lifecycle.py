@@ -104,10 +104,16 @@ class ParserFuzz(FuzzBase):
         good2047 = filler(2047 - len(svc)) + svc
         self.check_case("exact2047", good2047, nsvc=1)
         self.check_case("comments2047", filler(2047), nsvc=0)
-        self.check_case("over2048", good2047 + b"\n", rc=1,
+        # W7 probe refinement: cap+1 bytes ending in '\n' buffers only
+        # complete lines -> parse fully (was: refused as oversize in W1)
+        self.check_case("cap2048_newline", good2047 + b"\n", nsvc=1)
+        self.check_case("cap2049_newlines", good2047 + b"\n\n", nsvc=1)
+        # genuine mid-token / mid-line cuts are still refused
+        self.check_case("over2048_midtoken", good2047 + b"x", rc=1,
                         contains=("config too large",))
-        self.check_case("over2049", good2047 + b"\n\n", rc=1,
-                        contains=("config too large",))
+        self.check_case("over2048_midline",
+                        filler(2019) + b"service evil respawn /bin/l2net boot\n",
+                        rc=1, contains=("config too large",))
         self.check_case("empty", b"", nsvc=0)
         self.check_case("one_byte", b"\n", nsvc=0)
 

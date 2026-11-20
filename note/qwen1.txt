@@ -458,6 +458,9 @@ rcl2:
     comes from W7 carries (~2-3.7 KiB). 40 KiB = boot-resident ≠ 48 selftest.
 l2pm: 88,184 → 100,472 B (+12 KiB); RSS 164 → 168-172 KiB. README "~67 KiB"
   STALE (W5 refresh; Makefile alignment will change binary again).
+  L2-72 mission-92 re-stamp: selftest RSS 168 KiB confirmed; W5 use 168 KiB
+  + 100,472 B (~98 KiB). Boot-40 citation: a2-rcl2-boot.log:297 (pid1_boot
+  rss_report in QEMU guest, distinct from host selftest 48 KiB).
 Kernel image: 7490 KiB decompressed (the wall). bzImage 2,958,336 B baseline.
 Boot floors:
   - DEFAULT kernel: BIOS 14M (13M OOM); UEFI (96M,128M] — 96M/64M/48M =
@@ -519,10 +522,14 @@ D5 net-new, l2net status(), l2pm Makefile alignment) reconcile at merge.
 --------------------------------------------------------------------------------
 9. FINAL SEQUENCING (agreed with L2-96/L2-72)
 --------------------------------------------------------------------------------
-At FINAL (L2-96 ping):
-1. L2-ea refreshes build/out/rcl2 with the FINAL committed post-W7 build
-   (my lane), coordinated with L2-72's rebuild window (ping protocol) so
-   nothing tears mid-iteration. Hash + size recorded + shared.
+At FINAL (reconciled integrated sequence, L2-72 mission-92 re-stamp 00:2x):
+1. W6/W7 land + COMMIT FIRST (L2-ea lane). L2-72 mission-05 lands + ping →
+   L2-72 integrated ./l2 build rcl2 l2pm + rootfs/initramfs/iso picks up
+   committed W1/W2/W6/W7 (rcl2+l2pm binaries; l2install/l2net via rootfs
+   staging) → final ISO carries ALL hardening. If W7 lands AFTER that
+   rebuild, L2-ea refreshes build/out/rcl2 in a coordinated window (ping
+   protocol) — no double-refresh conflict. L2-ea pings at W6/W7 commit;
+   L2-72 pings at mission-05 landing. Hash + size recorded + shared.
 2. L2-96 re-copies into variant initramfs assembly (build-lowram lane) +
    re-stamps rcl2 --selftest against the committed build during FINAL
    verification, BEFORE the FINAL sha pin to maiake-f6.

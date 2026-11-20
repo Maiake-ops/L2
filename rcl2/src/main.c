@@ -39,6 +39,17 @@ enum { VINTR = 0, VQUIT = 1, VERASE = 2, VKILL = 3, VEOF = 4, VSUSP = 10 };
 /* kernel ABI struct for rt_sigaction (x86_64) */
 struct ksa { unsigned long handler; unsigned long flags; unsigned long restorer; unsigned long mask; };
 
+/* kernel ABI struct for sysinfo(2) (x86_64); totalram @32, mem_unit @100 */
+struct ksysinfo {
+    long uptime;
+    unsigned long loads[3];
+    unsigned long totalram, freeram, sharedram, bufferram;
+    unsigned long totalswap, freeswap;
+    unsigned short procs, pad;
+    unsigned long totalhigh, freehigh;
+    unsigned int mem_unit;
+};
+
 #define BOOTFLAG_RESCUE 1u   /* l2.rescue=1 | single | s | emergency */
 
 /* ------------------------------------------------------------- constants */
@@ -81,11 +92,13 @@ static volatile unsigned char g_closing;               /* shutdown underway */
 /* log line buffer: only touched from the main loop, never from handlers */
 static char     g_line[512];
 static unsigned g_len;
-/* Shared scratch for one-shot reads (mounts scan, config, cmdline, selftest).
- * Invariant: rcl2 is single-threaded and every consumer finishes before the
- * next one starts (boot order: mounts_setup -> conf_load -> cmdline_flags;
- * --selftest is a separate mode). Nothing retains a pointer into it: the
- * Rust parser copies into g_conf, every other consumer returns a scalar. */
+/* Shared scratch for one-shot reads (mounts scan, config, cmdline, statm,
+ * selftest). Invariant: rcl2 is single-threaded and every consumer finishes
+ * before the next one starts (boot order: mounts_setup -> conf_load ->
+ * cmdline_flags -> rss_report; --selftest is a separate mode, its rss_report
+ * runs after all printout). Nothing retains a pointer into it: the Rust
+ * parser copies into g_conf, every other consumer returns a scalar. Pinned
+ * by test-supervision.c::test_iobuf_aliasing. */
 static char     g_iobuf[CFG_RAW_CAP];
 
 extern void rcl_sigreturn(void);
@@ -170,11 +183,15 @@ static void sleep_ms(long ms)
 
 /* Read up to cap-1 bytes into buf, NUL-terminate, return the count. When the
  * file holds more than cap-1 bytes, return -EFBIG instead of truncating
- * silently (buf still holds the first cap-1 bytes, NUL-terminated): acting on
- * half a config line, boot flag or mount entry is never safe. Read errors
+ * silently (buf still holds the first cap-1 bytes, NUL-terminated) and store
+ * the first unread byte in *more (when non-NULL): a whitespace probe means
+ * the cut landed on a token/line boundary, which callers may treat as
+ * complete (W7 refinement of the W1 probe, auditor semantic note 3).
+ * *more = -1 when EOF was reached (exact fit) or on error. Read errors
  * propagate as negative errno; callers treat any negative result as failure. */
-static int file_read(const char *path, char *buf, int cap)
+static int file_read(const char *path, char *buf, int cap, int *more)
 {
+    if (more) *more = -1;
     if (cap < 2) return -EINVAL;
     int fd = (int)r_sys3(SYS_open, (long)path, O_RDONLY | O_CLOEXEC, 0);
     if (fd < 0) return fd;
@@ -194,7 +211,11 @@ static int file_read(const char *path, char *buf, int cap)
         if (r != 0) {
             r_sys1(SYS_close, fd);
             buf[got] = 0;
-            return r > 0 ? -EFBIG : (int)r;
+            if (r > 0) {
+                if (more) *more = (unsigned char)probe;
+                return -EFBIG;
+            }
+            return (int)r;
         }
     }
     r_sys1(SYS_close, fd);
@@ -309,6 +330,34 @@ static void console_open(void)
 static void mkdir_try(const char *p, unsigned mode) { r_sys2(SYS_mkdir, (long)p, mode); }
 static void symlink_try(const char *a, const char *b) { r_sys2(SYS_symlink, (long)a, (long)b); }
 
+/* Live-mode scratch cap: totalram >> shift clamped to [floor, ceil].
+ * /tmp: 12.5% of RAM, 2..16 MiB - ENOSPC arrives well before global OOM
+ * (a 16 MiB guest idles ~5.6 MiB used and OOMs around ~8 MiB committed).
+ * /run: 6.25%, 1..8 MiB - pidfiles/sockets only. The 16 MiB /tmp ceiling
+ * still fits l2install's live scratch: it extracts the ~0.8 MiB initramfs
+ * rootfs into /tmp (well under 2 MiB of pages).
+ * (maiake-f6 auditor design, 04-rcl2.md §4.3, lead-verified.) */
+static unsigned long live_scratch_cap(unsigned long total, unsigned shift,
+                                      unsigned long floor, unsigned long ceil)
+{
+    unsigned long cap = total >> shift;
+    if (cap < floor) cap = floor;
+    if (cap > ceil) cap = ceil;
+    return cap;
+}
+
+/* "mode=NNNN,size=<decimal>" mount option builder (no libc snprintf) */
+static void scratch_opt(char *dst, unsigned cap, const char *head, unsigned long v)
+{
+    unsigned k = 0;
+    while (head[k] && k + 1 < cap) { dst[k] = head[k]; k++; }
+    char tmp[24];
+    unsigned n = 0;
+    do { tmp[n++] = (char)('0' + v % 10); v /= 10; } while (v && n < sizeof(tmp));
+    while (n && k + 1 < cap) dst[k++] = tmp[--n];
+    dst[k] = 0;
+}
+
 static void mounts_setup(void)
 {
     do_mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
@@ -327,7 +376,12 @@ static void mounts_setup(void)
     do_mount("devpts", "/dev/pts", "devpts", MS_NOSUID, "mode=0620,ptmxmode=0666");
     do_mount("tmpfs", "/dev/shm", "tmpfs", MS_NOSUID, "mode=1777");
 
-    /* /run and /tmp only on the installed system, like L2's stage-1 init */
+    /* /run and /tmp. Installed systems keep the historical mounts (tmpfs
+     * default size = half of RAM). Live sessions run on an uncapped ramfs
+     * rootfs: without a tmpfs cap any /tmp writer can exhaust all RAM, the
+     * OOM killer takes the console shell in a respawn loop, and the
+     * pressure file can never be removed (campaign 9). A capped tmpfs
+     * turns that into ENOSPC while the system stays alive. */
     if (file_exists(INSTALLED_MARK)) {
         /* Recover from a kernel rw→ro fallback remounting "/" read-only:
          * a remount with MS_REMOUNT alone clears SB_RDONLY (the shutdown
@@ -336,6 +390,25 @@ static void mounts_setup(void)
             slog("root was read-only; remounted r/w");
         do_mount("tmpfs", "/run", "tmpfs", MS_NOSUID, "mode=0755");
         do_mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID, "mode=1777");
+    } else {
+        struct ksysinfo si;
+        unsigned long total = 0;
+        if (r_sys1(SYS_sysinfo, (long)&si) == 0)
+            total = si.totalram * (si.mem_unit ? si.mem_unit : 1);
+        /* sysinfo failure degrades to the floor caps: still bounded */
+        unsigned long tcap = live_scratch_cap(total, 3, 2UL << 20, 16UL << 20);
+        unsigned long rcap = live_scratch_cap(total, 4, 1UL << 20, 8UL << 20);
+        char opt[48];
+        mkdir_try("/run", 0755);
+        mkdir_try("/tmp", 01777);
+        scratch_opt(opt, sizeof(opt), "mode=0755,size=", rcap);
+        do_mount("tmpfs", "/run", "tmpfs", MS_NOSUID, opt);
+        scratch_opt(opt, sizeof(opt), "mode=1777,size=", tcap);
+        do_mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID, opt);
+        g_len = 0;
+        putstr("rcl2: live scratch caps: /tmp "); putnum((long)(tcap >> 10));
+        putstr(" KiB, /run "); putnum((long)(rcap >> 10)); putstr(" KiB");
+        line_out();
     }
 }
 
@@ -469,13 +542,21 @@ static void conf_default(void)
 
 static void conf_load(void)
 {
-    int n = file_read(CONFIG_PATH, g_iobuf, CFG_RAW_CAP);
+    int more = -1;
+    int n = file_read(CONFIG_PATH, g_iobuf, CFG_RAW_CAP, &more);
     if (n == -EFBIG) {
-        /* a truncated service line could exec a shortened path prefix:
-         * refuse the whole config and degrade to the default shell */
-        slog("config over capacity - refusing truncated parse");
-        conf_default();
-        return;
+        if (more == '\n') {
+            /* cut landed exactly on a line boundary: every buffered line
+             * is complete, parse them all (config at exactly cap + NL) */
+            n = CFG_RAW_CAP - 1;
+        } else {
+            /* a truncated service line could exec a shortened path prefix
+             * (a space probe could also hide further args on the line):
+             * refuse the whole config and degrade to the default shell */
+            slog("config over capacity - refusing truncated parse");
+            conf_default();
+            return;
+        }
     }
     if (n < 0) {
         slog1("no config at ", CONFIG_PATH);
@@ -492,18 +573,30 @@ static void conf_load(void)
     if (g_conf.nsvc == 0) conf_default();
 }
 
-/* Boot flags from /proc/cmdline. An oversized cmdline is parsed up to the
- * last complete token: a flag cut mid-token must neither fire spuriously
- * nor pass silently (the dropped tail is logged). Unreadable -> normal boot. */
+/* token whitespace, kept identical to the Rust core's is_ws() */
+static int cmdline_ws(int c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
+           c == 0x0B || c == 0x0C;
+}
+
+/* Boot flags from /proc/cmdline. An oversized cmdline whose first unread
+ * byte is whitespace ended on a token boundary: parse it fully (the x86
+ * max-length cmdline is 2047 chars + '\n' = 2048 B). Otherwise parse up to
+ * the last complete token: a flag cut mid-token must neither fire
+ * spuriously nor pass silently (the dropped tail is logged).
+ * Unreadable -> normal boot. */
 static unsigned cmdline_flags(void)
 {
-    int n = file_read(CMDLINE_PATH, g_iobuf, (int)sizeof(g_iobuf));
+    int more = -1;
+    int n = file_read(CMDLINE_PATH, g_iobuf, (int)sizeof(g_iobuf), &more);
     if (n == -EFBIG) {
         n = (int)sizeof(g_iobuf) - 1;
-        while (n > 0 && g_iobuf[n - 1] != ' ' && g_iobuf[n - 1] != '\t' &&
-               g_iobuf[n - 1] != '\n')
-            n--;
-        slog("cmdline over capacity - incomplete trailing token dropped");
+        if (!cmdline_ws(more)) {
+            while (n > 0 && !cmdline_ws((unsigned char)g_iobuf[n - 1]))
+                n--;
+            slog("cmdline over capacity - incomplete trailing token dropped");
+        }
     }
     if (n < 0) {
         slog("cmdline read failed, assuming normal boot");
@@ -718,8 +811,13 @@ static const char *console_banner(void)
 
 static int console_has_ttys(const char *dev)
 {
-    /* "ttyS" substring check without strstr */
-    for (unsigned i = 4; dev[i - 1]; i++)
+    /* "ttyS" substring check without strstr, bounded by the string length:
+     * scanning past the NUL read adjacent argv memory and could match a
+     * "ttyS" belonging to the next string (wrong TERM for short names).
+     * (maiake-f6 auditor D5 fix, 04-rcl2.md §5, CWE-125.) */
+    unsigned len = (unsigned)strlen(dev);
+    if (len < 4) return 0;
+    for (unsigned i = 4; i <= len; i++)
         if (dev[i - 4] == 't' && dev[i - 3] == 't' && dev[i - 2] == 'y' && dev[i - 1] == 'S')
             return 1;
     return 0;
@@ -871,10 +969,11 @@ static void shutdown_run(const char *why, unsigned cmd)
 
 static void rss_report(void)
 {
-    static char buf[256];
-    int n = file_read(STATM_PATH, buf, (int)sizeof(buf));
+    /* g_iobuf reuse (auditor carry, -256 B bss): called after cmdline_flags
+     * in pid1_boot and after all printout in selftest - no live consumer */
+    int n = file_read(STATM_PATH, g_iobuf, (int)sizeof(g_iobuf), 0);
     if (n < 0) { slog("rss report unavailable"); return; }
-    unsigned long pages = rcl_rs_statm(buf, (unsigned long)n);
+    unsigned long pages = rcl_rs_statm(g_iobuf, (unsigned long)n);
     if (pages == 0) { slog("rss report parse failed"); return; }
     g_len = 0;
     putstr("rcl2: resident "); putnum((long)(pages * 4));
@@ -935,8 +1034,13 @@ static void selftest(int argc, char **argv)
     unsigned long conflen = strlen(selftest_conf);
     const char *label = "builtin";
     if (argc > 2) {
-        int n = file_read(argv[2], g_iobuf, (int)sizeof(g_iobuf));
-        if (n == -EFBIG) { slog1("config too large: ", argv[2]); die_ex(1); }
+        int more = -1;
+        int n = file_read(argv[2], g_iobuf, (int)sizeof(g_iobuf), &more);
+        if (n == -EFBIG) {
+            /* mirror conf_load: a newline probe means complete lines */
+            if (more == '\n') n = (int)sizeof(g_iobuf) - 1;
+            else { slog1("config too large: ", argv[2]); die_ex(1); }
+        }
         if (n < 0) { slog1("cannot read ", argv[2]); die_ex(1); }
         confdata = g_iobuf;
         /* parse the bytes actually read, exactly like conf_load at boot:

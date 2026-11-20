@@ -130,32 +130,35 @@ static int build_mounts(int nlines, const char *rootline)
 static void test_file_read_boundaries(void)
 {
     char buf[CFG_RAW_CAP];
+    int more = 99;
     reset();
     /* exact fit: cap-1 bytes is a complete read, not an overflow */
     int k = fill_comments(CFG_RAW_CAP - 1);
     serve("/tmp/x", g_data, k, 4096);
-    int n = file_read("/tmp/x", buf, CFG_RAW_CAP);
-    CHECK(n == CFG_RAW_CAP - 1 && buf[n] == 0);
-    /* one byte more must be refused, not silently truncated */
+    int n = file_read("/tmp/x", buf, CFG_RAW_CAP, &more);
+    CHECK(n == CFG_RAW_CAP - 1 && buf[n] == 0 && more == -1);
+    /* one byte more must be refused, not silently truncated; the probe
+     * byte is exposed (here the final '\n' of the comment filler) */
     reset();
     k = fill_comments(CFG_RAW_CAP);
     serve("/tmp/x", g_data, k, 4096);
-    n = file_read("/tmp/x", buf, CFG_RAW_CAP);
-    CHECK(n == -EFBIG && buf[CFG_RAW_CAP - 1] == 0);
-    /* well past capacity */
+    n = file_read("/tmp/x", buf, CFG_RAW_CAP, &more);
+    CHECK(n == -EFBIG && buf[CFG_RAW_CAP - 1] == 0 && more == '\n');
+    /* well past capacity: probe is a mid-line byte */
     reset();
     k = fill_comments(CFG_RAW_CAP + 500);
     serve("/tmp/x", g_data, k, 4096);
-    CHECK(file_read("/tmp/x", buf, CFG_RAW_CAP) == -EFBIG);
+    n = file_read("/tmp/x", buf, CFG_RAW_CAP, &more);
+    CHECK(n == -EFBIG && more == 'a');
     /* short reads + EINTR still deliver the whole file */
     reset();
     serve("/tmp/x", "hello world", 11, 3);
     g_eintr_left = 2;
-    n = file_read("/tmp/x", buf, 64);
-    CHECK(n == 11 && streq(buf, "hello world"));
+    n = file_read("/tmp/x", buf, 64, &more);
+    CHECK(n == 11 && streq(buf, "hello world") && more == -1);
     /* missing file stays a plain error */
     reset();
-    CHECK(file_read("/tmp/none", buf, 64) == -ENOENT);
+    CHECK(file_read("/tmp/none", buf, 64, 0) == -ENOENT);
 }
 
 /* ---------------------------------------------------------- config loading */
@@ -195,6 +198,39 @@ static void test_config_normal_loads(void)
     serve(CONFIG_PATH, g_data, k, 4096);
     conf_load();
     CHECK(g_conf.nsvc == 1 && streq(g_conf.svcs[0].path, "/bin/true"));
+}
+
+/* W7 probe-byte refinement: a config of exactly cap bytes ending in '\n'
+ * has only complete lines buffered - it must parse fully, not degrade. */
+static void test_config_newline_probe_parses(void)
+{
+    reset();
+    int k = fill_comments(2019);
+    const char *svc = "service ok once /bin/true\n";   /* 26 */
+    memcpy(g_data + k, svc, strlen(svc));
+    k += (int)strlen(svc);                              /* 2045 */
+    g_data[k++] = '\n'; g_data[k++] = '\n'; g_data[k++] = '\n';
+    CHECK(k == CFG_RAW_CAP);                            /* 2048, probe '\n' */
+    serve(CONFIG_PATH, g_data, k, 4096);
+    conf_load();
+    CHECK(g_conf.nsvc == 1);
+    CHECK(streq(g_conf.svcs[0].name, "ok"));
+    CHECK(streq(g_conf.svcs[0].path, "/bin/true"));
+}
+
+/* A SPACE probe is NOT a line boundary for configs (further args could
+ * follow on the same line): still refuse -> default shell. */
+static void test_config_space_probe_refused(void)
+{
+    reset();
+    int k = fill_comments(CFG_RAW_CAP - 1);
+    g_data[k++] = ' ';
+    CHECK(k == CFG_RAW_CAP);
+    serve(CONFIG_PATH, g_data, k, 4096);
+    conf_load();
+    CHECK(g_conf.nsvc == 1);
+    CHECK(streq(g_conf.svcs[0].name, "shell"));
+    CHECK(streq(g_conf.svcs[0].path, DEFAULT_SHELL));
 }
 
 static void test_config_nul_line_skipped(void)
@@ -303,6 +339,36 @@ static void test_cmdline_normal(void)
     CHECK(cmdline_flags() == 0);
 }
 
+/* W7: x86 max-length cmdline (2047 chars + '\n' = 2048 B): the newline
+ * probe means every token is complete - parse fully, keep the rescue flag
+ * (the W1 trim dropped the last COMPLETE token here). */
+static void test_cmdline_maxlen_newline_probe(void)
+{
+    reset();
+    for (int i = 0; i < 2035; i++) g_data[i] = 'a';
+    g_data[2035] = ' ';
+    memcpy(g_data + 2036, "l2.rescue=1", 11);   /* ends at 2046 */
+    g_data[2047] = '\n';
+    serve(CMDLINE_PATH, g_data, 2048, 4096);
+    CHECK(cmdline_flags() == BOOTFLAG_RESCUE);
+}
+
+/* W7: the trim stop-set matches the Rust is_ws: a '\r' before the cut
+ * token must stop the trim so a complete rescue flag before it survives
+ * (the W1 stop-set {' ','\t','\n'} over-dropped it). */
+static void test_cmdline_cr_stop_set(void)
+{
+    reset();
+    for (int i = 0; i < 2000; i++) g_data[i] = 'a';
+    g_data[2000] = ' ';
+    memcpy(g_data + 2001, "l2.rescue=1", 11);   /* 2001..2011 */
+    g_data[2012] = '\r';
+    memcpy(g_data + 2013, "singleuser", 10);    /* 2013..2022, cut mid-token */
+    for (int i = 2023; i < 2052; i++) g_data[i] = 'b';
+    serve(CMDLINE_PATH, g_data, 2052, 4096);
+    CHECK(cmdline_flags() == BOOTFLAG_RESCUE);
+}
+
 /* ------------------------------------------------ /proc/mounts ro guard */
 
 static void test_mounts_streaming(void)
@@ -366,11 +432,15 @@ void rcl_enter(unsigned long *sp)
     test_file_read_boundaries();
     test_config_oversize_refused();
     test_config_normal_loads();
+    test_config_newline_probe_parses();
+    test_config_space_probe_refused();
     test_config_nul_line_skipped();
     test_parser_token_limits();
     test_cmdline_cut_token_dropped();
     test_cmdline_complete_flag_preserved();
     test_cmdline_normal();
+    test_cmdline_maxlen_newline_probe();
+    test_cmdline_cr_stop_set();
     test_mounts_streaming();
     finish(0);
 }

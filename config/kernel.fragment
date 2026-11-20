@@ -252,6 +252,34 @@ CONFIG_ACPI_DEBUG=n
 CONFIG_ACPI_TABLE_UPGRADE=n
 CONFIG_ACPI_PCC=n
 CONFIG_ACPI_PRMT=n
+# --- mission 05: drop the unrequested cpufreq / P-state stack -------------
+# SCHED_MC_PRIO defaults y and is the ONLY x86 selector of CPU_FREQ and the
+# Intel/AMD P-state drivers (arch/x86/Kconfig).  Both pstate drivers are bool
+# (cannot be modules).  L2 has no cpufreq daemon: firmware/HWP runs the CPU
+# autonomously and hardware PROCHOT/throttling still protects thermals.  ACPI
+# processor idle (C-states) and poweroff are unaffected -- ACPI_PROCESSOR,
+# ACPI_PROCESSOR_IDLE and INTEL_IDLE stay.  Removing the stack also drops
+# ACPI_CPPC_LIB -> MAILBOX/PCC and ACPI_PLATFORM_PROFILE.  Trade-off: no OS
+# frequency scaling and no ITMT core-priority scheduling on TBM3 CPUs.
+CONFIG_SCHED_MC_PRIO=n
+CONFIG_CPU_FREQ=n
+CONFIG_X86_INTEL_PSTATE=n
+CONFIG_X86_AMD_PSTATE=n
+CONFIG_CPU_FREQ_GOV_PERFORMANCE=n
+CONFIG_CPU_FREQ_GOV_SCHEDUTIL=n
+CONFIG_CPU_FREQ_DEFAULT_GOV_SCHEDUTIL=n
+# Thermal netlink + Intel pkg-temp zone: no thermal daemon in L2.  The THERMAL
+# core stays (ACPI_PROCESSOR selects it); X86_PKG_TEMP_THERMAL defaults m and
+# is the only enabled selector of THERMAL_NETLINK.  HW throttling intact.
+CONFIG_X86_PKG_TEMP_THERMAL=n
+CONFIG_THERMAL_NETLINK=n
+# ACPI extras not needed for L2 boot/poweroff: SPCR earlycon (the shipped
+# cmdline pins console=ttyS0) and the ACPI revision-override param (never
+# passed).  NOTE: ACPI_LPIT, ACPI_HOTPLUG_IOAPIC and EFI_ESRT are prompt-less
+# default-y symbols -- olddefconfig ignores a fragment =n for them (verified:
+# they revert to y), so they cannot be trimmed here; left at their defaults.
+CONFIG_ACPI_SPCR_TABLE=n
+CONFIG_ACPI_REV_OVERRIDE_POSSIBLE=n
 CONFIG_CPU_IDLE=y
 CONFIG_INTEL_IDLE=y
 CONFIG_RTC_CLASS=y
@@ -260,6 +288,10 @@ CONFIG_RTC_DRV_CMOS=y
 CONFIG_EFI=y
 CONFIG_EFI_STUB=y
 CONFIG_EFI_CUSTOM_SSDT_OVERLAYS=n
+# mission 05: the legacy vsyscall page is never used by musl-static userland
+# (vDSO / raw syscalls only).  EFI_ESRT (fwupd resource table) is also unused
+# but is prompt-less default-y, so a fragment =n cannot disable it.
+CONFIG_X86_VSYSCALL_EMULATION=n
 CONFIG_PNP_DEBUG_MESSAGES=n
 CONFIG_RELOCATABLE=y
 # Keep the kernel's base physical decompression window at 2..14 MiB instead of
@@ -310,11 +342,21 @@ CONFIG_MODULES=y
 CONFIG_MODULE_UNLOAD=y
 CONFIG_MODVERSIONS=n
 CONFIG_MODULE_SIG=n
+# mission 05: drop EXPORT_SYMBOL entries no enabled module uses (~244 KiB of
+# __ksymtab/__ksymtab_strings before trim).  Every hw/wifi-pack module is =m in
+# this .config, so kbuild keeps all symbols they reference.  Caveat: breaks
+# out-of-tree module builds (L2 ships in-tree modules only); a DKMS-style
+# package would need UNUSED_KSYMS_WHITELIST.
+CONFIG_TRIM_UNUSED_KSYMS=y
 CONFIG_FW_LOADER=y
 CONFIG_FW_LOADER_USER_HELPER=n
 CONFIG_FW_LOADER_COMPRESS=y
 CONFIG_FW_LOADER_COMPRESS_XZ=y
-CONFIG_FW_LOADER_COMPRESS_ZSTD=y
+# mission 05: L2 ships firmware xz-compressed (l2 build firmware, wifi-firmware.list),
+# so the zstd decompressor (~83 KiB of lib/zstd text) is dead weight.  Dropping it
+# removes ZSTD_DECOMPRESS/ZSTD_COMMON (its only enabled selector).  .xz firmware
+# still loads; only hypothetical out-of-tree .zst firmware would be unsupported.
+CONFIG_FW_LOADER_COMPRESS_ZSTD=n
 CONFIG_RFKILL=m
 CONFIG_WIRELESS=y
 CONFIG_CFG80211=m

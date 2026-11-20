@@ -158,6 +158,24 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       build/out/initramfs-l2 regenerated 21:03 (L2-72 batch, their lane);
       peer forensics stay pinned to snapshots. W7 /tmp cap closes L2-96
       variant's inherited WEDGED mempressure expectation.
+      **INTEGRATED SEQUENCING (L2-72 mission-92 re-stamp, 00:2x —
+      supersedes primary refresh path)**: W6/W7 land+COMMIT FIRST →
+      L2-72 mission-05 lands+ping → L2-72 integrated ./l2 build rcl2 l2pm
+      + rootfs/initramfs/iso picks up committed W1/W2/W6/W7 (rcl2+l2pm
+      binaries; l2install/l2net via rootfs staging) → final ISO carries
+      ALL hardening → L2-96 variant re-copy + FINAL re-verification
+      (selftest re-stamp) + sha pin to maiake-f6. If W7 lands AFTER that
+      rebuild, L2-ea refreshes build/out/rcl2 in coordinated window (ping)
+      — no double-refresh conflict. L2-ea pings at W6/W7 commit; L2-72
+      pings at mission-05 landing.
+      **MISSION-92 RE-STAMP DONE (L2-72 independent)**: 1984055/4acfd36/
+      1ec7140 verified; make check EXIT=0 (166+4 suites, evidence
+      build/campaigns/92-restamp-make-check.log); sizes match (rcl2
+      18,656 / l2pm 100,472); rescue fix + fsync + verify --repair +
+      manifest-never-silent-pass confirmed; fragment/patch 0 touches.
+      l2pm selftest RSS 168 KiB confirmed (W5: 168 KiB + ~98 KiB binary).
+      Boot-40 citation provided (a2-rcl2-boot.log:297, pid1_boot path ≠
+      selftest 48); L2-72 boot-40 stamp pending accept/re-measure.
 - [~] W7 rcl2 live-mode /tmp+/run OOM wedge + D5 OOB fix (maiake-f6 verified
       findings; missions 19/25/29/30 + 101–120) — **LAUNCHED 23:2x as W1-agent
       continuation** (warm runtime). Packet read in full + lead-verified:
@@ -659,3 +677,11 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   recommendations confirmed; commit rule mutual. No user decision needed.
   W6+W7 running; awaiting WP2 v2 / W2 audit verdicts / mission-05 / N5 /
   FINAL pings.
+- 00:2x L2-72 mission-92 re-stamp DONE (independent: make check EXIT=0,
+  sizes match, fixes confirmed, WIP safe). Boot-40 citation provided
+  (a2-rcl2-boot.log:297 pid1_boot path; selftest 48 distinct; maiake-f6
+  dual 36-40 kB). l2pm RSS 168 confirmed for W5. INTEGRATED SEQUENCING
+  reconciled: W6/W7 commit first → L2-72 post-05 integrated ./l2 build
+  carries all hardening → L2-96 variant re-copy + FINAL + sha pin;
+  supersedes my primary build/out/rcl2 refresh (fallback if W7 late).
+  W6+W7 running; will ping L2-72 at commit for rebuild timing.

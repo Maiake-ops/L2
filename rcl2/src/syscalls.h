@@ -38,6 +38,7 @@
 #define SYS_ppoll       271L
 #define SYS_exit_group  231L
 #define SYS_pipe2       293L
+#define SYS_sysinfo     99L
 
 static inline long r_sys6(long nr, long a, long b, long c, long d, long e, long f)
 {
