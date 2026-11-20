@@ -156,6 +156,20 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       installed: l2install copies from verified medium; l2net: marker →
       manifest-hash vs pin → per-file hashes of used files → fail-closed.
       Open: one manifest vs per-pack; host-install pin source = build staging.
+      **CONTRACT CO-SIGNED (22:2x, docs/armageddon/p2-pack-pin-contract.md)**
+      with 3 amendments sent for incorporation: A1 uniform verify-ALL-pack-
+      files-at-FIRST-activation (closes boot-time firmware gap: load_modules
+      probes all modaliases → wifi pack activates at boot when wifi HW
+      present, iwlwifi/r8169 request firmware at probe; ~1s one-time wifi
+      cost, /run cache after); A2 verifier-side manifest parse hardening
+      (reject absolute/..//duplicate relpaths/bad hashes/CRLF — crafted
+      medium controls manifest bytes); A3 upgrade invariant (any l2net
+      replacement on installed systems must refresh pin; P2 shell+build
+      ship same release; old ISOs unaffected via immutable initramfs).
+      Per-pack manifests + dual pin + fail-closed + build flow ACKed.
+      Mission-70 additions suggested (wifi-HW boot cost, malformed manifest,
+      upgrade-without-refresh). P2 shell implementation waits for L2-72
+      mission-05 ping.
 
 Mission mapping 101–300: kernel/boot (101–140) → L2-96; rcl2 (141–160) → W1;
 l2pm (181–200) → W2; build system (201–220) → W2/W5; networking/userland
@@ -432,3 +446,11 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   topology still user decision. Git status shows all lanes active:
   W1 in rcl2 (incl syscalls.h), W2 NOW EDITING l2pm.c + security suite,
   L2-72 in kernel.fragment, L2-96 in build-lowram/. No intervention needed.
+- 22:2x P2 contract (docs/armageddon/p2-pack-pin-contract.md) read in full
+  and CO-SIGNED with amendments A1-A3: A1 closes boot-time firmware gap
+  (wifi pack activates at boot via load_modules when wifi HW present —
+  uniform verify-all-at-first-activation rule replaces subtree split);
+  A2 verifier-side manifest parse hardening; A3 pin-refresh upgrade
+  invariant + same-release deployment ordering. Mission-70 additions
+  suggested. P2 shell-side waits for mission-05 ping; W6-P1 remains
+  immediately launchable on agent-slot free. W1/W2 still running.
