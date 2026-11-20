@@ -93,7 +93,15 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
 - [ ] W6 shell safety hardening: l2install + l2net (62/64/66/67/221–240/261–280)
       — queued; reuse a heavy-coder agent after W1/W2 land (credit discipline:
       max 2 concurrent heavy agents). Findings + regression-test scope below.
-      udhcpc.script audited CLEAN (no changes needed).
+      udhcpc.script audited CLEAN (no changes needed). Peer F1 write-up:
+      docs/armageddon/61-69-security-posture.md (exploit: attacker CD in sr0
+      wins loop order over USB boot medium). **Phased fix**: P1 (my lane) =
+      L2-LIVE marker requirement + fail-closed pack search + l2install
+      F3/F4/F5/F7/F14 + N3 set -f; P2 = pack integrity manifest with hash
+      PINNED IN INITRAMFS (boot-chain trust; marker alone is forgeable text),
+      verified by l2net before use — needs l2 build-script edits = L2-72
+      deferred lane, coordinate after mission 05. MODULE_SIG = kernel lane +
+      user decision. Mission-70 regression test: L2-72 writes after W6 lands.
 
 Mission mapping 101–300: kernel/boot (101–140) → L2-96; rcl2 (141–160) → W1;
 l2pm (181–200) → W2; build system (201–220) → W2/W5; networking/userland
@@ -205,6 +213,25 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
 - pid_alive comm-checks pidfiles (no stranger-kill), pack mounts ro,
   carrier-gated DHCP with bounded wait + link-down on no-carrier: all good.
 
+## Cross-lane findings (recorded, NOT my write scope)
+
+- **dash HTTP MITM-pin (L2-72 build-infra lane, verified by me)**: l2:293
+  resolver + l2:327 `l2 update` download with EMPTY sha over http:// →
+  pins whatever arrives into sources.lock (persistent MITM); l2:683 build
+  uses the lock sha. Fix: https mirror + refuse empty-sha pinning over http.
+  Deferred until no peer ./l2 builds run.
+- **busybox login/passwd/su/getty + /etc/passwd root:x, NO /etc/shadow**
+  (L2-72 mission 67): boot bypasses auth by design (rcl2 console → root
+  shell, physical access = root); login/su behavior vs missing shadow
+  untested (empty-password bypass check). W1 does NOT touch console/auth.
+- **Kernel posture decisions → user/campaign J** (peer §61): CPU_MITIGATIONS
+  off (Spectre V1/V2 vulnerable), no SECCOMP/STACKPROTECTOR/MODULE_SIG/LSMs;
+  KASLR/STRICT_RWX/IBT/INIT_STACK_ALL_ZERO/VMAP_STACK on. Enabling any
+  hardening trades against 10 MiB ISO / 15 MiB idle budgets — measure first.
+  W5 release docs must reference this posture honestly.
+- rcl2 parser fuzz ownership: W1 (running) owns it; peer mission 67 keeps
+  non-rcl2 malformed input; corpus shared on landing (no duplication).
+
 ## Log
 
 - 20:05–20:12 inspected repo, prior ledger, forensics; verified rcl2 at HEAD;
@@ -254,3 +281,12 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   Agent progress observed via git status (not transcripts): W1 wrote
   rcl2/verification/test-truncation.c + test-lifecycle.c, Makefile touched;
   W2 wrote tools/test_l2pm_transactions.py (l2pm.c still pristine).
+- 21:2x L2-72 actioned all points; my l2net finding recorded as F1 (HIGH)
+  in docs/armageddon/61-69-security-posture.md with sr0-ordering exploit.
+  W6 fix shape accepted WITH PHASING (P1 shell-side mine; P2 initramfs-
+  pinned pack manifest needs their l2 lane post-mission-05; marker alone
+  forgeable). Mission-70 regression theirs after W6. Verified dash HTTP
+  empty-sha MITM-pin (l2:293/327/683) — their lane. Closed their §66
+  udhcpc pending item with my clean audit. Fuzz ownership split: W1 rcl2
+  parser, mission 67 login/su/shadow + rest. Test count corrected to 71
+  (8a582c9). W1/W2 still running.
