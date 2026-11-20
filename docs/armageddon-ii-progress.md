@@ -1,17 +1,17 @@
 # ARMAGEDDON II — L2-ea workstream ledger (missions 101–300)
 
 Session: **L2-ea**, started 2026-11-20 ~20:05 local. Directive: continue the
-100-mission ARMAGEDDON campaign (peer ledger: `docs/armageddon-progress.md`,
-owned by session L2-96) with workstreams 101–300. Branch:
+100-mission ARMAGEDDON campaign (shared peer ledger: `docs/armageddon-progress.md`,
+co-owned by L2-72 + L2-96) with workstreams 101–300. Branch:
 `campaigns/armageddon-ii` (from `cd0f88a`, main). No pushes, no history rewrites.
 
 ## Multi-session lane split (deconfliction messages sent 20:14)
 
 | Session | Lane | Write scope |
 |---|---|---|
-| L2-96 | Kernel low-RAM **variant** (corrected 20:5x per peer msg): NEW `config/kernel.lowram` + `tools/l2-lowram`, separate `build-lowram/` tree, logs `build/campaigns/lowram-*`; snapshots `build/out/rcl2`+`initramfs-l2` once read-only. Does NOT edit rcl2/l2pm/kernel.fragment/patch-kernel-ram.py/l2/build/out | as listed |
-| L2-72 | Reproducible boot matrix tooling (missions 241–260) | `tools/lowram_matrix.py`, `tools/test_lowram_matrix.py` (still UNTRACKED — not in 1888794; correction sent to L2-96) |
-| other session | worktree `.qwen/worktrees/campaigns` (branch `campaigns/engineering`, kernel build observed 20:11) — NOT L2-96's per its correction; owner unconfirmed | worktree only; L2-ea does not touch |
+| L2-96 | Kernel low-RAM **variant** + boot matrix: NEW `config/kernel.lowram` + `tools/l2-lowram`, separate `build-lowram/` tree, logs `build/campaigns/lowram-*`; **owns `tools/lowram_matrix.py` + test** (corrected per L2-72 msg; still UNTRACKED, not in 1888794); snapshots `build/out/rcl2`+`initramfs-l2` once read-only. Does NOT edit rcl2/l2pm/kernel.fragment/patch-kernel-ram.py/l2/build/out | as listed |
+| L2-72 | **Original ARMAGEDDON campaign session** (corrected 21:0x): shared ledger co-owner, mission reports 01-04/05/11-13/21, broad audits/verification; **mission 05 default-kernel trim — its heavy-coder REBUILDS `build/out/{vmlinuz-l2,initramfs-l2,l2.iso,l2-wifi.iso}` in the MAIN tree** (JOBS=6 L2_LOAD=5, checks concurrent ./l2 builds). Cedes rcl2/l2pm implementation to L2-ea; keeps audits. l2pm gapmap incoming: `build/campaigns/armageddon-l2pm-gapmap.md` | `config/kernel.fragment`, `tools/patch-kernel-ram.py` (mission 05), `docs/armageddon*`, `build/campaigns/armageddon-*`, build/out artifacts |
+| other session | worktree `.qwen/worktrees/campaigns` (branch `campaigns/engineering`, kernel build observed 20:11) — denied by L2-96, unclaimed by L2-72; owner unconfirmed | worktree only; L2-ea does not touch |
 | **L2-ea (this)** | rcl2 lifecycle (21–30, 141–160), l2pm (41–50, 181–200), verification/commits | `rcl2/`, `l2pm/`, new `tools/test_rcl2*`, `build/a2-*/`, `build/campaigns/a2-*`, this file |
 
 L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
@@ -60,6 +60,12 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       crash/reap/signal/shutdown harness, private-initramfs QEMU boot proof.
       ELF segment audit already done by lead: CLEAN (R E .rodata+.text, RW
       .data+.bss, GNU_STACK RW — no W+X). config/rcl2.conf = 538 B.
+      Amendments: #1 rcl2-scoped tests only (lead runs full make check);
+      #2 pinned-snapshot kernel for QEMU + peer mission-21 ABI constraints
+      (Svc=507/Conf=8692 asserts, 16 svc/6 args/8 env, name24/path96/arg64,
+      no-SA_RESTART/EINTR, async-safe handlers, PID1-never-exits, CGROUPS=n
+      → RLIMITs, wait-ordering deliberate) + boot-resident capture (closes
+      peer's pending mission-22 re-measure).
 - [~] W2 l2pm transaction/consistency hardening (41–50, 181–200) — heavy-coder
       launched 20:3x (background, parallel to W1, disjoint write scope).
       Audit-first: generations/rollback/gc/verify/search ALREADY exist
@@ -94,6 +100,12 @@ l2pm (181–200) → W2; build system (201–220) → W2/W5; networking/userland
   guest size; rcl2 PID1 ~50 KiB resident; <10 MiB guest boot = primary target.
 - RAM measurements: real ISO, -smp 2, settle 40 s (direct boot reads ~1 MiB
   high; re-run over-budget readings with --settle 40 before calling regression).
+- **build/out VOLATILITY protocol (L2-72 mission-05 rebuilds active)**: never
+  read live build/out for test evidence — use pinned snapshots
+  (`build/campaigns/baseline-artifacts/` + SHA256SUMS, kernel 0fa6cfc8…) or
+  own copies under build/a2-* with recorded hashes; sanity-check rootfs copies
+  for torn restage races. L2-ea runs no ./l2 build; ping L2-72 before any
+  future exception. W1 amended accordingly (21:0x).
 
 ## W4 review notes — tools/patch-kernel-ram.py (independent-maintainer pass)
 
@@ -212,3 +224,13 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   (it is NOT; still untracked). l2net/udhcpc audit complete: N1 pack-trust
   finding (ring-0 via non-boot medium), N3/N5 hardening notes; udhcpc.script
   clean. W6 scope widened to l2install+l2net. W1/W2 agents still running.
+- 21:0x L2-72 replied (it is the ORIGINAL campaign session, not the matrix
+  author): matrix tools are L2-96's; L2-72 owns mission-05 default-kernel
+  trim and IS rebuilding build/out in the main tree; cedes rcl2/l2pm
+  implementation to me, keeps audits; shared ledger Concurrency section —
+  L2-72 adds my lane (I avoid concurrent edits). Answered: split stands,
+  my directive is additive not whole-campaign. W1 amended (#2): pinned
+  baseline-artifacts kernel for QEMU, peer ABI constraints relayed,
+  boot-resident capture added. Read peer audit docs/armageddon/21-rcl2-
+  lifecycle.md (mission 21 DONE; gap map 22-30; CGROUPS=n ⇒ RLIMITs).
+  Correction sent: cd0f88a was committed on main, branch created after.
