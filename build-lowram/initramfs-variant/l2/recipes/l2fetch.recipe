@@ -1,0 +1,5 @@
+name = l2fetch
+version = 0.1.0
+epoch = 1767225600
+source = ../../l2fetch
+build = mkdir -p "$DESTDIR/usr/bin" && install -m 0755 l2fetch "$DESTDIR/usr/bin/l2fetch"

@@ -1,0 +1,11 @@
+#!/bin/dash
+# Start a console on a serial port only if the UART really exists.
+# Laptops have no ttyS0 hardware: parking here (one idle dash, ~150 KiB) keeps
+# rcl2 from respawning a failing getty every few seconds.
+t=${1:-ttyS0}
+type=0
+[ -r "/sys/class/tty/$t/type" ] && read -r type < "/sys/class/tty/$t/type"
+if [ "${type:-0}" != 0 ] && [ -c "/dev/$t" ]; then
+    exec /sbin/rcl2 console "/dev/$t"
+fi
+while :; do /bin/sleep 3600; done

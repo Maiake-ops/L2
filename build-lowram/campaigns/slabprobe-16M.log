@@ -1,0 +1,113 @@
+
+L2 live system ready
+Commands: l2fetch, l2net, l2wifi, l2install, poweroff. RAM-only session: changes are lost at shutdown.
+L2# cat /proc/slabinfo; echo L2SLA''BDONE
+
+cat: can't open '/proc/slabinfo': No such file or directory
+L2SLABDONE
+L2# L2# cat /proc/meminfo; echo L2SLA''BDONE
+
+MemTotal:          10096 kB
+MemFree:            5288 kB
+MemAvailable:       5096 kB
+Buffers:               0 kB
+Cached:              832 kB
+SwapCached:            0 kB
+Active:              284 kB
+Inactive:            600 kB
+Active(anon):        284 kB
+Inactive(anon):      600 kB
+Active(file):          0 kB
+Inactive(file):        0 kB
+Unevictable:           0 kB
+Mlocked:               0 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+Dirty:                 0 kB
+Writeback:             0 kB
+AnonPages:           108 kB
+Mapped:              300 kB
+Shmem:               832 kB
+KReclaimable:          0 kB
+Slab:               2836 kB
+SReclaimable:          0 kB
+SUnreclaim:         2836 kB
+KernelStack:         400 kB
+PageTables:          424 kB
+SecPageTables:         0 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:        5048 kB
+Committed_AS:       1432 kB
+VmallocTotal:   34359738367 kB
+VmallocUsed:         432 kB
+VmallocChunk:          0 kB
+Percpu:              288 kB
+Balloon:               0 kB
+GPUActive:             0 kB
+GPUReclaim:            0 kB
+DirectMap4k:       10112 kB
+DirectMap2M:        6144 kB
+L2SLABDONE
+L2# L2# for d in /sys/kernel/slab/*; do n=$(cat $d/objects 2>/dev/null | awk '{print $1}'); s=$(cat $d/object_size 2>/dev/null); echo "$n $s ${d##*/}"; done | sort -rn | head -40; echo L2SY''SDONE
+
+head: unrecognized option: 4
+L2SYSDONE
+L2# L2# 
+L2 live system ready
+Commands: l2fetch, l2net, l2wifi, l2install, poweroff. RAM-only session: changes are lost at shutdown.
+L2# cat /proc/slabinfo; echo L2SLA''BDONE
+
+cat: can't open '/proc/slabinfo': No such file or directory
+L2SLABDONE
+L2# L2# cat /proc/meminfo; echo L2SLA''BDONE
+
+MemTotal:          10096 kB
+MemFree:            5180 kB
+MemAvailable:       4988 kB
+Buffers:               0 kB
+Cached:              832 kB
+SwapCached:            0 kB
+Active:              280 kB
+Inactive:            560 kB
+Active(anon):        280 kB
+Inactive(anon):      560 kB
+Active(file):          0 kB
+Inactive(file):        0 kB
+Unevictable:           0 kB
+Mlocked:               0 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+Dirty:                 0 kB
+Writeback:             0 kB
+AnonPages:            76 kB
+Mapped:              300 kB
+Shmem:               832 kB
+KReclaimable:          0 kB
+Slab:               2848 kB
+SReclaimable:          0 kB
+SUnreclaim:         2848 kB
+KernelStack:         408 kB
+PageTables:          428 kB
+SecPageTables:         0 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:        5048 kB
+Committed_AS:       1432 kB
+VmallocTotal:   34359738367 kB
+VmallocUsed:         448 kB
+VmallocChunk:          0 kB
+Percpu:              288 kB
+Balloon:               0 kB
+GPUActive:             0 kB
+GPUReclaim:            0 kB
+DirectMap4k:       10112 kB
+DirectMap2M:        6144 kB
+L2SLABDONE
+L2# L2# for d in /sys/kernel/slab/*; do o=$(cat $d/objects 2>/dev/null); s=$(cat $d/object_size 2>/dev/null); echo "$o $s ${d##*/}"; done | awk '{kb=$1*$2/1024; printf "%8.0f KiB %6d obj x %5d B %s\n", kb,$1,$2,$3}' | sort -rn | head -n 35; echo L2SY''SDONE
+
+       0 KiB      0 obj x     0 B 
+L2SYSDONE
+L2# L2# 

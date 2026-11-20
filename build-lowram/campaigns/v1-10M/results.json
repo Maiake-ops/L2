@@ -1,0 +1,42 @@
+[
+  {
+    "size": 10,
+    "mode": "bios",
+    "status": "FAIL",
+    "signature": "oom-deadlock",
+    "reason": "no L2# prompt before timeout",
+    "last_ts": 0.380176,
+    "tail": [
+      "[    0.370352]  kernel_misc_reclaimable:0",
+      "[    0.370352]  free:28 free_pcp:0 free_cma:0",
+      "[    0.370357] Node 0 active_anon:20kB inactive_anon:200kB active_file:0kB inactive_file:0kB unevictable:0kB isolated(anon):0kB isolated(file):0kB mapped:0kB dirty:0kB writeback:0kB shmem:360kB kernel_stack:280kB pagetables:276kB sec_pagetables:0kB all_unreclaimable? no Balloon:0kB gpu_active:0kB gpu_reclaim:0kB",
+      "[    0.370361] DMA32 free:112kB boost:0kB min:128kB low:160kB high:192kB reserved_highatomic:0kB free_highatomic:0kB active_anon:20kB inactive_anon:200kB active_file:0kB inactive_file:0kB unevictable:0kB writepending:0kB zspages:0kB present:9720kB managed:3200kB mlocked:0kB bounce:0kB free_pcp:0kB local_pcp:0kB free_cma:0kB",
+      "[    0.370365] lowmem_reserve[]: 0 0 0",
+      "[    0.370368] DMA32: 1*4kB (M) 1*8kB (M) 0*16kB 1*32kB (M) 1*64kB (M) 0*128kB 0*256kB 0*512kB 0*1024kB 0*2048kB 0*4096kB = 108kB",
+      "[    0.370378] 90 total pagecache pages",
+      "[    0.370379] 2430 pages RAM",
+      "[    0.370380] 0 pages HighMem/MovableOnly",
+      "[    0.370380] 1630 pages reserved",
+      "[    0.370381] Tasks state (memory values in pages):",
+      "[    0.370382] [  pid  ]   uid  tgid total_vm      rss rss_anon rss_file rss_shmem pgtables_bytes swapents oom_score_adj name",
+      "[    0.370383] Out of memory and no killable processes...",
+      "[    0.370385] Kernel panic - not syncing: System is deadlocked on memory",
+      "[    0.380176] ---[ end Kernel panic - not syncing: System is deadlocked on memory ]---"
+    ],
+    "spawn_ok": null,
+    "log": "build-lowram/campaigns/v1-10M/10M-bios.log",
+    "mem_total": null,
+    "mem_available": null,
+    "mem_free": null,
+    "used": null,
+    "reserved": null,
+    "slab": null,
+    "pagetables": null,
+    "kernel_stack": null,
+    "percpu": null,
+    "kernel_release": null,
+    "cmdline": null,
+    "qemu_exit": null,
+    "seconds": 180.4
+  }
+]

@@ -1,0 +1,66 @@
+[    0.370296] kworker/u9:0 invoked oom-killer: gfp_mask=0x40cc0(GFP_KERNEL|__GFP_COMP), order=0, oom_score_adj=0
+[    0.370309] CPU: 0 UID: 0 PID: 23 Comm: kworker/u9:0 Not tainted 7.3.3-l2-lowram #1 PREEMPTLAZY 
+[    0.370314] Workqueue: async 0xffffffff80260050
+[    0.370317] Call Trace:
+[    0.370320]  <TASK>
+[    0.370321]  ? 0xffffffff80208329
+[    0.370323]  ? 0xffffffff80203a0d
+[    0.370324]  ? 0xffffffff802c5c1d
+[    0.370324]  ? 0xffffffff802fc6a3
+[    0.370325]  ? 0xffffffff802fe239
+[    0.370326]  ? 0xffffffff802fe319
+[    0.370326]  ? 0xffffffff802fe5fa
+[    0.370327]  ? 0xffffffff8059ab41
+[    0.370327]  ? 0xffffffff802ff62b
+[    0.370328]  ? 0xffffffff80300160
+[    0.370328]  ? 0xffffffff80300160
+[    0.370329]  ? 0xffffffff805802d2
+[    0.370329]  ? 0xffffffff805851c0
+[    0.370330]  ? 0xffffffff80585297
+[    0.370331]  ? 0xffffffff8058539a
+[    0.370331]  ? 0xffffffff8032c9b8
+[    0.370332]  ? 0xffffffff802d1890
+[    0.370332]  ? 0xffffffff803142a3
+[    0.370333]  ? 0xffffffff806c68d0
+[    0.370333]  ? 0xffffffff806c6ae0
+[    0.370334]  ? 0xffffffff806f068a
+[    0.370334]  ? 0xffffffff806c6bf1
+[    0.370335]  ? 0xffffffff806c6acf
+[    0.370335]  ? 0xffffffff806c6b09
+[    0.370336]  ? 0xffffffff807010e7
+[    0.370336]  ? 0xffffffff806c78d0
+[    0.370337]  ? 0xffffffff806c775b
+[    0.370338]  ? 0xffffffff806c68d0
+[    0.370338]  ? 0xffffffff806c79dc
+[    0.370339]  ? 0xffffffff8026006b
+[    0.370339]  ? 0xffffffff80255e18
+[    0.370340]  ? 0xffffffff80256006
+[    0.370341]  ? 0xffffffff80255ed0
+[    0.370341]  ? 0xffffffff8025bedc
+[    0.370342]  ? 0xffffffff8025be00
+[    0.370343]  ? 0xffffffff8022399c
+[    0.370343]  ? 0xffffffff8025be00
+[    0.370344]  ? 0xffffffff802096b1
+[    0.370344]  </TASK>
+[    0.370346] Mem-Info:
+[    0.370352] active_anon:5 inactive_anon:50 isolated_anon:0
+[    0.370352]  active_file:0 inactive_file:0 isolated_file:0
+[    0.370352]  unevictable:0 dirty:0 writeback:0
+[    0.370352]  slab_reclaimable:0 slab_unreclaimable:519
+[    0.370352]  mapped:0 shmem:90 pagetables:69
+[    0.370352]  sec_pagetables:0 bounce:0
+[    0.370352]  kernel_misc_reclaimable:0
+[    0.370352]  free:28 free_pcp:0 free_cma:0
+[    0.370357] Node 0 active_anon:20kB inactive_anon:200kB active_file:0kB inactive_file:0kB unevictable:0kB isolated(anon):0kB isolated(file):0kB mapped:0kB dirty:0kB writeback:0kB shmem:360kB kernel_stack:280kB pagetables:276kB sec_pagetables:0kB all_unreclaimable? no Balloon:0kB gpu_active:0kB gpu_reclaim:0kB
+[    0.370361] DMA32 free:112kB boost:0kB min:128kB low:160kB high:192kB reserved_highatomic:0kB free_highatomic:0kB active_anon:20kB inactive_anon:200kB active_file:0kB inactive_file:0kB unevictable:0kB writepending:0kB zspages:0kB present:9720kB managed:3200kB mlocked:0kB bounce:0kB free_pcp:0kB local_pcp:0kB free_cma:0kB
+[    0.370365] lowmem_reserve[]: 0 0 0
+[    0.370368] DMA32: 1*4kB (M) 1*8kB (M) 0*16kB 1*32kB (M) 1*64kB (M) 0*128kB 0*256kB 0*512kB 0*1024kB 0*2048kB 0*4096kB = 108kB
+[    0.370378] 90 total pagecache pages
+[    0.370379] 2430 pages RAM
+[    0.370380] 0 pages HighMem/MovableOnly
+[    0.370380] 1630 pages reserved
+[    0.370381] Tasks state (memory values in pages):
+[    0.370382] [  pid  ]   uid  tgid total_vm      rss rss_anon rss_file rss_shmem pgtables_bytes swapents oom_score_adj name
+[    0.370383] Out of memory and no killable processes...
+[    0.370385] Kernel panic - not syncing: System is deadlocked on memory
+[    0.380176] ---[ end Kernel panic - not syncing: System is deadlocked on memory ]---

@@ -1,0 +1,318 @@
+#!/usr/bin/env bash
+# l2-lowram - additive "lowram" kernel variant builder for the L2 tiny distro.
+#
+# Builds a SEPARATE VM/serial-oriented kernel (config/kernel.lowram on top of
+# `make tinyconfig`) whose goal is to boot the L2# shell with 10 MiB TOTAL guest
+# RAM (QEMU -m 10M, BIOS ISO).  The default kernel/ISO produced by ./l2 is never
+# touched: this tool reads build/ only to copy the cached kernel tarball, the
+# current initramfs-l2 and the limine files, and writes everything under
+# build-lowram/ (override with L2_BUILD_DIR).
+#
+# Subcommands:
+#   build     configure + compile the lowram bzImage (no modules)
+#   initramfs assemble a variant initramfs (tty1 service removed, for VT=n)
+#   iso       assemble build-lowram/out/l2-lowram.iso (BIOS+UEFI, 10 MiB gate)
+#   all       build + initramfs + iso                                  [default]
+#   sizes     print bzImage size, init_size and vmlinux section sizes
+#
+# Reproducibility matches ./l2: SOURCE_DATE_EPOCH from sources.lock, TZ=UTC
+# LC_ALL=C, fixed KBUILD_BUILD_TIMESTAMP/USER/HOST/VERSION; the kernel applies
+# -ffile-prefix-map itself.  The ISO reuses l2's exact xorriso args, limine
+# bios-install and the 4-byte "L2\0\1" ID pin at offset 440.
+#
+# Host load: -j8 -l6 (JOBS/L2_LOAD overridable).  bash -n clean; shellcheck
+# style (quote expansions, no eval, printf diagnostics to stderr).
+
+set -Eeuo pipefail
+shopt -s nullglob
+
+SELF=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")
+L2_ROOT=${L2_ROOT:-$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)}
+BUILD=${L2_BUILD_DIR:-$L2_ROOT/build-lowram}   # SEPARATE from build/
+MAIN_BUILD=$L2_ROOT/build                      # read-only source of artifacts
+SRC=$BUILD/src
+OUT=$BUILD/out
+LOGS=$BUILD/logs
+CACHE=$BUILD/cache
+LOCK=$L2_ROOT/sources.lock
+FRAGMENT=$L2_ROOT/config/kernel.lowram
+JOBS=${JOBS:-8}
+LOAD=${L2_LOAD:-6}
+L2_ISO_LIMIT_MB=${L2_ISO_LIMIT_MB:-10}
+L2_ALLOW_BIG_ISO=${L2_ALLOW_BIG_ISO:-0}
+EPOCH=${SOURCE_DATE_EPOCH:-}
+
+say()  { printf 'l2-lowram: %s\n' "$*" >&2; }
+warn() { printf 'l2-lowram: WARNING: %s\n' "$*" >&2; }
+die()  { printf 'l2-lowram: ERROR: %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+lock_get() {
+    [ -r "$LOCK" ] || return 1
+    awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$LOCK"
+}
+
+init_epoch() {
+    if [ -z "$EPOCH" ]; then EPOCH=$(lock_get epoch || true); fi
+    [ -n "$EPOCH" ] || EPOCH=1767225600
+    export SOURCE_DATE_EPOCH="$EPOCH"
+    export TZ=UTC LC_ALL=C LANG=C
+    umask 022
+}
+
+sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
+
+# On NixOS the libelf/openssl headers objtool needs are not in the default
+# search path; expose the profile include/lib dirs (same trick as l2).  On
+# other distros these dirs are absent and this is a no-op.
+setup_host_paths() {
+    local nd
+    for nd in "$HOME/.nix-profile" /run/current-system/sw; do
+        [ -d "$nd/include" ] && CPATH="$nd/include${CPATH:+:$CPATH}"
+        [ -d "$nd/lib" ] && LIBRARY_PATH="$nd/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+        [ -d "$nd/lib/pkgconfig" ] && PKG_CONFIG_PATH="$nd/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+        [ -d "$nd/share/pkgconfig" ] && PKG_CONFIG_PATH="$nd/share/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+    done
+    export CPATH LIBRARY_PATH PKG_CONFIG_PATH
+}
+
+kver() {
+    local v=${KERNEL_VERSION:-$(lock_get kernel_version || true)}
+    [ -n "$v" ] || die "sources.lock has no kernel_version"
+    printf '%s' "$v"
+}
+
+# Parse the x86 bzImage header: init_size (0x260), payload_offset (0x248,
+# relative to (setup_sects+1)*512), setup_sects (0x1f1).  Prints bytes + MiB.
+print_init_size() {
+    local bz=$1
+    python3 - "$bz" <<'PY'
+import struct, sys
+d = open(sys.argv[1], 'rb').read(0x300)
+setup_sects = d[0x1f1] or 4
+payload_offset = struct.unpack_from('<I', d, 0x248)[0]
+init_size = struct.unpack_from('<I', d, 0x260)[0]
+base = (setup_sects + 1) * 512
+print(f"init_size      = 0x{init_size:x} ({init_size} B, {init_size/1048576:.2f} MiB)")
+print(f"payload_offset = 0x{payload_offset:x} (absolute 0x{base + payload_offset:x})")
+print(f"decompress end = PHYSICAL_START(0x200000)+init_size = 0x{0x200000 + init_size:x}")
+PY
+}
+
+# Report fragment symbols that olddefconfig dropped/changed (renamed symbols,
+# unmet dependencies).  Mirrors l2's check_kernel_dropped, lowram-only.
+check_dropped() {
+    local cfg=$1 dropped=$LOGS/kernel-lowram-dropped.txt
+    mkdir -p "$LOGS"
+    awk '
+        FNR == NR {
+            if ($0 ~ /^CONFIG_[A-Za-z0-9_]+=/) {
+                eq = index($0, "="); s = substr($0, 1, eq - 1); got[s] = substr($0, eq + 1)
+            } else if ($0 ~ /^# CONFIG_[A-Za-z0-9_]+ is not set$/) { got[$2] = "n" }
+            next
+        }
+        {
+            sub(/[[:space:]]+#.*/, ""); sub(/[[:space:]]+$/, "")
+            if ($0 ~ /^# CONFIG_[A-Za-z0-9_]+ is not set$/) { s = $2; v = "n" }
+            else if ($0 ~ /^CONFIG_[A-Za-z0-9_]+=/) {
+                eq = index($0, "="); s = substr($0, 1, eq - 1); v = substr($0, eq + 1)
+            } else next
+            if (!(s in seen)) { seen[s] = 1; order[++n] = s; want[s] = v }
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                s = order[i]; v = want[s]; g = (s in got) ? got[s] : "absent"
+                if (g != v) printf "%s=%s (got %s)\n", s, v, g
+            }
+        }
+    ' "$cfg" "$FRAGMENT" > "$dropped"
+    if [ -s "$dropped" ]; then
+        warn "$(wc -l < "$dropped") fragment symbols dropped/changed by olddefconfig (see $dropped)"
+        head -n 12 "$dropped" | sed 's/^/    /' >&2
+    fi
+}
+
+build_kernel() {
+    init_epoch
+    setup_host_paths
+    have python3 || die "python3 is required"
+    have make || die "make is required"
+    local ver dir tarball sha log stamp
+    ver=$(kver)
+    dir=$SRC/linux-$ver
+    tarball=$CACHE/linux-$ver.tar.xz
+    mkdir -p "$CACHE" "$SRC" "$OUT" "$LOGS"
+
+    # Seed the cache from the main build (read-only copy); verify the pin.
+    if [ ! -f "$tarball" ]; then
+        [ -f "$MAIN_BUILD/cache/linux-$ver.tar.xz" ] \
+            || die "kernel tarball missing: $MAIN_BUILD/cache/linux-$ver.tar.xz (run: l2 build kernel)"
+        say "seeding cache from $MAIN_BUILD/cache/linux-$ver.tar.xz"
+        cp "$MAIN_BUILD/cache/linux-$ver.tar.xz" "$tarball"
+    fi
+    sha=$(lock_get kernel_sha256 || true)
+    if [ -n "$sha" ]; then
+        [ "$(sha256_of "$tarball")" = "$sha" ] || die "kernel tarball sha256 mismatch"
+    fi
+
+    # Fresh extract so patch-kernel-ram.py always applies to pristine source.
+    rm -rf "$dir"
+    say "extracting linux $ver"
+    tar -xf "$tarball" -C "$SRC"
+    python3 "$L2_ROOT/tools/patch-kernel-ram.py" "$dir" || die "kernel RAM patch failed"
+
+    stamp=$(date -u -d "@$EPOCH" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || printf '2026-01-01 00:00:00')
+    export KBUILD_BUILD_TIMESTAMP="$stamp" KBUILD_BUILD_USER=l2 KBUILD_BUILD_HOST=l2 KBUILD_BUILD_VERSION=1
+
+    # Normalize "=n" to "# ... is not set" so merge_config.sh applies cleanly.
+    local nf=$dir/.l2-lowram-frag
+    sed -E 's/^(CONFIG_[A-Za-z0-9_]+)=n([[:space:]]*(#.*)?)$/# \1 is not set/' "$FRAGMENT" > "$nf"
+    log=$LOGS/kernel-lowram.log
+    say "configuring linux $ver (tinyconfig + kernel.lowram)"
+    if ! (
+        cd "$dir"
+        make tinyconfig
+        scripts/kconfig/merge_config.sh -m .config "$nf" >/dev/null 2>&1 \
+            || cat "$nf" >> .config
+        make olddefconfig
+        scripts/config --set-str LOCALVERSION "-l2-lowram"
+        scripts/config --disable LOCALVERSION_AUTO
+        scripts/config --disable MODULES
+    ) >"$log" 2>&1; then
+        rm -f "$nf"; tail -n 40 "$log" >&2; die "kernel configure failed (log: $log)"
+    fi
+    rm -f "$nf"
+    check_dropped "$dir/.config"
+
+    say "building linux $ver (-j$JOBS -l$LOAD bzImage, no modules)"
+    if ! (
+        cd "$dir"
+        make -j"$JOBS" -l"$LOAD" bzImage
+    ) >>"$log" 2>&1; then
+        tail -n 60 "$log" >&2; die "kernel build failed (log: $log)"
+    fi
+    [ -f "$dir/arch/x86/boot/bzImage" ] || die "bzImage missing after build"
+
+    install -m 0644 "$dir/arch/x86/boot/bzImage" "$OUT/vmlinuz-l2-lowram"
+    install -m 0644 "$dir/.config" "$OUT/kernel-lowram.config"
+    ( cd "$dir" && make -s kernelrelease ) > "$OUT/kernelrelease-lowram" 2>>"$log" || true
+    say "kernel $(cat "$OUT/kernelrelease-lowram" 2>/dev/null || printf '%s' "$ver-l2-lowram"): $OUT/vmlinuz-l2-lowram ($(stat -c%s "$OUT/vmlinuz-l2-lowram") B)"
+    print_init_size "$OUT/vmlinuz-l2-lowram"
+}
+
+# Assemble a lowram variant initramfs under build-lowram (never edits the
+# committed build/out/initramfs-l2).  Removes the 'service tty1' line from
+# rcl2.conf so a VT=n kernel does not respawn-fail on a missing /dev/tty1.
+# Repacked root-owned (cpio --owner=0:0) and reproducible (gzip -n, epoch mtimes).
+make_initramfs_variant() {
+    init_epoch
+    have cpio || die "cpio is required"
+    have gzip || die "gzip is required"
+    local src=$MAIN_BUILD/out/initramfs-l2
+    local work=$BUILD/initramfs-variant
+    local out=$OUT/initramfs-l2-lowram
+    [ -f "$src" ] || die "initramfs missing: $src (run: l2 build initramfs)"
+    rm -rf "$work"; mkdir -p "$work" "$OUT"
+    say "assembling variant initramfs (tty1 service removed) from $src"
+    ( cd "$work" && gzip -dc "$src" | cpio -idm --quiet --no-preserve-owner ) \
+        || die "initramfs extract failed"
+    local conf=$work/etc/rcl2.conf
+    [ -f "$conf" ] || die "variant initramfs has no etc/rcl2.conf"
+    grep -v '^[[:space:]]*service[[:space:]]\+tty1[[:space:]]' "$conf" > "$conf.tmp"
+    mv "$conf.tmp" "$conf"
+    find "$work" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
+    ( cd "$work" && find . -print0 \
+        | cpio --null -o -H newc --owner=0:0 --reproducible --quiet \
+        | gzip -n -9 ) > "$out" || die "initramfs repack failed"
+    say "variant initramfs: $out ($(stat -c%s "$out") B)"
+}
+
+make_iso() {
+    init_epoch
+    have xorriso || die "xorriso is required"
+    local out=$OUT/l2-lowram.iso
+    local lim=$MAIN_BUILD/out/limine/share/limine
+    local limbin=$MAIN_BUILD/out/limine/bin/limine
+    # Prefer the lowram variant initramfs (tty1 service removed for VT=n);
+    # fall back to the current main initramfs (read-only) when absent.
+    local initrd=$OUT/initramfs-l2-lowram
+    [ -f "$initrd" ] || initrd=$MAIN_BUILD/out/initramfs-l2
+    local isod=$BUILD/iso.lowram
+    [ -f "$OUT/vmlinuz-l2-lowram" ] || die "lowram kernel missing; run: tools/l2-lowram build"
+    [ -f "$initrd" ] || die "initramfs missing: $initrd (run: l2 build initramfs)"
+    [ -x "$limbin" ] || die "limine host tool missing: $limbin (run: l2 build limine)"
+    local f
+    for f in limine-bios.sys limine-bios-cd.bin limine-uefi-cd.bin BOOTX64.EFI; do
+        [ -f "$lim/$f" ] || die "limine file missing: $lim/$f"
+    done
+
+    rm -rf "$isod"; mkdir -p "$isod/boot/limine" "$isod/EFI/BOOT" "$isod/l2"
+    install -m 0644 "$OUT/vmlinuz-l2-lowram" "$isod/boot/vmlinuz"
+    install -m 0644 "$initrd" "$isod/boot/initramfs"          # read-only copy
+    install -m 0644 "$lim/limine-bios.sys" "$isod/boot/limine/limine-bios.sys"
+    install -m 0644 "$lim/limine-bios-cd.bin" "$isod/boot/limine/limine-bios-cd.bin"
+    install -m 0644 "$lim/BOOTX64.EFI" "$isod/EFI/BOOT/BOOTX64.EFI"
+    install -m 0644 "$lim/limine-uefi-cd.bin" "$isod/boot/limine/limine-uefi-cd.bin"
+    local cmdline
+    cmdline=$(tr -d '\n' < "$L2_ROOT/config/cmdline" 2>/dev/null || printf 'loglevel=4')
+    sed "s|@CMDLINE@|$cmdline|g" "$L2_ROOT/config/limine.conf" > "$isod/boot/limine/limine.conf"
+    cp "$isod/boot/limine/limine.conf" "$isod/EFI/BOOT/limine.conf"
+    # L2-LIVE marker: l2net find_pack stops immediately (no hw/wifi pack here).
+    printf 'L2 live medium lowram\n' > "$isod/l2/L2-LIVE"
+    find "$isod" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
+
+    mkdir -p "$OUT"
+    # Exact xorriso args from l2's _make_iso (only -A/-o/source differ).
+    local args=(-as mkisofs -iso-level 3 -full-iso9660-filenames -R -r -J -volid L2
+        -publisher "L2" -preparer "L2 reproducible build" -A "L2 lowram"
+        -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table
+        --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image
+        --protective-msdos-label -o "$out")
+    say "creating $out"
+    if ! xorriso "${args[@]}" "$isod" >"$LOGS/iso-lowram.log" 2>&1; then
+        tail -n 40 "$LOGS/iso-lowram.log" >&2; die "ISO build failed"
+    fi
+    if ! "$limbin" bios-install "$out" >>"$LOGS/iso-lowram.log" 2>&1; then
+        tail -n 40 "$LOGS/iso-lowram.log" >&2; die "limine bios-install failed on $out"
+    fi
+    # 4-byte ID pin "L2\0\1" at offset 440 (matches l2).
+    printf '\114\062\000\001' | dd of="$out" bs=1 seek=440 conv=notrunc 2>/dev/null
+
+    local size limit; size=$(stat -c%s "$out"); limit=$((L2_ISO_LIMIT_MB * 1024 * 1024))
+    say "ISO: $size B ($(awk -v s="$size" 'BEGIN{printf "%.2f", s/1048576}') MiB) of $L2_ISO_LIMIT_MB MiB"
+    if [ "$size" -gt "$limit" ]; then
+        if [ "$L2_ALLOW_BIG_ISO" = 1 ]; then warn "over the $L2_ISO_LIMIT_MB MiB budget (L2_ALLOW_BIG_ISO=1)"
+        else die "ISO over the $L2_ISO_LIMIT_MB MiB budget; trim the kernel or set L2_ALLOW_BIG_ISO=1"; fi
+    fi
+}
+
+show_sizes() {
+    local ver dir bz
+    ver=$(kver); dir=$SRC/linux-$ver; bz=$OUT/vmlinuz-l2-lowram
+    [ -f "$bz" ] || die "no bzImage; run: tools/l2-lowram build"
+    printf 'bzImage        = %s B (%.2f MiB)\n' "$(stat -c%s "$bz")" \
+        "$(awk -v s="$(stat -c%s "$bz")" 'BEGIN{print s/1048576}')"
+    print_init_size "$bz"
+    if [ -f "$dir/vmlinux" ]; then
+        printf '\nvmlinux sections (size -A):\n'
+        size -A "$dir/vmlinux" | awk 'NR>2 && $2+0>0 {printf "  %-24s %10d\n", $1, $2}'
+    else
+        warn "vmlinux not found ($dir/vmlinux); section sizes unavailable"
+    fi
+}
+
+usage() {
+    sed -n '2,30p' "$SELF" | sed 's/^# \{0,1\}//' >&2
+    exit 2
+}
+
+cmd=${1:-all}
+case "$cmd" in
+    build)     build_kernel ;;
+    initramfs) make_initramfs_variant ;;
+    iso)       make_iso ;;
+    all)       build_kernel; make_initramfs_variant; make_iso ;;
+    sizes)     show_sizes ;;
+    -h|--help|help) usage ;;
+    *) die "unknown subcommand: $cmd (want build|initramfs|iso|all|sizes)" ;;
+esac

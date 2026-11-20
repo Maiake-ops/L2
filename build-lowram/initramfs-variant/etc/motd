@@ -1,0 +1,9 @@
+
+  L2 - tiny Linux for tools
+  l2wifi         scan and connect to wifi
+  l2net status   network state
+  l2fetch        system summary
+  openssl        TLS/crypto tool (runs from the boot medium)
+  l2pm list      installed packages
+  l2install -h   install to disk
+

@@ -1,0 +1,6 @@
+# Build l2pm itself.  `l2pm add l2pm.recipe` from l2pm/recipes/.
+name = l2pm
+version = 0.1.0
+epoch = 1767225600
+source = ..
+build = mkdir -p "$DESTDIR/usr/bin" && ${CC:-cc} -std=c11 -Os -static -ffile-prefix-map=$PWD=. -fdebug-prefix-map=$PWD=. -o "$DESTDIR/usr/bin/l2pm" l2pm.c && strip -s "$DESTDIR/usr/bin/l2pm" 2>/dev/null || true

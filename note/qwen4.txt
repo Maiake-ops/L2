@@ -1,0 +1,489 @@
+================================================================================
+PROJECT ARMAGEDDON — L2 ECOSYSTEM ENGINEERING — SESSION HANDOFF NOTE
+================================================================================
+File:        note/qwen4.txt  (requested by user 2026-11-20 ~23:59)
+Session:     L2-72 (Qwen Code, main 100-mission campaign; heavy-coder tier)
+Repo:        /home/maiake/L2   Branch: campaigns/armageddon-ii
+Canonical ledger:   docs/armageddon-progress.md  (~718 lines, shared 4-session record)
+Mission reports:    docs/armageddon/*.md
+Evidence logs:      build/campaigns/*
+Resume protocol:    read docs/armageddon-progress.md, run `git status`,
+                    continue first mission not DONE. This note is a
+                    self-contained summary; the ledger is authoritative.
+
+--------------------------------------------------------------------------------
+1. MISSION & HARD BUDGETS (user-confirmed)
+--------------------------------------------------------------------------------
+Transform L2 into a complete, independently buildable, reproducible, secure,
+extremely memory-efficient Linux ecosystem. 100 missions, campaigns A–J.
+- Core ISO < 10 MiB (hard gate, build-enforced L2_ISO_LIMIT_MB=10).
+- Installed storage < 10 MiB.
+- Idle RAM 10–15 MiB band, hard ceiling 15360 KiB, at ANY guest RAM size
+  (user raised from <10 MiB on 2026-11-13). NOTE: maiake-f6's separate brief
+  uses strict 10240 KiB (old repo default); both pass today (~5.5 MiB idle);
+  final release-gate threshold awaits user harmonization.
+- Low-RAM boot reliability (10–32 MiB guests) is a campaign goal, distinct
+  from the idle band on big machines. Sub-10M boot objective is BIOS-only
+  (UEFI firmware/Limine constraint, demonstrated).
+- RAM measurement: boot the REAL ISO (tools/ramtest.py --iso), -smp 2,
+  settle 40 s. Direct -kernel/-initrd reads ~1 MiB high (fw_cfg keeps initrd
+  in guest memory) — use for forensics composition, NOT budget numbers.
+- Preserve user data / working implementations; no destructive ops; no remote
+  changes; no git history rewrites; small reviewable diffs; every claim needs
+  a command + output; never invent results.
+
+--------------------------------------------------------------------------------
+2. FOUR-SESSION LANE MAP + COORDINATION STATE (all user-driven TUIs)
+--------------------------------------------------------------------------------
+L2-72 (US): default-kernel trim mission 05 (config/kernel.fragment +
+  tools/patch-kernel-ram.py + main-tree kernel/rootfs/initramfs/iso builds),
+  kernel 06–09 verification, boot-infra/userspace/build-infra/security/perf/
+  compat audits+tests, docs/armageddon*, final review. NO commits by us.
+L2-96: low-RAM boot mission; ADDITIVE lowram variant ONLY (config/kernel.lowram,
+  tools/l2-lowram, build-lowram/ — separate L2_BUILD_DIR, never rm -rf build/src)
+  + lowram_matrix.py harness + forensics/verification. WP2 variant moved BIOS
+  floor 14M→12M, iterating toward 10M.
+L2-ea: "ARMAGEDDON II" additive directive (missions 101–300); rcl2/l2pm
+  implementation (W1/W2 committed) + W6 shell-safety hardening (l2install/
+  l2net) + a2 logs/docs (docs/armageddon-ii-progress.md). Owns verification/
+  commits on campaigns/armageddon-ii.
+maiake-f6: worktree ONLY (.qwen/worktrees/campaigns, branch campaigns/engineering,
+  base 21031ce); never writes main checkout. Missions 06–09/14–15 analysis
+  (additive config/kernel.slubdebug + tools/l2-slubdebug.sh), 51–53 worktree
+  audit/repro/integrity, l2wifi fuzz, release-matrix harness
+  (tools/test-release-matrix.py) + guest-compat battery. Agent A DONE (data
+  delivered to us). Artifact-gating (tests whichever ISO owner produces,
+  sha256 pinned per report).
+
+COORDINATION STATE:
+- LANE DISPUTE (22:15) RESOLVED (22:50): L2-96 briefly claimed the mission-05
+  kernel lane, then RETRACTED in ledger + formal stand-down acceptance (23:05).
+  Governing principle agreed by all: ONLY THE USER can reassign lanes; a peer
+  message/proposal cannot. Recorded split stands. L2-96 confirmed DON'Ts: no
+  fragment/patch edits, no main-tree kernel builds, no commits of our WIP.
+- COMMIT-OWNERSHIP PROTOCOL: our kernel.fragment/patch-script WIP committed
+  ONLY when WE declare verified+ready, with attribution, after L2-ea review;
+  mid-iteration commits refused by all.
+- P2 PACK-PIN CONTRACT: CO-SIGNED (docs/armageddon/p2-pack-pin-contract.md).
+  L2-ea FINAL ACK incl A1–A3 + lead A2 extension. Nothing pending either side.
+- Budget correction sent to maiake-f6 (15360 band); they kept strict 10240
+  default per their brief + added --budget passthrough (b5617f7), flagged band
+  to their user. Correct principle (peer messages carry no authority).
+- All shared files verified untouched across lanes; mutual pings before
+  cross-lane writes or build/out rebuilds.
+
+--------------------------------------------------------------------------------
+3. MISSION STATUS (condensed; see ledger for per-mission evidence links)
+--------------------------------------------------------------------------------
+DONE / AUDITED (evidence-linked):
+  01 boot process, 02 kernel config audit, 03 early-boot memory profile,
+  04 physical reservation, 11 BIOS bootloader, 12 UEFI bootloader,
+  13 initramfs placement, 21 rcl2 PID1 lifecycle, 31 shell (dash),
+  41 l2pm metadata, 42 l2pm install, 49 l2pm source builds,
+  63 package signature audit, 64 filesystem permissions, 66 subprocess exec.
+EVIDENCE CLOSED via maiake-f6 agent A (cite worktree reports):
+  14 initramfs double-build identical; 15 xz/zstd cleanly rejected (gzip-only
+  validated); 09 initmem 692K freed + streaming initrd free firing;
+  17 10M root cause proven, KASLR EXONERATED; 52 third compile-determinism
+  confirmation.
+DONE via L2-96: 20 QEMU regression harness (lowram_matrix, 39 tests, e24248c);
+  81 guest RAM matrix; 83 BIOS configs; 84 UEFI configs; 88 shutdown/reboot/S3.
+PARTIAL / IN PROGRESS:
+  05 kernel image trim (US, heavy-coder RUNNING — batch1+2 built, verification
+     pending; see §4); 10/19 low-RAM reliability/pressure (L2-96);
+  22 PID1 memory (binary reduction verified, boot-resident 40 pending citation);
+  32/33 libc audit (measurements pending); 43/44/45/48/50 l2pm (W2 IMPLEMENTED
+     4acfd36, re-stamped); 51 build-script audit (l2 done, installer pending);
+  61/62/69 security posture (audited, fixes queued); 25/29/30 rcl2 (W1 1984055).
+PENDING:
+  06/07/08 (A data available, maiake-f6 lane, we verify); 16/18 boot-infra;
+  23/24/26/27/28 rcl2 features (L2-ea; CGROUPS=n ⇒ 28 must use RLIMITs);
+  34–40 userspace; 46/47 l2pm signatures/repo-metadata (L2-ea design-only);
+  53–60 build-infra; 65/67/68/70 security tests (67 split: W1 rcl2 fuzz done,
+     ours login/su missing-shadow + non-rcl2; 70 after W6/P2);
+  71–80 performance; 82/85/86/87/89/90 compat; 91–100 final review.
+
+--------------------------------------------------------------------------------
+4. KEY VERIFIED RESULTS & EVIDENCE
+--------------------------------------------------------------------------------
+BASELINE ARTIFACTS (14:39 build; canonical snapshot build/campaigns/baseline-artifacts/
+  with SHA256SUMS, == our baseline-l2.iso):
+  l2.iso 8,787,968 B (8.38 MiB, sha 06a4fd1e…); vmlinuz-l2 2,958,336 B
+  (sha 0fa6cfc8…); initramfs-l2 426,833 B; rcl2 26,904 B; busybox 374,752 B;
+  dash 145,168 B; l2pm 88,184 B. Kernel 7.3.3-l2, GCC 16.2.0, tinyconfig+fragment.
+
+BASELINE ISO SWEEP (BIOS, -smp 2, settle 40, budget 15360;
+  build/campaigns/armageddon-baseline-sweep.log):
+  10M FAIL (no prompt); 12M FAIL (early OOM "System is deadlocked on memory",
+  DMA32 present 11768K managed 3212K); 16M 5564/8192; 24M 5632/16256;
+  32M 5572/24320; 64M 5556/56576; 128M 5564/121092; 256M 5548/250120;
+  1G 5584/1024264 — all PASS. Idle RAM FLAT ~5.5 MiB ≪ 15 MiB ceiling.
+  UEFI 256M PASS idle 5760/244196 (baseline-uefi-forensics.log).
+
+EARLY-BOOT FORENSICS (32M; boot-forensics-32M.log + boot-forensics-earlycon-32M.log):
+  Memory: 22252K/32248K available (4891K code, 351K rwdata, 1392K rodata,
+  692K init, 164K bss, 9060K reserved). vmlinux text 5,626,568 + data
+  1,928,616 + bss 299,008 = 7,854,192 B (~7.5 MiB image = dominant reservation).
+  No SWIOTLB reservation on small guests (all RAM <4G, no IOMMU). Streaming
+  initrd free works (~416K freed during unpack). percpu 2×2MiB alloc mostly
+  freed. printk ring 36864 B (LOG_BUF_SHIFT=13).
+
+LOW-RAM ROOT CAUSES (proven independently by L2-96 + maiake-f6):
+  10M BIOS = SILENT TRIPLE FAULT: init_size 0x7e4000 + PHYSICAL_START
+  0x200000 = 0x9e4000 overruns Limine top-of-RAM boot_params/initrd (usable
+  top 0x9e0000) → #GP @0x9a1c90 → triple fault. NOT KASLR.
+  12M = early OOM deadlock (managed 3212K). 10M direct = kthreadd OOM
+  (managed 1152K). BIOS floor 13M FAIL / 14M PASS; 14M zero parallel
+  headroom (burst OOM-kills, PID1/shell survive), 16M clean under burst.
+  UEFI floor ∈ (96M,128M]: 32/48/64/96M FAIL, panic inside Limine
+  uefi_entry→init_memmap→ext_mem_alloc_type_aligned_mode BEFORE kernel load;
+  128/256M PASS idle ~5728/5748K (~160K above BIOS). Sub-10M is BIOS-only.
+
+MISSION 05 TRIM PROGRESS (heavy-coder; config/kernel.fragment WIP +43/−1,
+  UNCOMMITTED, protected by build/campaigns/05-fragment-wip.patch):
+  BATCH 1 (report 05-kernel-size.md + forensics CONFIRMED by lead):
+    Trims: SCHED_MC_PRIO/CPU_FREQ/X86_INTEL_PSTATE/X86_AMD_PSTATE + governors
+    =n; X86_PKG_TEMP_THERMAL/THERMAL_NETLINK/ACPI_SPCR_TABLE/
+    ACPI_REV_OVERRIDE_POSSIBLE/X86_VSYSCALL_EMULATION=n. Auto-dropped:
+    ACPI_CPPC_LIB/MAILBOX/PCC/ACPI_PLATFORM_PROFILE. Retained (real-HW):
+    ACPI_PROCESSOR/PROCESSOR_IDLE/INTEL_IDLE/SUSPEND/THERMAL core/PERF_EVENTS.
+    Prompt-less ACPI_LPIT/HOTPLUG_IOAPIC/EFI_ESRT revert to y (documented).
+    bzImage 2,921,472 (−36 KiB); init_size 0x7c9000 (−108 KiB); persistent
+    image −104 KiB; reserved 8940K (−120K); Memory: 22372K/32248K (4824K code).
+    10M BIOS COLLISION CLEARED: 0x200000+0x7c9000=0x9c9000 ≤ 0x9e0000 (92 KiB
+    margin). 32M smoke PASS idle 5500K. Build JOBS=6 L2_LOAD=5 exit 0, 18m22s,
+    113 modules. ISO 8,744,960 B (<gate).
+  BATCH 2 (ARTIFACT-VERIFIED by lead; report table PENDING):
+    Applied TRIM_UNUSED_KSYMS=y + FW_LOADER_COMPRESS_ZSTD=n.
+    bzImage 2,827,264 (−128 KiB cumulative); init_size 0x77d000 (−412 KiB
+    cumulative); 10M collision margin ~396 KiB. smoke32 done (21:23).
+    *** SAFETY GATE UNVERIFIED: ksymtrim can break hw/wifi-pack module
+    loading; boot-to-prompt smoke is NOT proof. Agent instructed to verify
+    e1000/wifi modalias load (no "Unknown symbol"), revert ksymtrim if broken.
+    DO NOT declare mission 05 ready until module-load gate + full verification
+    pass. ***
+  Target ≥500 KiB persistent cut NOT yet met (−104 KiB batch1; batch2 deltas
+  pending). 500 is a TARGET not a hard gate — complete verification + floor
+  analysis even if plateau; 10M collision clearance already a major win.
+
+AGENT-A INPUTS (maiake-f6 worktree, verified; relayed to heavy-coder):
+  B2a FW_LOADER_COMPRESS_ZSTD=n = −88 KiB text, SAFE (firmware xz, modules
+    userland-decompressed; ZSTD only via firmware_loader/Kconfig:206). Applied.
+  B2b TRIM_UNUSED_KSYMS gain = FRACTION of 238.6 KiB (in-tree wifi/hw modules
+    retain needed exports; out-of-tree would break). Gate pending.
+  B3 HIGHEST LEVERAGE for sub-10M: kernfs_node_cache ~1.3 MiB / 9780 nodes
+    UNRECLAIMABLE, device-count driven (measured via additive SLUB_DEBUG
+    variant, SLUB_TINY=n; absolute totals overstate shipped TINY kernel —
+    RANKING is the signal). Device-count cuts (cpufreq/thermal done batch1;
+    perf/MMC/hotplug/pcieport/I2C-gpio-pinctrl-clk) attack idle slab → more
+    managed headroom; matters MORE than text for 10M OOM limit. ~428 KiB
+    reclaimable slab droppable. → missions 08/80.
+  B4 LTO_CLANG: est 5–15% text (~250–730 KiB), clang 21.1.8 + ld.lld present;
+    GCC→clang switch + repro/matrix re-verify = mission 80, NOT required for 05.
+  Safe additional trims: ETHTOOL_NETLINK=n ~113K (confirmed =y; l2net uses
+    ip/sysfs), ACPI_AC/BATTERY→m ~20K. CAUTIONS: PERF_EVENTS PINNED
+    (arch/x86/Kconfig:320 select — A's "178K trim" estimate INVALID,
+    correction sent); HOTPLUG_CPU needed by SUSPEND; FONT_TER16x32 (hi-dpi)
+    + PCIEPORTBUS (real-HW PCIe) are trade-offs (document, don't silently
+    drop); MMC/I2C cores kept built-in (eMMC boot + I2C HID).
+  CONSTRAINT: PHYSICAL_START CANNOT go below 0x200000 on x86_64
+    (arch/x86/Kconfig:2099 range 0x200000 0x1000000 + MIN_KERNEL_ALIGN=
+    PMD_SIZE BUILD_BUG_ON). Span/init_size shrink is the ONLY placement lever.
+  CAPACITY MODEL: managed ≈ RAM − 1149 KiB − span + init_freed; runtime needs
+    ~3.9 MiB managed. 10M needs span <~5.9 MiB (batch2 init_size 0x77d000 ≈
+    7.5 MiB → ~1.6 MiB more reduction; trims+LTO+MODULES plausibly reach).
+    8M needs span <~3.6 MiB (text <~1.5 MiB) — BELOW essential-subsystem
+    floor; 8M NOT realistic without radical redesign.
+
+REPRODUCIBILITY (mission 52, multiple independent confirmations):
+  Kernel rebuild BYTE-IDENTICAL: sha 0fa6cfc8…, 2,958,336 B, 0 dropped symbols
+  (L2-96 rebuild + maiake-f6 worktree + our hash checks = 3 confirmations).
+  ISO assembly byte-reproducible: 2 staging rebuilds == baseline 06a4fd1e
+  (maiake-f6 07-reproducible.md). l2pm cross-checkout-path byte-identical
+  efc32819 (musl wrapper abs paths don't leak). initramfs double-build
+  identical (mission 14). ISO hash delta baseline→current (06a4fd1e→d850fb81)
+  fully explained: committed rcl2 WIP cd0f88a (26,904→17,184 B) → initramfs
+  426,833→421,275 B; kernel identical. NOT a repro failure.
+
+RCL2 / L2PM (L2-ea W1/W2, committed, lead RE-STAMPED 23:25;
+  build/campaigns/92-restamp-make-check.log):
+  1984055 rcl2 W1: EFBIG truncation-safe reads, parser NUL/arg-limit
+    rejection, rescue-newline fix (is_ws lacked '\n' so trailing l2.rescue=1
+    never matched — CONFIRMED in diff). Binary 18,656 B. SELFTEST resident
+    48 KiB (verified, unchanged); "boot-resident 40 KiB" CLAIMED (pid1_boot
+    path, different from selftest) — NOT independently re-measured, citation
+    requested. 8 files +1350/−48 incl verification/lifecycle/truncation suites.
+  4acfd36 l2pm W2: fail-safe gc (closes live-store-deletion chain), 20 fsync
+    sites, rollback intent marker, verify --repair (reconciles torn DB/profile),
+    missing-manifest "never a silent pass", transactions, set-aware remove.
+    Binary 100,472 B; selftest RSS 168 KiB (budget 10240). l2pm.c +938 lines.
+    transactions harness 33/33 (was 25/33 fail-before). Closes gapmap P1–P3.
+  1ec7140: Makefile wiring of new harnesses into make check.
+  INDEPENDENT make check re-run: EXIT=0, 166 unit tests
+    (17+14+45+19+3+4+33+17+10+4) + rcl2 C suites (supervision/truncation/
+    lifecycle) green. kernel.fragment/patch-script: 0 TOUCHES in their commits.
+  README size claims STALE: l2pm "~67 KiB binary / ~130 KiB RSS" vs actual
+    100,472 B (~98 KiB) / 168 KiB → W5/98 docs refresh (L2-ea queued).
+  User WIP cd0f88a (committed on MAIN by user/peer 20:04, L2-ea branched
+    armageddon-ii after): rcl2 Makefile opt-level=z + --no-rosegment -z norelro,
+    main.c/rcl.rs memory opts. Binary 26,904→17,184 B (−36%). PRESERVED.
+
+L2PM GAPMAP (build/campaigns/armageddon-l2pm-gapmap.md, Explore + lead verified,
+  handed to L2-ea; l2pm.c mtime 08:37 line numbers valid then):
+  Top gaps: (1) default gc deleted inactive generations → disarmed rollback
+  [FIXED W2]; (2) no crash consistency db→manifest→profile, zero fsync
+  [FIXED W2 20 fsync]; (3) detect-only integrity, gc trusted corrupt DB →
+  deleted live store, missing-manifest silent pass [FIXED W2 fail-safe+repair];
+  (4) no package authenticity (TOFU gate covers recipe EXEC only; install
+  has no authenticity check) [ed25519 design-only, L2-ea]; (5) cache/upgrade
+  waste + last-wins link_tree conflicts [partial].
+  41/42/49 implemented; 43 dep resolution add-only (install warns); 44
+  per-package atomic only; 45 rollback fragile (gc) [FIXED]; 48 cache
+  basename-keyed no invalidation.
+
+--------------------------------------------------------------------------------
+5. SECURITY FINDINGS (docs/armageddon/61-69-security-posture.md)
+--------------------------------------------------------------------------------
+F1 (HIGH, VERIFIED): l2net find_pack accepts module packs from ANY iso9660
+  medium with l2/hw|l2/wifi dirs — NO L2-LIVE marker check (l2install:124,131
+  DOES require it). Loop order sr0 before sd* → attacker CD beats genuine USB
+  boot medium → use_pack symlinks /lib/modules + firmware_class.path →
+  modprobe by modalias → RING-0 code load from untrusted media (MODULE_SIG=n).
+  Also rescue/direct-boot exposure. Installed systems safe via /lib/modules
+  short-circuit — BUT if that dir missing (kernel upgrade w/o modules,
+  corruption) find_pack falls through → F1 resurrects (L2-ea insight).
+  FIX: W6-P1 (L2-ea, running: L2-LIVE marker + fail-closed search + l2install
+  F3/F4/F5/F7/F14/F15/N1/N3) + P2 pack-pin (co-signed contract):
+    per-pack manifest l2/<pack>/pack-manifest (sorted "sha256  relpath");
+    pin /etc/l2/pack-hash dual location (initramfs at ISO build = OUR lane
+    post-05; ext4 root via l2install = L2-ea lane), sorted "sha256  packname";
+    A1 UNIFORM full-pack verification at FIRST activation in use_pack BEFORE
+    any modprobe/exec/firmware exposure (wifi/NIC drivers request firmware at
+    BOOT probe, before wifi-start — split-by-subtree was unsafe); A2 verifier
+    parse hardening (abs paths, .., dup relpaths, non-hex/short hashes, CRLF)
+    + reject symlinks/devices/FIFOs (busybox sha256sum follows symlinks);
+    A3 upgrade invariant (any l2net OR pack-content update must refresh pin
+    atomically); fail-closed + log. Mission-70 regression cases defined.
+61 kernel attack surface: CPU_MITIGATIONS/SECCOMP/STACKPROTECTOR/MODULE_SIG/
+  SECURITY(LSM)/KEYS/AUDIT/FORTIFY_SOURCE/HARDENED_USERCOPY/X86_MCE/CGROUPS/
+  IPV6/NETFILTER/KEXEC/BPF_SYSCALL/KPROBES/FTRACE/DEBUG_FS/IO_URING off;
+  KASLR/STRICT_KERNEL_RWX/X86_KERNEL_IBT/INIT_STACK_ALL_ZERO/VMAP_STACK on;
+  DEVMEM/PROC_KCORE/PROC_PAGE_MONITOR off. SMAP/SMEP/PTI symbols absent in
+  7.3.3 (runtime verify pending). Toggles = budget trade-offs → campaign J.
+62 PID1: root console by design (no auth); config root-owned trust boundary;
+  busybox login/passwd/su/getty applets present but boot bypasses them;
+  /etc/passwd root:x, NO /etc/shadow → login/su behavior untested (mission 67).
+  Rust panic → rcl_c_panic idles PID1 (never exits). No setuid binaries.
+64 filesystem: no setuid/setgid, no ww-dirs w/o sticky, passwd/group 0644,
+  /dev empty in staging (rcl2 mounts devtmpfs; cpio --owner=0:0 normalizes).
+  HARDENING: /root 755→700 (our deferred batch); /tmp 755 NOT 1777 +
+  uncapped ramfs (maiake-f6 finding d: live-mode /tmp OOM/respawn wedge) →
+  L2-ea rcl2 mounts_setup fix (tmpfs size= cap + mode 1777). Store
+  immutability by convention (verify detects tamper). OPEN: host l2install
+  dir uid preservation (cp -a from maiake:users staging) — 51 pending review.
+66 subprocess: l2pm sh -e -u -c fixed env/umask + ref injection guard;
+  udhcpc.script CLEAN (L2-ea audit + lead spot-check VERIFIED: charset
+  validation, domain untrusted, mktemp+atomic resolv.conf, binary-derived
+  quads); l2net N3 modprobe unquoted (set -f hardening W6); shutdown signals-only.
+69 supply chain: dash source hardcoded http:// at l2:293 (resolver),
+  l2:327 (l2 update EMPTY-sha pin → persistent MITM vector), l2:683 (build,
+  uses lock sha). Shipped dash_sha256 NON-EMPTY ⇒ current builds verify
+  against existing pin; exposure is pin (re)establishment via update/TOFU
+  over HTTP (maiake-f6 nuance). sources.lock has NO http:// URLs. Kernel
+  sha256sums.asc fetched https but GPG sig NOT checked (hash extracted only).
+  FIX (our build-infra lane, DEFERRED until no ./l2 builds run): https mirror,
+  refuse empty-sha http pin, curl --proto-redir =https, download --max-time,
+  atomic single-mv lock update. Also limine resolver GitHub vs source Codeberg
+  mismatch; empty-pin cached-file acceptance.
+
+--------------------------------------------------------------------------------
+6. CHANGED FILES (this session, OURS — all UNCOMMITTED, untracked or WIP)
+--------------------------------------------------------------------------------
+Restored:   .qwen/agents/heavy-coder.md (from parked .md.save, frontmatter fixed)
+Ledger:     docs/armageddon-progress.md (~718 lines)
+Reports:    docs/armageddon/01-boot-process.md, 02-04-kernel-config-memory.md,
+            11-13-boot-infrastructure.md, 21-rcl2-lifecycle.md (+addendum),
+            31-33-userspace-shell-libc.md, 51-build-scripts-audit.md,
+            61-69-security-posture.md, p2-pack-pin-contract.md
+Evidence:   build/campaigns/baseline-l2.iso, baseline-vmlinuz, baseline-initramfs,
+            baseline-kernel.config, armageddon-baseline-sweep.log,
+            boot-forensics-32M.log, boot-forensics-earlycon-32M.log,
+            baseline-uefi-forensics.log, 02-config-audit-symbols.txt,
+            armageddon-l2pm-gapmap.md, 92-restamp-make-check.log,
+            05-fragment-wip.patch (lead-created protective snapshot, 73 lines)
+Agent WIP:  config/kernel.fragment (+43/−1, mission 05, UNCOMMITTED, protected)
+            build/campaigns/05-attribute.awk, 05-attribution-baseline.tsv,
+            05-nm-symbols.txt, 05-kernel-size.md, 05-batch1-{build,forensics,
+            rootfs,smoke32}.log, 05-batch2-{build,smoke32}.log
+This note:  note/qwen4.txt
+NOT touched by us: rcl2/l2pm sources (L2-ea committed 1984055/4acfd36/1ec7140),
+  tools/lowram_matrix* (L2-96), .qwen/worktrees/** (maiake-f6),
+  build/campaigns/baseline-artifacts/** (L2-96), l2/l2install/overlay/l2wifi
+  (deferred fixes), config/kernel.lowram/tools/l2-lowram/build-lowram (L2-96),
+  branch state (no commits by us).
+
+--------------------------------------------------------------------------------
+7. REPRODUCIBLE COMMANDS
+--------------------------------------------------------------------------------
+Baseline sweep:
+  for s in 10M 12M 16M 24M 32M 64M 128M 256M 1G; do
+    python3 tools/ramtest.py --iso build/campaigns/baseline-l2.iso \
+      --ram $s --settle 40 --budget 15360 --timeout 90; done
+UEFI:
+  python3 tools/ramtest.py --iso build/campaigns/baseline-l2.iso --uefi \
+    --ram 256M --settle 40 --budget 15360
+Early-boot forensics (full memblock from t=0):
+  timeout 70 qemu-system-x86_64 -m 32M -smp 2 -display none -serial stdio \
+    -monitor none -no-reboot -nic none -accel kvm \
+    -kernel build/campaigns/baseline-vmlinuz \
+    -initrd build/campaigns/baseline-initramfs \
+    -append "rdinit=/init console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200 loglevel=8 memblock=debug"
+bzImage hdr.init_size (offset 0x260, LE u32):
+  python3 -c "import struct;print(hex(struct.unpack_from('<I',open('build/out/vmlinuz-l2','rb').read(),0x260)[0]))"
+Tests / measurements:
+  make check ; ./l2 doctor ; rcl2/build/rcl2 --selftest ; l2pm/l2pm selftest
+Mission 05 build (MUST be background, ~18 min; foreground 600s cap kills it):
+  JOBS=6 L2_LOAD=5 ./l2 build kernel   # then rootfs/initramfs/iso
+Protective snapshot:
+  git diff config/kernel.fragment tools/patch-kernel-ram.py > build/campaigns/05-fragment-wip.patch
+Module-load gate (ksymtrim, REQUIRED before ready):
+  QEMU boot with -device e1000 (or -nic user,model=e1000) → modalias load of
+  e1000 hw-pack module; and/or in-guest `modprobe e1000; lsmod`; check dmesg
+  for "Unknown symbol"/version disagreements; ideally wifi mt7921e/iwlwifi too.
+
+--------------------------------------------------------------------------------
+8. IN-FLIGHT WORK (at note time)
+--------------------------------------------------------------------------------
+heavy-coder (task heavy-coder-call_3f4e8559c56647cba38289e6) RUNNING mission 05:
+  batch1+2 built (EXIT=0), batch2 deltas NOT yet in report table; ksymtrim
+  module-load gate UNVERIFIED; final-verification + floor-analysis report
+  sections EMPTY. Guidance sent: ALL long builds is_background:true (foreground
+  600s cap likely killed earlier attempts = root cause of quiet gaps);
+  record batch2 deltas; module-load gate; full verification (make check,
+  doctor, ISO gate, sweep 12/16/32/256M/1G settle40 budget15360, UEFI 256M,
+  earlycon Memory:+init_size before/after, double-ISO sha256); floor analysis
+  with capacity model; 500 KiB target-not-gate; PERF_EVENTS pinned; keep
+  snapshot refreshed; report and complete. Agent had quiet gaps (21:23→23:05,
+  23:05 build died) — likely foreground timeouts; roster confirms running.
+L2-96: WP2 lowram variant iterating (floor 14M→12M, 10M gap ~550–600K managed
+  headroom); will share serial-evidence boot results. Matrix complete.
+L2-ea: W6-P1 running (l2install/l2net shell hardening); P2 shell-side waits
+  our mission-05 ping; W1/W2 committed + re-stamped. Will share boot-resident
+  40 citation + W6 hashes.
+maiake-f6: agent A DONE (data delivered, cited); double-build proof hashes
+  pending (kernel-analysis builds settling); release-matrix harness ready
+  (artifact-gating, sha256 pinned, --budget passthrough b5617f7). Awaits our
+  mission-05 before/after package for gates.
+
+--------------------------------------------------------------------------------
+9. NEXT STEPS / RESUME PROTOCOL
+--------------------------------------------------------------------------------
+1. Await heavy-coder completion → VERIFY claims against artifacts: module-load
+   gate (ksymtrim), full sweep, batch deltas, Memory:/init_size, double-ISO
+   sha256, make check/doctor. Do NOT accept report numbers without spot-check.
+2. INTEGRATE: refresh build/out (./l2 build rcl2 l2pm + rootfs initramfs iso)
+   so final ISO carries W1/W2 binaries (build/out/rcl2 still OLD 17,184 B).
+   Coordinate timing with L2-ea W6-P1 so l2net/l2install hardening lands in
+   the same integrated ISO. Re-run matrix/stability on integrated ISO.
+3. Declare mission 05 verified+ready → L2-ea commits fragment/patch with
+   attribution (commit protocol). Ping L2-ea for P2 sequencing.
+4. P2 BUILD-SIDE (our l2 lane, post-05): pack-manifest generation in pack
+   builders, pin computation, initramfs-rebuild-in-ISO-step flow, host-install
+   staging pin. Per co-signed contract. Then mission-70 regression (ours).
+5. Share mission-05 before/after package with maiake-f6 (release matrix) +
+   L2-96 (citation). Receive their double-build hashes (52/92).
+6. DEFERRED main-tree fixes (ONLY when no peer ./l2 build running — bash
+   incremental-read hazard): dash https + refuse empty-sha http pin +
+   --proto-redir =https + download max-time + atomic lock update; Makefile
+   musl-prereq port (cite maiake-f6 cfad4c8); /root 700; l2install image-mode
+   host-only guard (coordinate W6).
+7. Mission-70 regression after W6/P2: F1 crafted-medium refusal, installed
+   fall-through refusal, wifi-HW boot cost, malformed-manifest refusal,
+   upgrade-without-pin-refresh, retain_initrd bare-flag semantics,
+   streaming-free initrd_start invariant.
+8. Continue unclaimed missions: 16/18 boot-infra; 34–40 userspace; 53–60
+   build-infra; 65/67/68 security (67: login/su missing-shadow + non-rcl2);
+   71–80 perf (71 timed ISO cold-boot; B3 slab/device-count + LTO for 80);
+   82/85–90 compat; 91–100 review (91 architectural assumptions incl static
+   musl decision; 92 re-stamp W6 + boot-40; 93 hidden regressions incl 8K
+   stacks/low-1M skip adversarial flags; 98 docs incl README size refresh).
+9. Mission-92 re-stamp W6 when L2-ea hashes arrive; obtain boot-resident 40
+   KiB citation (selftest 48 verified, boot path different).
+
+--------------------------------------------------------------------------------
+10. OPEN USER DECISIONS (no action required unless you want to change)
+--------------------------------------------------------------------------------
+- Lane reassignment? Recorded split stands; only user can reassign.
+- Idle-budget harmonization for final release gate: our brief 15360 KiB band
+  (user 2026-11-13) vs maiake-f6 brief 10240 strict. Both pass today (~5.5 MiB).
+- l2-lowram → l2 integration: post-05 proposal; L2-96 hands over delta if
+  user/we want it (main-tree change, our lane). Variant standalone until then.
+- MODULE_SIG / security toggles (SECCOMP/STACKPROTECTOR/FORTIFY/mitigations):
+  budget trade-offs, campaign J decision.
+- 8M boot objective: capacity model says below essential-subsystem floor
+  (span <3.6 MiB / text <1.5 MiB needed) — confirm 10M is the realistic
+  objective; 8M not achievable without radical redesign.
+
+--------------------------------------------------------------------------------
+11. CAVEATS / HONEST LIMITATIONS (do not overclaim)
+--------------------------------------------------------------------------------
+- mission 05 batch2 deltas NOT yet in agent report; ksymtrim module-load
+  UNVERIFIED (gate pending) — NOT ready to declare/commit until proven.
+- ≥500 KiB persistent-image target NOT met (−104 KiB batch1; batch2 pending).
+- rcl2 boot-resident 40 KiB CLAIMED, not independently re-measured (selftest
+  48 KiB verified; different code path). Citation requested.
+- l2pm RSS 168 KiB / binary ~98 KiB vs README ~130/~67 STALE → W5/98 refresh.
+- Agent A's PERF_EVENTS "178K safe trim" estimate INVALID (pinned by X86
+  select, confirmed arch/x86/Kconfig:320). Correction sent.
+- Some peer evidence accepted WITH CITATION, not full independent re-run:
+  UEFI floor details, S3 suspend/resume, slab absolute totals (SLUB_DEBUG
+  variant overstates shipped SLUB_TINY — ranking is the signal).
+- Forensics used direct -kernel/-initrd boot (fw_cfg inflates ~1 MiB vs ISO);
+  composition conclusions valid, budget numbers from ISO sweep only.
+- Early memblock dump initially lost to 16 KiB printk ring overflow before
+  console enable; fixed with earlycon (boot-forensics-earlycon-32M.log).
+- heavy-coder had quiet gaps / died builds (likely foreground 600s timeouts);
+  guidance sent to use background builds. Monitor for completion; if stuck,
+  intervene (status query sent; do not relaunch while running).
+- 8K thread/IRQ stacks + skipped low-1M reservation (patch-kernel-ram.py)
+  flagged adversarial; L2-96 dispositioned with tests (8K stable 16M/32M
+  under churn; low-1M downgraded to real-HW residual risk; S3 clean) —
+  mission 91/93 to review final.
+- This session made NO git commits. All our docs/evidence untracked; kernel
+  fragment WIP uncommitted (protected by snapshot). Peers commit on their
+  branches per protocol.
+
+--------------------------------------------------------------------------------
+ADDENDUM (2026-11-20, post-note): L2-ea confirms dispute CLOSED — L2-96
+retracted + attributed the fragment WIP to our mission-05 agent in its own
+ledger, committed to NOT editing/verifying/reverting it or running main-tree
+kernel builds. Escalation stood down; no user decision required (split
+unchanged). Trim-batch ownership confirmed OURS: zstd/ksymtrim (our agent),
+runtime size-gating / RO vmemmap tail (05/80/65), LTO_CLANG (80). N5 joint
+policy: L2-ea ledger names US kernel-side executor; their l2net joint change
+is W5-era, coordinated with our finalized gating policy (pairing matters —
+gating interacts with l2net VM-policy writes). L2-ea commit-refusal policy =
+durable discipline. W6-P1 + W7 running on their side; hashes at landing for
+mission-92 re-stamps. WP2 v1 (L2-96 variant, cited): floor 14M→12M, bzImage
+−736K, 10M managed 3200K — primary target closing; our default-kernel trim
+(batch2 −128 KiB bzImage / −412 KiB init_size, 10M collision cleared) may move
+the 14M default floor independently (module-load gate + verification pending).
+
+MISSION-05 FINAL SWEEP (lead-VERIFIED from build/campaigns/05-final-sweep.log;
+trimmed build/out/l2.iso; BIOS -smp2 settle40 budget15360):
+  10M FAIL (no prompt — OOM; collision now cleared), 12M FAIL (OOM),
+  14M PASS idle 5516/6548, 16M PASS 5536/8596, 32M PASS 5580/24724,
+  256M PASS 5524/250524, 1G PASS 5564/1024668. Idle FLAT ~5.5 MiB, all
+  under budget. Trim gained ~+404 KiB managed memory at EVERY size (e.g.
+  16M MemTotal 8192→8596) vs baseline. Default BIOS floor STILL 14M (12M
+  OOM: managed ~3616K < ~3.9 MiB runtime need); 10M now OOM-limited, NOT
+  triple-fault (collision cleared). batch2 build EXIT=0 (bg shell confirmed).
+  STILL PENDING before ready/commit: ksymtrim module-load gate, UEFI 256M,
+  earlycon forensics + init_size before/after, double-ISO sha256, make check,
+  doctor, report final-verification + floor sections (currently empty).
+  Agent scratch rootfs dir build/campaigns/05-* (bin/dev/init/lib/proc/sys/tmp,
+  21:3x) present — likely for module-load/boot testing.
+
+================================================================================
+END OF NOTE — canonical detail in docs/armageddon-progress.md + docs/armageddon/*.md
+================================================================================

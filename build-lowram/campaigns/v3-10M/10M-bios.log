@@ -1,0 +1,158 @@
+rcl2 1.0 (pid1: c core + rust core, zero deps): booted
+rcl2: config 2 service(s) parsed
+rcl2: start net pid 29
+/bin/l2net: 263: cannot create /proc/sys/vm/stat_refresh: Directory nonexistent
+rcl2: net finished (exit 0)
+rcl2: start ttyS0 pid 38
+rcl2: resident 40 KiB (budget 150)
+rcl2: boot complete: 2 service(s), signals armed
+
+L2 live system ready
+Commands: l2fetch, l2net, l2wifi, l2install, poweroff. RAM-only session: changes are lost at shutdown.
+L2# cat /proc/meminfo; echo L2ME''MDONE
+
+MemTotal:           5440 kB
+MemFree:            1796 kB
+MemAvailable:       1604 kB
+Buffers:               0 kB
+Cached:              832 kB
+SwapCached:            0 kB
+Active:              172 kB
+Inactive:            724 kB
+Active(anon):        172 kB
+Inactive(anon):      724 kB
+Active(file):          0 kB
+Inactive(file):        0 kB
+Unevictable:           0 kB
+Mlocked:               0 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+Dirty:                 0 kB
+Writeback:             0 kB
+AnonPages:            68 kB
+Mapped:              224 kB
+Shmem:               832 kB
+KReclaimable:          0 kB
+Slab:               2028 kB
+SReclaimable:          0 kB
+SUnreclaim:         2028 kB
+KernelStack:         240 kB
+PageTables:          404 kB
+SecPageTables:         0 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:        2720 kB
+Committed_AS:       1276 kB
+VmallocTotal:   34359738367 kB
+VmallocUsed:         252 kB
+VmallocChunk:          0 kB
+Percpu:               32 kB
+Balloon:               0 kB
+GPUActive:             0 kB
+GPUReclaim:            0 kB
+DirectMap4k:       10112 kB
+DirectMap2M:           0 kB
+L2MEMDONE
+L2# L2# cat /proc/meminfo; echo L2ME''MDONE
+
+MemTotal:           5440 kB
+MemFree:            1784 kB
+MemAvailable:       1592 kB
+Buffers:               0 kB
+Cached:              832 kB
+SwapCached:            0 kB
+Active:              172 kB
+Inactive:            708 kB
+Active(anon):        172 kB
+Inactive(anon):      708 kB
+Active(file):          0 kB
+Inactive(file):        0 kB
+Unevictable:           0 kB
+Mlocked:               0 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+Dirty:                 0 kB
+Writeback:             0 kB
+AnonPages:            68 kB
+Mapped:              224 kB
+Shmem:               832 kB
+KReclaimable:          0 kB
+Slab:               2028 kB
+SReclaimable:          0 kB
+SUnreclaim:         2028 kB
+KernelStack:         240 kB
+PageTables:          404 kB
+SecPageTables:         0 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:        2720 kB
+Committed_AS:       1280 kB
+VmallocTotal:   34359738367 kB
+VmallocUsed:         252 kB
+VmallocChunk:          0 kB
+Percpu:               32 kB
+Balloon:               0 kB
+GPUActive:             0 kB
+GPUReclaim:            0 kB
+DirectMap4k:       10112 kB
+DirectMap2M:           0 kB
+L2MEMDONE
+L2# L2# cat /proc/meminfo; echo L2ME''MDONE
+
+MemTotal:           5440 kB
+MemFree:            1756 kB
+MemAvailable:       1564 kB
+Buffers:               0 kB
+Cached:              832 kB
+SwapCached:            0 kB
+Active:              248 kB
+Inactive:            632 kB
+Active(anon):        248 kB
+Inactive(anon):      632 kB
+Active(file):          0 kB
+Inactive(file):        0 kB
+Unevictable:           0 kB
+Mlocked:               0 kB
+SwapTotal:             0 kB
+SwapFree:              0 kB
+Dirty:                 0 kB
+Writeback:             0 kB
+AnonPages:            72 kB
+Mapped:              224 kB
+Shmem:               832 kB
+KReclaimable:          0 kB
+Slab:               2028 kB
+SReclaimable:          0 kB
+SUnreclaim:         2028 kB
+KernelStack:         240 kB
+PageTables:          404 kB
+SecPageTables:         0 kB
+NFS_Unstable:          0 kB
+Bounce:                0 kB
+WritebackTmp:          0 kB
+CommitLimit:        2720 kB
+Committed_AS:       1280 kB
+VmallocTotal:   34359738367 kB
+VmallocUsed:         252 kB
+VmallocChunk:          0 kB
+Percpu:               32 kB
+Balloon:               0 kB
+GPUActive:             0 kB
+GPUReclaim:            0 kB
+DirectMap4k:       10112 kB
+DirectMap2M:           0 kB
+L2MEMDONE
+L2# L2# uname -r; echo L2VE''RDONE
+
+7.3.3-l2-lowram
+L2VERDONE
+L2# L2# cat /proc/cmdline; echo L2CM''DDONE
+
+rdinit=/init console=ttyS0,115200 console=tty0 loglevel=4 dhash_entries=2048 ihash_entries=2048 mhash_entries=128 mphash_entries=128 thash_entries=128 uhash_entries=128
+L2CMDDONE
+L2# L2# /bin/dash -c 'echo L2SPAWN''OK'
+
+L2SPAWNOK
+L2# L2# 
