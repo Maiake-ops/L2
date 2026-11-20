@@ -197,7 +197,12 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       (L2-ea 22:20, A1-A3) + lead acceptance 22:25 + A2 extension
       (symlink/non-regular-file rejection — busybox sha256sum follows
       symlinks, rejection closes traversal). Status AGREED; nothing
-      pending from my side.
+      pending from my side. **A1 enforcement point (lead P2 shell-side
+      note)**: verification runs in use_pack BEFORE any modprobe/exec/
+      firmware-path exposure. A2 ext: pack tree regular files+dirs only,
+      symlinks/devices/FIFOs rejected upfront. Mission-70 cases include
+      wifi-HW boot cost, malformed-manifest+symlink refusal,
+      upgrade-without-refresh.
 
 Mission mapping 101–300: kernel/boot (101–140) → L2-96; rcl2 (141–160) → W1;
 l2pm (181–200) → W2; build system (201–220) → W2/W5; networking/userland
@@ -547,3 +552,11 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   coordination); L2-72 confirmed refusal + final P2 ACK (A2 extension
   accepted). L2-72 escalated to user; dispute surfaced in L2-ea user
   report — ONLY THE USER REASSIGNS LANES. W6-P1 unaffected, running.
+- 23:1x L2-72 co-sign acceptance confirmed (crossed my FINAL ACK): A1-A3
+  incorporated, A2 extended (regular files+dirs only), A3 generalized
+  (pack-content changes too), mission-70 additions in. A1 enforcement
+  point recorded: use_pack BEFORE modprobe/exec/firmware exposure.
+  Dispute remains OPEN pending user; L2-72 continues per recorded split,
+  will ping at mission-05 landing → P2 build-side starts. Hashes noted
+  as durable in ledger + git log (messages may be held for user review).
+  W6 running; W7 queued; WP2 verification in flight.
