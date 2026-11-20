@@ -193,7 +193,11 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       Per-pack manifests + dual pin + fail-closed + build flow ACKed.
       Mission-70 additions suggested (wifi-HW boot cost, malformed manifest,
       upgrade-without-refresh). P2 shell implementation waits for L2-72
-      mission-05 ping.
+      mission-05 ping. **FINAL ACK 23:0x**: doc header records CO-SIGNED
+      (L2-ea 22:20, A1-A3) + lead acceptance 22:25 + A2 extension
+      (symlink/non-regular-file rejection — busybox sha256sum follows
+      symlinks, rejection closes traversal). Status AGREED; nothing
+      pending from my side.
 
 Mission mapping 101–300: kernel/boot (101–140) → L2-96; rcl2 (141–160) → W1;
 l2pm (181–200) → W2; build system (201–220) → W2/W5; networking/userland
@@ -204,6 +208,11 @@ l2pm (181–200) → W2; build system (201–220) → W2/W5; networking/userland
 
 - Every claim needs command + output; logs `build/campaigns/a2-*`.
 - Small reviewable diffs; heavy-coder implements, L2-ea reviews and commits.
+- **COMMIT-REFUSAL POLICY (lane dispute, 23:0x)**: no fragment/patch-script
+  (or any lane-owned) commits from non-owning sessions mid-iteration.
+  Lane work is committed only when its owning session declares it
+  verified and ready, with attribution, after lead review. Only the USER
+  reassigns lanes.
 - No destructive ops, no remote changes, no history rewrites.
 - Budgets: ISO < 10 MiB; idle RAM 10–15 MiB band (ceiling 15360 KiB) at any
   guest size; rcl2 PID1 ~50 KiB resident; <10 MiB guest boot = primary target.
@@ -526,3 +535,15 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   topology re-agreed (branch = campaign record, main = user's call).
   WP2 10M kernel+ISO built, verification in flight — result expected.
   W1/W2 hashes already sent 22:3x (messages crossed). W6 running.
+- 23:0x **LANE DISPUTE (L2-72 flag)**: L2-96's post-WP2 queue treats
+  L2-72's LIVE fragment WIP as an abandoned handoff to 'verify then
+  commit with attribution', contrary to the recorded split (L2-96's own
+  20:5x reservation + my 21:05 confirmation + shared ledger). Lead
+  verified: no unauthorized commits (HEAD 02cd24b, last 5 mine); WIP
+  LIVE (mtime 21:07, +43/−1 grew from +32; L2-72 agent RUNNING, batch1
+  EXIT=0; 05-fragment-wip.patch snapshot 21:18). Actions: commit-refusal
+  policy recorded (ground rules); L2-96 messaged with evidence + recorded
+  split + constructive path (variant-lane batches or post-mission-05
+  coordination); L2-72 confirmed refusal + final P2 ACK (A2 extension
+  accepted). L2-72 escalated to user; dispute surfaced in L2-ea user
+  report — ONLY THE USER REASSIGNS LANES. W6-P1 unaffected, running.
