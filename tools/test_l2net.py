@@ -9,6 +9,7 @@ lack /bin/dash; that is also the exact interpreter the live system uses.
 L2TEST_L2NET points the suite at a snapshot for fail-before demonstrations.
 W6 P1 (ARMAGEDDON II); wired into `make check` by the lead.
 """
+import fnmatch
 import glob
 import os
 from pathlib import Path
@@ -232,7 +233,7 @@ class L2net(unittest.TestCase):
     def test_n3_modaliases_not_pathname_expanded(self):
         """N3: modalias words contain shell globs (*); the unquoted split
         must word-split but never pathname-expand against the cwd.  Plant a
-        file matching the alias's glob prefix: expansion would feed the
+        file matching the alias's FULL glob: expansion would feed the
         FILENAME to modprobe instead of the alias."""
         alias = "pci:v00001234d00005678sv*sd*bc*sc*i*"
         plain = "pci:v00009999d00008888sv00000000sd00000000bc06sc00i00"
@@ -240,7 +241,11 @@ class L2net(unittest.TestCase):
         f1.write_text(alias + "\n")
         f2 = self.scratch / "alias-plain"
         f2.write_text(plain + "\n")
-        planted = alias.split("*")[0] + "GLOBMATCH"
+        # substitute every '*' so the name matches the WHOLE pattern
+        # (a prefix-only match would leave the word unexpanded and the
+        # test would pass even without the fix)
+        planted = alias.replace("*", "X")
+        self.assertTrue(fnmatch.fnmatch(planted, alias))
         (self.scratch / planted).write_text("x")
         harness = self.probe_function() + '\nprobe_modaliases "$@"\n'
         r = subprocess.run([str(DASH), "-c", harness, "sh", str(f1), str(f2)],

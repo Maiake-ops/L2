@@ -119,6 +119,12 @@ config_dir() { printf '%s' "${L2_CONFIG_DIR:-$L2_SRC/config}"; }
 LIVE=0
 MEDIUM=${L2_MEDIA:-/media/l2}
 PAYLOAD=""
+# cleanup() umounts only what this installer actually mounted (F5/F14):
+# with MNT/MEDIA env overrides an early failure must never umount a
+# mount we did not create.
+MNTED_ROOT=0
+MNTED_ESP=0
+MNTED_MEDIUM=0
 
 find_medium() {
     [ -f "$MEDIUM/l2/L2-LIVE" ] && return 0
@@ -128,7 +134,7 @@ find_medium() {
               /dev/mmcblk[0-9] /dev/mmcblk[0-9]p[0-9]; do
         [ -b "$_d" ] || continue
         mount -t iso9660 -o ro "$_d" "$MEDIUM" 2>/dev/null || continue
-        [ -f "$MEDIUM/l2/L2-LIVE" ] && return 0
+        [ -f "$MEDIUM/l2/L2-LIVE" ] && { MNTED_MEDIUM=1; return 0; }
         umount "$MEDIUM" 2>/dev/null
     done
     return 1
@@ -137,6 +143,13 @@ find_medium() {
 setup_live() {
     # host with a build tree: keep using it, unchanged
     [ -d "$(rootfs_dir)/bin" ] && [ -f "$(out_dir)/vmlinuz-l2" ] && return 0
+    # F3: only the booted live system may substitute medium tools/payloads.
+    # There PID 1 is rcl2; on a host an inserted medium must never supply
+    # root-executed install tools.  /proc/1/comm cannot be spoofed without
+    # controlling PID 1 itself.
+    if [ "$(cat /proc/1/comm 2>/dev/null)" != rcl2 ]; then
+        die "no build tree in $L2_SRC/build and this is not the booted L2 live system (PID 1 is not rcl2); build on a host: $L2_SRC/l2 build all - or boot the live medium and run: l2install disk"
+    fi
     find_medium || return 1
     LIVE=1
     _pack=$MEDIUM/l2/install
@@ -154,7 +167,15 @@ setup_live() {
     # Verify the gzip stream first: in a POSIX sh pipeline only cpio's exit
     # status is visible, so a corrupt medium could otherwise slip through.
     gzip -t "$MEDIUM/boot/initramfs" || die "corrupt initramfs on the boot medium"
-    gzip -dc "$MEDIUM/boot/initramfs" | (cd "$PAYLOAD/rootfs" && cpio -idm --quiet) \
+    # F3 defense in depth: strip absolute member paths explicitly where cpio
+    # supports it (GNU).  The live guest's busybox cpio lacks the long option
+    # but strips leading '/' by default - probe so that flow keeps working.
+    _cpio_abs=""
+    if cpio --no-absolute-filenames --help >/dev/null 2>&1; then
+        _cpio_abs="--no-absolute-filenames"
+    fi
+    # shellcheck disable=SC2086
+    gzip -dc "$MEDIUM/boot/initramfs" | (cd "$PAYLOAD/rootfs" && cpio -idm --quiet $_cpio_abs) \
         || die "cannot extract the rootfs from the medium's initramfs"
     L2_ROOTFS_DIR=$PAYLOAD/rootfs
     L2_OUT_DIR=$PAYLOAD/out
@@ -217,7 +238,9 @@ list_disks() {
     if have lsblk; then
         lsblk -dnpr -e 1,7,11 -o NAME,SIZE,TRAN,RM,MODEL 2>/dev/null | while read -r n s t r m; do
             [ "$r" = 1 ] && r=removable || r=fixed
-            printf '%s|%s|%s|%s|%s\n' "$n" "$s" "${t:--}" "$r" "$(printf '%s' "$m" | sed 's/\\x20/ /g')"
+            # F7: MODEL is an untrusted USB string; after the \x20 unescape,
+            # strip the picker protocol delimiters so it cannot inject lines.
+            printf '%s|%s|%s|%s|%s\n' "$n" "$s" "${t:--}" "$r" "$(printf '%s' "$m" | sed 's/\\x20/ /g' | tr -d '\n\r|')"
         done
     else
         for d in /sys/block/*; do
@@ -266,10 +289,13 @@ part_name() {
 cleanup() {
     set +e
     job_kill 2>/dev/null
-    # umount directly: works without mountpoint(1) and is a harmless no-op
-    # when the path is not a mount point.
-    umount "$MNT/boot/efi" 2>/dev/null
-    umount "$MNT" 2>/dev/null
+    # F5: umount only what WE mounted (flags set after a successful mount);
+    # with MNT env overrides an early failure must not umount a stranger's
+    # mount.  F14: a medium we mounted is released on the host path; the
+    # live system keeps it mounted - packs run from it.
+    [ "$MNTED_ESP" = 1 ] && umount "$MNT/boot/efi" 2>/dev/null
+    [ "$MNTED_ROOT" = 1 ] && umount "$MNT" 2>/dev/null
+    [ "$MNTED_MEDIUM" = 1 ] && [ "$LIVE" != 1 ] && umount "$MEDIUM" 2>/dev/null
     [ -n "$LOOPDEV" ] && losetup -d "$LOOPDEV" 2>/dev/null
     [ -n "$PAYLOAD" ] && rm -rf "$PAYLOAD" 2>/dev/null
     return 0
@@ -418,8 +444,10 @@ install_disk() {
     stage "mount"
     run mkdir -p "$MNT"
     run mount "$_root" "$MNT"
+    [ "$DRY" = 1 ] || MNTED_ROOT=1
     run mkdir -p "$MNT/boot/efi"
     run mount "$_esp" "$MNT/boot/efi"
+    [ "$DRY" = 1 ] || MNTED_ESP=1
 
     stage "copy system ($(if [ "$WITH_WIFI" = 1 ]; then echo 'with wifi pack'; else echo 'no wifi'; fi))"
     copy_payload_to "$MNT"
@@ -480,8 +508,17 @@ install_image() {
     _img=${1:-}; _size=${2:-512M}
     [ -n "$_img" ] || die "usage: l2install image out.img [SIZE]"
     [ -b "$_img" ] && die "image target must be a regular file, not a block device: $_img (use: l2install disk $_img)"
+    # F4: an existing non-empty file is somebody's data; truncate -s below
+    # would destroy it (and the loop install forces YES=1).  Require --yes.
+    if [ -e "$_img" ] && [ -s "$_img" ] && [ "$YES" != 1 ]; then
+        die "$_img exists and is not empty; refusing to overwrite it (use --yes to force)"
+    fi
+    # F15: image mode needs util-linux truncate + losetup; the live system's
+    # busybox ships neither (build/out/busybox.applets).  Host-only.
+    for _t in truncate losetup; do
+        have "$_t" || die "image mode needs '$_t' (util-linux) and is host-only; the live system's busybox lacks it. Inside the live system use: l2install disk"
+    done
     [ "$DRY" = 1 ] || [ "$(id -u)" -eq 0 ] || die "image needs root for loop devices: sudo $0 image $_img"
-    need truncate
     if [ "$DRY" = 1 ]; then
         printf '    + truncate -s %s %s\n    + losetup -fP --show %s\n    (then the normal disk install on the loop device)\n' "$_size" "$_img" "$_img" >&2
         STEP_T=1; return 0

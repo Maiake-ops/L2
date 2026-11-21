@@ -46,6 +46,7 @@ check:
 	python3 -m unittest discover -s tools -p 'test_l2pm_transactions.py'
 	python3 -m unittest discover -s tools -p 'test_l2gpt.py'
 	python3 -m unittest discover -s tools -p 'test_l2install.py'
+	python3 -m unittest discover -s tools -p 'test_l2net.py'
 	$(MAKE) -C l2wifi
 	python3 -m unittest discover -s tools -p 'test_l2wifi.py'
 
