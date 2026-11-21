@@ -625,7 +625,73 @@ Peers:
 - My cmdline EFBIG drops last complete token on max-length cmdline (L2-96/
   maiake-f6 observation) — accepted as W7 probe-byte refinement.
 
+--------------------------------------------------------------------------------
+13. RESTORATION ADDENDUM (2026-11-21, session resumed as L2-aa)
+--------------------------------------------------------------------------------
+Session interrupted/restored; date rolled to 2026-11-21. Re-established state:
+
+GIT (user actions during interruption):
+- Branch campaigns/armageddon-ii REBASED + merged main + PUSHED to origin.
+  HEAD 1910fe1e7 "Merge branch 'main' into campaigns/armageddon-ii";
+  origin/campaigns/armageddon-ii exists; backups backup/armageddon-ii and
+  backup/armageddon-ii-pre-merge (db137655d).
+- My commits rebased to NEW hashes (messages unchanged):
+  W1 rcl2 1984055 -> e34ab3d43; W2 l2pm 4acfd36 -> 264d82b86;
+  wiring 1ec7140 -> 90a887c79; notes 6b7e296 -> ab303b3f2;
+  W2-audit-gate ec827b1 -> 7f4075f47; dispute-closed dd32ca7 -> 0d21a1cae.
+- W6/W7 source fixes committed by USER: d1959a232 "qwen burning credit time"
+  (+ f01a82990 earlier). User also committed peer WP2 evidence + codex
+  attachments (a8a2849b5 "burning smth") and .gitignore chores (b1774e8c3,
+  db137655d, 24e1c13f7). Pending tree change: .gitignore (+.codex-attachments/).
+- Branch pushed by USER (not me); my no-push rule still holds for my actions.
+
+PRIMARY TARGET ACHIEVED (variant):
+- WP2 v3 BOOTS AT 10 MiB: PASS, MemTotal 5440 KiB, used 3836 KiB, reserved
+  4800, spawn ok, 53.5 s, KVM smp2 settle40, kernel 7.3.3-l2-lowram.
+- Progression: v1 10M FAIL (oom-deadlock 0.38s) -> v2 FAIL (0.41s) -> v3 PASS.
+- Evidence: build-lowram/campaigns/v{1,2,3}-10M/ (committed a8a2849b5).
+- Winning lever = L2-96/L2-54 variant lane report. Default kernel floor
+  still 14M (mission-05 trim may lower). <10M stretch still open.
+
+AGENTS (restored):
+- W2 heavy-coder: completed (integrated, rebased 264d82b86).
+- W1/W7 heavy-coder: PAUSED -> RESUMED. W7 fixes committed (H1 sysinfo caps,
+  D5 strlen-bounded console_has_ttys main.c:818-820, -Oz + force-unwind-
+  tables=no Makefile:21/31, test-tmpcap dual-mode). All 5 rcl2 suites pass.
+  build/a2-w7/initramfs-fixed.cpio.gz built; D5 prefix/postfix + tc objects
+  present; lifecycle 14/14 OK. MISSING: locked mempressure gate (ISO +
+  test_mempressure.py --ram 16M) + test-live-install 256 + idle delta.
+  Resumed to finish gate + report.
+- W6 heavy-coder: PAUSED -> RESUMED. Fixes committed (l2net L2-LIVE marker
+  N1 + set -f N3; l2install F3 /proc/1/comm gate + F4/F5/F7/F14/F15).
+  tools/test_l2net.py (7 tests) exists; fail-before 2 N1 tests captured.
+  MISSING: pass-after confirmation + all-8-findings evidence + report.
+  Resumed to finish.
+
+VERIFICATION (lead, post-restoration):
+- make check resume EXIT=0 (build/campaigns/a2-make-check-resume.log) —
+  committed W6/W7 state green (166+ unit tests + 5 rcl2 C suites).
+- worktree .qwen/worktrees/campaigns/tools/test_mempressure.py present.
+
+PEER ROSTER CHANGE:
+- Only L2-54 remains (ref 96af98 = old L2-96; started 2026-11-21T05:32Z).
+  Old L2-72 / maiake-f6 sessions gone. Coordination agreements (P2 contract,
+  N5 sequence, FINAL sequencing, mission-92 re-stamp) remain the recorded
+  reference; contacts changed — re-establish with L2-54 as needed. My lane
+  (rcl2/l2pm/shell hardening + verification + commits) is self-contained.
+
+NOTES LOCATION:
+- User requested notes/qwen1.txt (plural). notes/ is GITIGNORED (local docs
+  folder). note/qwen1.txt (singular) is the TRACKED copy (committed
+  ab303b3f2). Both kept in sync; this addendum in both. note/ also holds
+  peer qwen3.txt/qwen4.txt (not mine, untouched).
+
+NEXT: await W6/W7 completion reports -> independent verify -> commit ->
+wire test_l2net.py into make check -> W5 release gates (README final sizes,
+posture docs, CI). Re-establish peer coordination with L2-54. WP2 v3
+winning-lever + default-kernel mission-05 are peer lanes.
+
 ================================================================================
-END OF NOTES — campaign ongoing; W6/W7 running, WP2 v2 in flight.
+END OF NOTES — campaign ongoing; W6/W7 resumed to finish gates, WP2 v3 10M PASS.
 Live ledger: docs/armageddon-ii-progress.md (committed, authoritative).
 ================================================================================

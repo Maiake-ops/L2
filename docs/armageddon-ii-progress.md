@@ -1,6 +1,24 @@
 # ARMAGEDDON II — L2-ea workstream ledger (missions 101–300)
 
-Session: **L2-ea**, started 2026-11-20 ~20:05 local. Directive: continue the
+> **🎯 PRIMARY TARGET ACHIEVED (variant): WP2 v3 BOOTS AT 10 MiB** — PASS,
+> MemTotal 5440 KiB, used 3836 KiB, spawn ok, kernel 7.3.3-l2-lowram
+> (build-lowram/campaigns/v3-10M/, committed by user). v1/v2 10M FAIL
+> (oom-deadlock) → v3 PASS. Default-kernel floor still 14M (mission-05).
+>
+> **RESTORATION (2026-11-21)**: session interrupted/restored; I am now
+> **L2-aa** (ref eaaab2, was L2-ea). User rebased + merged main + PUSHED
+> the branch during the interruption: HEAD `1910fe1e7` (merge),
+> `origin/campaigns/armageddon-ii`, backups `backup/armageddon-ii{,-pre-merge}`.
+> My commits rebased to NEW hashes: W1 1984055→`e34ab3d43`, W2 4acfd36→
+> `264d82b86`, wiring 1ec7140→`90a887c79`, notes 6b7e296→`ab303b3f2`,
+> audit-gate ec827b1→`7f4075f47`, dispute dd32ca7→`0d21a1cae`. W6/W7 fixes
+> committed by user (`d1959a232`); agents PAUSED→RESUMED to finish gates/
+> reports. make check resume EXIT=0. Peer roster now only **L2-54** (ref
+> 96af98 = old L2-96); old L2-72/maiake-f6 sessions gone — agreements below
+> remain the reference but contacts changed. `notes/qwen1.txt` created per
+> user request (notes/ is gitignored; note/qwen1.txt is the tracked copy).
+
+Session: **L2-ea** (restored as **L2-aa** 2026-11-21), started 2026-11-20 ~20:05 local. Directive: continue the
 100-mission ARMAGEDDON campaign (shared peer ledger: `docs/armageddon-progress.md`,
 co-owned by L2-72 + L2-96) with workstreams 101–300. Branch:
 `campaigns/armageddon-ii` (from `cd0f88a`, main). No pushes, no history rewrites.
@@ -44,18 +62,23 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
   FAIL + 48M panic, same Limine init_memmap high-memory-allocator panic
   class; earlier (64M,128M] bracket superseded; worktree log citations
   in L2-96 report). Bootloader-layer constraint, not kernel. 16M smoke:
-  used 5560K. Evidence: build/campaigns/lowram-default-matrix/. <10M
-  BIOS target still open — **WP2 v1 PROGRESS (23:4x): variant BIOS floor
-  14M→12M** (bzImage −736K; managed at 10M 1152K→3200K); 10M gap now
-  ~550-600K managed headroom, iteration 2 in flight; lever report at
-  WP2 landing. Default-kernel floor remains 14M (L2-72 mission-05 trim
-  may move it). Two kernels, two floors — W5 docs distinguish.
+  used 5560K. Evidence: build/campaigns/lowram-default-matrix/.
+  **🎯 VARIANT 10M BOOT ACHIEVED — WP2 v3 PASS** (2026-11-21 restoration
+  read): v1 10M FAIL (oom-deadlock 0.38s) → v2 FAIL (0.41s) → **v3 PASS**
+  (MemTotal 5440 KiB, used 3836, reserved 4800, spawn ok, 53.5s, KVM smp2
+  settle40, kernel 7.3.3-l2-lowram). Evidence build-lowram/campaigns/
+  v{1,2,3}-10M/ (committed by user a8a2849b5). Primary target met for the
+  variant; winning-lever report is L2-96/L2-54's lane. Default-kernel floor
+  remains 14M (mission-05 trim may move it). Two kernels, two floors —
+  W5 docs distinguish.
 
 ## Three most important unresolved bottlenecks (evidence above)
 
-1. **Kernel image footprint 7490 KiB** → managed RAM 1152K/3212K at 10M/12M
-   guests; OOM before init. Primary target (<10 MiB boot) blocked.
-   **Owner: L2-96** (kernel build in progress in its worktree).
+1. **Kernel image footprint 7490 KiB** (default) → managed RAM 1152K/3212K
+   at 10M/12M guests; OOM before init. **RESOLVED for the VARIANT: WP2 v3
+   boots at 10M (PASS)** — primary target met on l2-lowram. Default kernel
+   still 14M floor; mission-05 trim (L2-72) may lower it. Owner: L2-96/L2-54
+   variant lane; default-kernel mission-05 L2-72.
 2. **Initramfs 426,833 B gzip / ~1.2 MiB unpacked** charged to the tiny managed
    pool during early unpack; carries non-boot binaries (l2pm 88K, l2wifi 63K).
    Owner: L2-96 lane (rootfs/ISO artifacts); L2-ea provides analysis only.
@@ -685,3 +708,15 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   carries all hardening → L2-96 variant re-copy + FINAL + sha pin;
   supersedes my primary build/out/rcl2 refresh (fallback if W7 late).
   W6+W7 running; will ping L2-72 at commit for rebuild timing.
+- **2026-11-21 RESTORATION**: session resumed as L2-aa after interruption.
+  Re-established git ground truth: user rebased+merged main+pushed branch
+  (HEAD 1910fe1e7, origin tracking, backup branches); my commits rebased
+  (new hashes mapped in banner); W6/W7 fixes committed by user d1959a232;
+  W6/W7 agents paused→RESUMED to finish gates/reports (W7 missing locked
+  mempressure gate + ISO; W6 missing pass-after confirmation). make check
+  resume EXIT=0 (a2-make-check-resume.log). **WP2 v3 10M PASS — primary
+  target achieved (variant)**; v1/v2 FAIL→v3 PASS, evidence committed.
+  Peer roster reduced to L2-54 (old L2-96 ref). notes/qwen1.txt created
+  per user (notes/ gitignored). W7 initramfs-fixed.cpio.gz already built;
+  worktree test_mempressure.py present. Resumed both agents with current-
+  state context; await completion reports → verify → commit → W5.
