@@ -649,9 +649,16 @@ PRIMARY TARGET ACHIEVED (variant):
 - WP2 v3 BOOTS AT 10 MiB: PASS, MemTotal 5440 KiB, used 3836 KiB, reserved
   4800, spawn ok, 53.5 s, KVM smp2 settle40, kernel 7.3.3-l2-lowram.
 - Progression: v1 10M FAIL (oom-deadlock 0.38s) -> v2 FAIL (0.41s) -> v3 PASS.
+- ★ <10M STRETCH GOAL EXCEEDED (MEASURED, was prediction): 9M BIOS PASS,
+  MemTotal 4416K (capacity model predicted ~4416K — exact), used 3812K,
+  available 604K, spawn ok, 53.2s. Variant boots STRICTLY UNDER 10 MiB.
+  FINAL refreshed ISO 5,961,728 B (5.69 MiB) sha 01c784a1…; kernel
+  4d38a2a7 unchanged; rcl2 resident 36 KiB; default-path byte-identity
+  proven (467e00d3). 8M probe queued (predicted FAIL) to bracket floor;
+  10M/12M PASS, 16/32/256 + mempressure + sha pin remaining.
 - Evidence: build-lowram/campaigns/v{1,2,3}-10M/ (committed a8a2849b5).
 - Winning lever = L2-96/L2-54 variant lane report. Default kernel floor
-  still 14M (mission-05 trim may lower). <10M stretch still open.
+  still 14M (mission-05 trim may lower). <10M stretch ACHIEVED (9M measured).
 - v3-bios sweep 4/4 PASS (L2-54): 12/16/32/256M all spawn ok, idle ~3.8 MiB
   FLAT across sizes (well under 10-15 MiB band; default kernel ~5.5 MiB) —
   headline efficiency result for W5 two-kernel comparison. v3-uefi sweep +

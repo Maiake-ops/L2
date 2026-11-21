@@ -18,17 +18,17 @@ L2 now ships two kernel configurations with distinct trade-offs:
 | Purpose | real-hardware breadth (NVMe/AHCI/USB/HID/PS2/EFI-fb/ACPI, modules) | ultra-low-RAM boot, minimal surface |
 | Modules | `MODULES=y` (hw pack on medium, modalias load) | `MODULES=n` (no module loading; no hw pack) |
 | Idle RAM (MEASURED) | ~5.5 MiB (16M used 5564K, 24M 5632K) | **~3.8 MiB FLAT** across 12–256M (used 3812–3836K) |
-| BIOS boot floor (MEASURED) | **14M** (13M OOM-deadlock) | **10M** (v3 PASS; v1/v2 10M FAIL) |
+| BIOS boot floor (MEASURED) | **14M** (13M OOM-deadlock) | **9M** (v3 PASS — under-10M goal EXCEEDED; 8M probe pending; v1/v2 10M FAIL) |
 | UEFI boot floor (MEASURED) | (96M,128M] — Limine `init_memmap` panic below | 128M PASS, 256M PASS; 16M FAIL-silent (firmware-bound) |
 | Kernel image | 7490 KiB decompressed (4891 code/351 rwdata/1392 rodata/692 init/164 bss); bzImage 2,958,336 B | vmlinux **4,494,448 B (4.29 MiB)**, bzImage 1,647,616 B (compile-repro VERIFIED); strips EXT4/INET/NIC/SMP/VT + BUG/BLK_DEV_SD/ACPI_BUTTON/INPUT=n, SWIOTLB=1M |
 | Module-injection surface | present → W6 marker gate + P2 pin (pending) | **removed** (MODULES=n, no pack) |
-| Core ISO size (MEASURED baseline) | 8,787,968 B (8.38 MiB < 10 MiB gate) | variant ISO pending FINAL pin |
+| Core ISO size (MEASURED baseline) | 8,787,968 B (8.38 MiB < 10 MiB gate) | variant FINAL ISO **5,961,728 B (5.69 MiB)**, sha `01c784a1…` (full-suite sha pin pending) |
 
-**Headline:** the variant boots at 10 MiB total guest RAM with ~3.8 MiB
-idle — flat across guest sizes — meeting the campaign's primary low-RAM
-boot target. The default kernel retains real-hardware breadth at a 14M
-BIOS floor. UEFI low-RAM is bootloader-bound (Limine), not kernel-bound,
-for both.
+**Headline:** the variant boots at **9 MiB (strictly under 10 MiB)** total
+guest RAM with ~3.8 MiB idle — flat across guest sizes — **exceeding** the
+campaign's primary low-RAM boot target. The default kernel retains
+real-hardware breadth at a 14M BIOS floor. UEFI low-RAM is bootloader-bound
+(Limine), not kernel-bound, for both.
 
 > **⚠ VARIANT FUNCTIONAL TRADE-OFF (PENDING USER DECISION):** the actual
 > v3 kernel that boots at 10M achieves it by **stripping EXT4, INET, NIC
@@ -60,13 +60,16 @@ authoritative built v3 = `build-lowram/v3/kernel-lowram.config` (working
 tree, repro-verified). Committing the true v3 config is a pending
 preservation fix (variant lane / user).
 
-### <10M stretch — PREDICTED (not yet measured)
-L2-54 capacity model + v2/v3 evidence: at **9M**, present ≈8700K, reserved
-floor ~4800K → MemTotal ≈4416K, used ~3836K → available ~580K. This is
-+372K over v2's fatal managed level (4044K at 10M), so unpack + PID1 should
-complete → **9M predicted BOOT**. **8M predicted FAIL** (managed ≈3392K <
-4044K). The stretch likely lands at 9M, not 8M. **The FINAL-suite 9M probe
-will settle this; do NOT claim 9M boots until measured.**
+### <10M stretch — MEASURED: 9M BIOS PASS (goal EXCEEDED)
+**9M BIOS PASS** (L2-54 independent parent measurement, refreshed post-W7
+ISO): MemTotal **4416K** (capacity model predicted ~4416K — measured
+EXACTLY), used 3812K, reserved 4800K, available 604K (predicted ~580K),
+spawn ok, 53.2 s. The variant boots at **STRICTLY UNDER 10 MiB** total
+guest RAM — the campaign stretch goal is **EXCEEDED**, not just met.
+Suite continuing: 10M PASS (5440/3812/4800), 12M PASS (7488/3808/4800);
+16/32/256 + unedited mempressure gate + sha pin remaining. **8M probe
+queued** (model predicts FAIL, managed ~3392K < v2's fatal 4044K) — will
+bracket the floor 8M FAIL / 9M PASS if confirmed.
 
 ---
 
@@ -227,13 +230,15 @@ exactly, selftest ok 44 KiB). Pin every staging input hash.
 
 ## 8. Release recommendation (draft)
 
-- **Variant `l2-lowram.iso`:** 10M boot MEASURED, idle ~3.8M flat, but the
-  v3 kernel STRIPS EXT4/INET/NIC/SMP/VT (minimal-boot, not general-purpose).
-  Release requires BOTH (a) WP2 re-verification + 9M probe + repro
-  double-build + mempressure gate + sha pin, AND (b) USER acceptance of the
-  functional trade-off. Do not ship as a general kernel.
+- **Variant `l2-lowram.iso`:** **9M boot MEASURED (under-10M goal exceeded)**,
+  idle ~3.8M flat, FINAL ISO 5,961,728 B (sha 01c784a1…), but the v3 kernel
+  STRIPS EXT4/INET/NIC/SMP/VT + hardening (VM-only throwaway, not
+  general-purpose). Release requires BOTH (a) WP2 full-suite completion
+  (mempressure gate + 8M bracket + sha pin) AND (b) USER acceptance of the
+  functional + security trade-off. Do not ship as a general kernel.
 - **Default integrated ISO:** implementation complete and green, but
   release BLOCKED on the orphaned-builder decision (item 1). Do not ship
   until an executor builds + verifies the integrated image with W1/W2/W6/W7.
-- **Do NOT claim** 9M boot, compile-layer reproducibility, or P2 pack-pin
-  protection until each is measured/implemented respectively.
+- **Do NOT claim** default-kernel/l2pm compile-layer reproducibility or P2
+  pack-pin protection until measured/implemented. (9M boot, variant-kernel
+  + rcl2 compile-repro are now MEASURED/VERIFIED; 8M floor bracket pending.)

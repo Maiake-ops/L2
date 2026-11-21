@@ -933,3 +933,19 @@ the flag on GNU, omits on busybox (live flow byte-identical).
   actuals replace 9M PREDICTION. Scope violation transparently reported
   (210-line proposal patch preserved, 3 files reverted). User decisions
   pending both sides.
+- 2026-11-21 **★ 9M ACTUALS — <10M STRETCH GOAL EXCEEDED (MEASURED)**:
+  L2-54 independent parent measurement, refreshed post-W7 ISO: **9M BIOS
+  PASS** MemTotal 4416K (model predicted ~4416K — EXACT), used 3812K,
+  reserved 4800K, available 604K (pred ~580K), spawn ok, 53.2s. Variant
+  boots STRICTLY UNDER 10 MiB — goal exceeded, not just boundary.
+  release-readiness.md PREDICTION → MEASURED (headline/table/9M section/
+  recommendation updated). Suite continuing: 10M PASS 5440/3812/4800,
+  12M PASS 7488/3808/4800; 16/32/256 + mempressure + sha pin remaining;
+  8M probe queued (pred FAIL ~3392K) → bracket 8M FAIL/9M PASS. WP2
+  refresh: default-path byte-identity PROVEN (env unset → 421,568 B
+  467e00d3 == pre-refresh); refreshed initramfs 420,933 B a6974f5a;
+  **FINAL refreshed ISO sha 01c784a1ce6fca03d36d4090b6f4b20098680972833350c7c70958f351fd0c3d
+  (5,961,728 B = 5.69 MiB)**; kernel unchanged 4d38a2a7; rcl2 resident
+  36 KiB confirmed. Full FINAL record + SHA256SUMS + maiake-f6 ping on
+  suite completion. User posture decision pending — evidence now includes
+  verified 9M boot for extreme-variant option.
