@@ -25,6 +25,9 @@ test: check
 
 check:
 	bash -n l2
+	bash -n lib/desktop.sh
+	sh -n desktop/rootfs/bin/startx
+	sh -n desktop/rootfs/etc/X11/xinit/xinitrc
 	bash -n lib/l2ui.sh
 	sh -n lib/l2ui.sh
 	sh -n l2fetch

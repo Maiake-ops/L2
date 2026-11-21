@@ -56,6 +56,44 @@ sources/build trees. `l2 build musl`, `l2 build kernel`, `l2 build busybox`,
 `l2 build iso` build individual pieces. The interactive menu has the same
 selection.
 
+## Desktop Edition
+
+`./l2 build desktop` builds the optional X11 desktop and writes
+`build/out/l2-desktop.iso`. It uses the same kernel, Limine bootloader,
+installer and available hardware or Wi-Fi pack as the console editions.
+`./l2 iso desktop` rebuilds the desktop rootfs and ISO from compiled
+components. Desktop staging lives in `build/desktop/` and its initramfs
+is `build/out/initramfs-l2-desktop`. The desktop ISO budget defaults to
+128 MiB and can be set with `L2_DESKTOP_ISO_LIMIT_MB`.
+
+The source lock pins Buildroot. Its recipes and archive hashes pin the
+x86-64 musl toolchain, Xorg, fbdev and evdev drivers, xinit, Xlib, bitmap
+fonts and xterm. The first build needs network access. Buildroot uses its
+download cache under `build/cache/buildroot/`. On NixOS the builder runs
+make inside a Nix FHS environment. On other Linux hosts it uses GNU make
+and the standard Buildroot host tools. `L2_DESKTOP_MAKE` can point to a
+make wrapper for an existing build environment.
+
+At the tty1 login prompt enter `root` (empty password on live media), then
+run `startx`. The serial console retains the standard L2 root shell.
+Xorg uses the firmware framebuffer and detects connected evdev keyboards
+and pointers at session startup. The default xinit session opens xterm
+under l2wm. An executable `~/.xinitrc` overrides that session.
+
+| Shortcut | Action |
+|---|---|
+| Super+Return | Open xterm |
+| Super+j / Super+k | Focus the next / previous window |
+| Super+q | Close the focused window |
+| Super+r | Reread `master_percent` (10–90) from `/etc/l2/l2wm.conf` and retile |
+| Super+Escape | End the X session and return to the console |
+
+Set `L2_DESKTOP_AUTOSTART=1` when packaging to start X after tty1 login,
+or create `/etc/l2/desktop-autostart` on an installed desktop. Run
+`poweroff` for a clean rcl2 shutdown. To exercise the graphical session
+headlessly, run `python3 tools/test-desktop.py build/out/l2-desktop.iso`
+and repeat with `--uefi` for OVMF.
+
 ## What gets built
 
 | component | source | notes |

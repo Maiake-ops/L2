@@ -34,6 +34,7 @@ LOCK=$L2_ROOT/sources.lock
 JOBS=${JOBS:-8}
 LOAD=${L2_LOAD:-6}
 L2_ISO_LIMIT_MB=${L2_ISO_LIMIT_MB:-10}
+L2_DESKTOP_ISO_LIMIT_MB=${L2_DESKTOP_ISO_LIMIT_MB:-128}
 L2_ALLOW_BIG_ISO=${L2_ALLOW_BIG_ISO:-0}
 WIFI_DIR=$BUILD/wifi
 EPOCH=${SOURCE_DATE_EPOCH:-}
@@ -1393,6 +1394,7 @@ MT
 }
 
 build_initramfs() {
+    local output=${1:-$OUT/initramfs-l2}
     init_epoch
     [ -d "$ROOTFS/bin" ] || die "rootfs missing; run: l2 build rootfs"
     have cpio || die "cpio is required"
@@ -1401,12 +1403,16 @@ build_initramfs() {
     local repro=""
     if cpio --help 2>&1 | grep -q -- '--reproducible'; then repro="--reproducible"; fi
     (
+        local tmp; tmp=$(mktemp "$output.XXXXXX")
+        trap 'rm -f "$tmp"' EXIT
         cd "$ROOTFS"
         find . -print0 | LC_ALL=C sort -z \
             | cpio --null -o --format=newc --owner=0:0 $repro 2>/dev/null \
-            | gzip -9 -n > "$OUT/initramfs-l2"
+            | gzip -9 -n > "$tmp"
+        chmod 0644 "$tmp"
+        mv -f "$tmp" "$output"
     )
-    say "initramfs: $OUT/initramfs-l2 ($(stat -c%s "$OUT/initramfs-l2") bytes)"
+    say "initramfs: $output ($(stat -c%s "$output") bytes)"
 }
 
 # --------------------------------------------------------------- limine
@@ -1463,17 +1469,18 @@ build_limine() {
 # --------------------------------------------------------------- ISO
 cmdline_base() { tr -d '\n' < "$L2_ROOT/config/cmdline" 2>/dev/null || printf 'loglevel=4'; }
 
-# _make_iso OUT LIMIT_MB LABEL WITH_WIFI
+# _make_iso OUT LIMIT_MB LABEL WITH_WIFI [INITRAMFS]
 _make_iso() {
-    local out=$1 limit_mb=$2 label=$3 wifi=$4
+    local out=$1 limit_mb=$2 label=$3 wifi=$4 initrd=${5:-$OUT/initramfs-l2}
     [ -f "$OUT/vmlinuz-l2" ] || die "kernel missing; run: l2 build kernel"
-    [ -f "$OUT/initramfs-l2" ] || die "initramfs missing; run: l2 build initramfs"
+    [ -f "$initrd" ] || die "$initrd missing; run: l2 build initramfs"
     [ -x "$OUT/limine/bin/limine" ] || die "limine missing; run: l2 build limine"
     have xorriso || die "xorriso is required"
-    local lim=$OUT/limine/share/limine isod=$ISO_DIR.$label
+    local lim=$OUT/limine/share/limine isod=$ISO_DIR.$label log=$LOGS/iso.log
+    [ "$label" != desktop ] || log=$LOGS/iso-desktop.log
     rm -rf "$isod"; mkdir -p "$isod/boot/limine" "$isod/EFI/BOOT" "$isod/l2"
     install -m 0644 "$OUT/vmlinuz-l2" "$isod/boot/vmlinuz"
-    install -m 0644 "$OUT/initramfs-l2" "$isod/boot/initramfs"
+    install -m 0644 "$initrd" "$isod/boot/initramfs"
     install -m 0644 "$lim/limine-bios.sys" "$isod/boot/limine/limine-bios.sys"
     install -m 0644 "$lim/limine-bios-cd.bin" "$isod/boot/limine/limine-bios-cd.bin"
     install -m 0644 "$lim/BOOTX64.EFI" "$isod/EFI/BOOT/BOOTX64.EFI"
@@ -1517,10 +1524,10 @@ _make_iso() {
         -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table
         --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image
         --protective-msdos-label -o "$out")
-    job_begin "Creating $(basename "$out")" "$LOGS/iso.log"
-    if ! xorriso "${args[@]}" "$isod" >"$LOGS/iso.log" 2>&1; then job_end 1; ui_logtail "$LOGS/iso.log"; die "ISO build failed"; fi
-    if ! "$OUT/limine/bin/limine" bios-install "$out" >>"$LOGS/iso.log" 2>&1; then
-        job_end 1; ui_logtail "$LOGS/iso.log"; die "limine bios-install failed on $out"
+    job_begin "Creating $(basename "$out")" "$log"
+    if ! xorriso "${args[@]}" "$isod" >"$log" 2>&1; then job_end 1; ui_logtail "$log"; die "ISO build failed"; fi
+    if ! "$OUT/limine/bin/limine" bios-install "$out" >>"$log" 2>&1; then
+        job_end 1; ui_logtail "$log"; die "limine bios-install failed on $out"
     fi
     printf '\114\062\000\001' | dd of="$out" bs=1 seek=440 conv=notrunc 2>/dev/null
     local size limit; size=$(stat -c%s "$out"); limit=$((limit_mb * 1024 * 1024))
@@ -1534,6 +1541,10 @@ _make_iso() {
 
 build_iso() {
     init_epoch
+    if [ "${1:-}" = desktop ]; then
+        desktop_iso
+        return
+    fi
     local out=${1:-$OUT/l2.iso}
     step "Core ISO (kernel + initramfs + hw/install packs, no wifi pack)"
     _make_iso "$out" "$L2_ISO_LIMIT_MB" core 0
@@ -1544,6 +1555,8 @@ build_iso() {
 }
 
 # --------------------------------------------------------------- build set
+. "$L2_ROOT/lib/desktop.sh"
+
 build_one() {
     case "$1" in
         musl)       build_musl ;;
@@ -1567,6 +1580,12 @@ build_one() {
         limine)     build_limine ;;
         rootfs)     build_rootfs ;;
         initramfs)  build_initramfs ;;
+        desktop)    build_desktop ;;
+        l2wm|xterm) desktop_packages "$1" ;;
+        xorg) desktop_packages xserver_xorg-server xdriver_xf86-video-fbdev ;;
+        xinit) desktop_packages xapp_xinit ;;
+        desktop-input) desktop_packages xdriver_xf86-input-evdev xapp_xkbcomp xkeyboard-config ;;
+        desktop-fonts) desktop_packages xfont_font-misc-misc xfont_font-alias xfont_font-cursor-misc ;;
         iso)        build_iso ;;
         *) die "unknown component: $1" ;;
     esac
@@ -1595,7 +1614,7 @@ build_all() {
 
 build_components() {
     local sel
-    sel=$(ui_multi "Components to build (space selects, enter confirms)" $ALL_COMPONENTS) || return 0
+    sel=$(ui_multi "Components to build (space selects, enter confirms)" $ALL_COMPONENTS desktop l2wm xorg xinit xterm desktop-input desktop-fonts) || return 0
     [ -n "$sel" ] || return 0
     local c
     for c in $sel; do step "component: $c"; build_one "$c"; done
@@ -1679,6 +1698,8 @@ dashboard() {
         art_row limine "$OUT/limine/bin/limine"
         art_row initramfs "$OUT/initramfs-l2"
         art_row iso "$OUT/l2.iso"
+        art_row desktop "$OUT/l2-desktop.iso"
+        art_row l2wm "$DESKTOP_BR/per-package/l2wm/target/usr/bin/l2wm"
         if [ -d "$BUILD/firmware" ]; then printf 'firmware,built,%s KiB,\n' "$(du -sk "$BUILD/firmware" | awk '{print $1}')"
         else printf 'firmware,missing,-,l2 build firmware\n'; fi
     } | ui_table
@@ -1732,6 +1753,16 @@ doctor() {
     ui_kv gum "$(have gum && gum --version | head -1 || echo missing)"; ui_kv jobs "$JOBS"
     printf '\n'
     deps_check || true
+    if [ "$DISTRO" = nixos ] && [ -z "${L2_DESKTOP_MAKE:-}" ]; then
+        have nix-build || warn "desktop compilation requires nix-build for its FHS environment"
+    elif [ -n "${L2_DESKTOP_MAKE:-}" ]; then
+        have "$L2_DESKTOP_MAKE" || warn "desktop make wrapper missing: $L2_DESKTOP_MAKE"
+    else
+        local tool
+        for tool in /usr/bin/file wget rsync unzip c++ patch which bc flock; do
+            have "$tool" || warn "desktop build tool missing: $tool"
+        done
+    fi
     printf '\n'; dashboard
     check_kernel_dropped "$OUT/kernel.config"
     if [ -s "$LOGS/kernel-dropped.txt" ]; then
@@ -1765,6 +1796,8 @@ menu() {
         ui_header; dashboard
         c=$(ui_menu "What now?" \
             "all|Build everything and make the ISOs" \
+            "desktop|Build Desktop Edition (Xorg, l2wm, xterm) and ISO" \
+            "desktop-iso|Repackage Desktop ISO" \
             "pick|Choose components to build" \
             "kernel|Kernel settings (wifi families, features, CPUs)" \
             "iso|Rebuild the ISOs only" \
@@ -1778,6 +1811,8 @@ menu() {
             "quit|Quit") || return 0
         case "$c" in
             all)     ui_confirm "Download sources and build everything (compiles a kernel)?" && build_all ;;
+            desktop) build_desktop ;;
+            desktop-iso) build_iso desktop ;;
             pick)    build_components ;;
             kernel)  kernel_menu ;;
             iso)     build_iso ;;
@@ -1806,6 +1841,9 @@ usage:
                               rcl2 l2pm l2wifi libnl wpa openssl
                               firmware wifipack hwpack limine l2gpt e2fsprogs
                               dosfstools installpack rootfs initramfs iso
+  l2 build desktop              build optional Xorg, xinit, xterm, l2wm, drivers, fonts and ISO
+  l2 build l2wm|xorg|xinit|xterm|desktop-input|desktop-fonts
+  l2 iso desktop                repackage compiled desktop components into l2-desktop.iso
   l2 kernel [menu|set CONFIG_X=v ...|show|reset]
                               kernel settings (config/kernel.local)
   l2 iso [out.iso]            core ISO (<${L2_ISO_LIMIT_MB} MiB) and, if a wifi pack exists, l2-wifi.iso
@@ -1824,6 +1862,7 @@ environment:
   JOBS=8  L2_LOAD=6           parallelism per program (-j8 -l6)
   KERNEL_VERSION / MUSL_VERSION   override the lock
   L2_ISO_LIMIT_MB=10          core ISO size gate        L2_WIFI_ISO_LIMIT_MB=96
+  L2_DESKTOP_ISO_LIMIT_MB=128 desktop ISO size gate     L2_DESKTOP_AUTOSTART=1  start X on tty1 login
   L2_WIFI_FAMILIES="mt7921 iwlwifi ..."   firmware families (config/wifi-firmware.list)
   L2_FIRMWARE_SRC=/lib/firmware           reuse an existing firmware tree
   L2_SSL=core|wifi|off        where the openssl pack goes (never in RAM)   L2_SSL_EMBED=1  put it in the initramfs
@@ -1860,7 +1899,7 @@ main() {
             if [ "${1:-all}" = all ]; then build_all
             else local c; for c in "$@"; do build_one "$c"; done; fi ;;
         kernel)      kernel_cmd "$@" ;;
-        iso)         build_iso "${1:-}" ;;
+        iso)         build_iso "$@" ;;
         ram)         ramtest "$@" ;;
         bootiso)     bootiso "$@" ;;
         update)      update_sources ;;
