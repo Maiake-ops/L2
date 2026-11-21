@@ -57,7 +57,8 @@ def test(iso, firmware, temp, autostart):
                 type_line(monitor, "startx")
             require(guest, "pidof Xorg && pidof l2wm && pidof xterm")
             key(monitor, "meta_l-ret")
-            require(guest, 'set -- $(pidof xterm) && [ "$#" = 2 ]')
+            require(guest, 'set -- $(pidof xterm) && [ "$#" = 2 ] && set -- /dev/pts/[0-9]* && [ "$#" -ge 2 ]')
+            time.sleep(0.5)
             for side, distance in (("left", -1600), ("right", 1600)):
                 monitor.sendall(f"mouse_move {distance} 0\n".encode())
                 time.sleep(0.3)
