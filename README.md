@@ -81,10 +81,17 @@ under l2wm. An executable `~/.xinitrc` overrides that session.
 
 | Shortcut | Action |
 |---|---|
-| Super+Return | Open xterm |
+| Super+Return | Open terminal (`L2WM_TERMINAL`, `terminal` in config, or `xterm`) |
 | Super+j / Super+k | Focus the next / previous window |
+| Super+Shift+j / Super+Shift+k | Swap focused window with next / previous tiled window |
+| Super+m / Super+Shift+Return | Promote or swap focused window with master |
+| Super+h / Super+l | Shrink / grow master area by 5% (10–90%) |
+| Super+f / Super+Space | Toggle master-stack tiling and monocle layout |
+| Super+t | Toggle floating mode for the focused window |
+| Super+Left/Right Drag | Move / resize a floating window |
+| Super+1..9 / Super+Shift+1..9 | Switch workspace / move focused window to workspace |
 | Super+q | Close the focused window |
-| Super+r | Reread `master_percent` (10–90) from `/etc/l2/l2wm.conf` and retile |
+| Super+r (or `SIGHUP`) | Reload `/etc/l2/l2wm.conf` (and `~/.config/l2wm/l2wm.conf`) and retile |
 | Super+Escape | End the X session and return to the console |
 
 Set `L2_DESKTOP_AUTOSTART=1` when packaging to start X after tty1 login,

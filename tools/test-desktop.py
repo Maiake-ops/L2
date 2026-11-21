@@ -70,6 +70,12 @@ def test(iso, firmware, temp, autostart):
             key(monitor, "meta_l-r")
             type_line(monitor, "stty size >/tmp/after")
             require(guest, "test -s /tmp/after && ! cmp -s /tmp/before /tmp/after")
+            # Exercise interactive master resize, workspace switch, and window close
+            key(monitor, "meta_l-h")
+            key(monitor, "meta_l-2")
+            key(monitor, "meta_l-1")
+            key(monitor, "meta_l-q")
+            require(guest, 'set -- $(pidof xterm) && [ "$#" = 1 ]')
             key(monitor, "meta_l-esc")
             require(guest, "! pidof Xorg && ! pidof l2wm && ! pidof xterm")
         result = command(guest, "l2install dir /installed && test -x /installed/bin/l2wm && "
