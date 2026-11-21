@@ -65,11 +65,91 @@ desktop_rootfs() {
     for bin in "${programs[@]}"; do
         install -m 0755 "$target/usr/bin/$bin" "$ROOTFS/bin/$bin"
     done
-    mkdir -p "$ROOTFS/usr/lib" "$ROOTFS/usr/share"
-    cp -a "$target/lib/"*.so* "$ROOTFS/lib/"
-    cp -a "$target/usr/lib/"*.so* "$target/usr/lib/"{xorg,X11} "$ROOTFS/usr/lib/"
-    cp -a "$target/usr/share/"{X11,fonts,fontconfig,terminfo} "$ROOTFS/usr/share/"
-    cp -a "$target/etc/fonts" "$ROOTFS/etc/"
+    mkdir -p "$ROOTFS/lib" "$ROOTFS/usr/lib/xorg/modules/drivers" \
+             "$ROOTFS/usr/lib/xorg/modules/input" "$ROOTFS/usr/share/X11" \
+             "$ROOTFS/usr/share/fonts/X11/misc" "$ROOTFS/usr/share/terminfo"
+    # Copy only the Xorg modules actually used (fbdev + evdev).
+    cp -a "$target/usr/lib/xorg/modules/drivers/fbdev_drv.so" "$ROOTFS/usr/lib/xorg/modules/drivers/"
+    cp -a "$target/usr/lib/xorg/modules/input/evdev_drv.so" "$ROOTFS/usr/lib/xorg/modules/input/"
+    for mod in libshadow.so libfbdevhw.so; do
+        [ -e "$target/usr/lib/xorg/modules/$mod" ] && cp -a "$target/usr/lib/xorg/modules/$mod" "$ROOTFS/usr/lib/xorg/modules/"
+    done
+    [ -e "$target/usr/lib/xorg/protocol.txt" ] && cp -a "$target/usr/lib/xorg/protocol.txt" "$ROOTFS/usr/lib/xorg/"
+    [ -d "$target/usr/lib/X11" ] && cp -a "$target/usr/lib/X11" "$ROOTFS/usr/lib/"
+    # Copy only the transitive NEEDED shared libraries (drops unused libstdc++, libgomp, etc.).
+    python3 - "$target" "$ROOTFS" <<'PY'
+import os, shutil, subprocess, sys
+target, rootfs = sys.argv[1], sys.argv[2]
+seeds = [
+    os.path.join(rootfs, "bin", b)
+    for b in ("Xorg", "xterm", "xinit", "xauth", "mcookie", "xkbcomp", "l2wm")
+] + [
+    os.path.join(rootfs, "usr/lib/xorg/modules/drivers/fbdev_drv.so"),
+    os.path.join(rootfs, "usr/lib/xorg/modules/input/evdev_drv.so"),
+    os.path.join(rootfs, "usr/lib/xorg/modules/libshadow.so"),
+    os.path.join(rootfs, "usr/lib/xorg/modules/libfbdevhw.so"),
+]
+def needed(path):
+    out = subprocess.check_output(["readelf", "-d", path], text=True, stderr=subprocess.DEVNULL)
+    return [l.split("[")[1].split("]")[0] for l in out.splitlines() if "(NEEDED)" in l]
+def copy_entry(rel):
+    src = os.path.join(target, rel)
+    dst = os.path.join(rootfs, rel)
+    if os.path.lexists(dst) or not os.path.lexists(src):
+        return
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    if os.path.islink(src):
+        linkto = os.readlink(src)
+        os.symlink(linkto, dst)
+        resolved = os.path.normpath(os.path.join(os.path.dirname(rel), linkto)) if not os.path.isabs(linkto) else linkto.lstrip("/")
+        copy_entry(resolved)
+    else:
+        shutil.copy2(src, dst)
+def find_rel(name):
+    for d in ("lib", "usr/lib"):
+        rel = os.path.join(d, name)
+        if os.path.lexists(os.path.join(target, rel)):
+            return rel
+    return None
+copy_entry("lib/ld-musl-x86_64.so.1")
+seen = set()
+queue = [s for s in seeds if os.path.exists(s)]
+while queue:
+    p = queue.pop()
+    rp = os.path.realpath(p)
+    if rp in seen:
+        continue
+    seen.add(rp)
+    for lib in needed(rp):
+        rel = find_rel(lib)
+        if rel:
+            copy_entry(rel)
+            queue.append(os.path.join(target, rel))
+PY
+    # Trimmed X11 data: keep XKB keymaps/rules and pc geometry, drop bulky XML/LST metadata and other geometries.
+    cp -a "$target/usr/share/X11/." "$ROOTFS/usr/share/X11/"
+    find "$ROOTFS/usr/share/X11/xkb/geometry" -mindepth 1 ! -name pc -delete 2>/dev/null || true
+    rm -rf "$ROOTFS/usr/share/X11/xkb/rules/"*.xml \
+           "$ROOTFS/usr/share/X11/xkb/rules/"*.lst
+    # Minimal X11 bitmap fonts (fixed + cursor + common sizes) instead of 6 MiB of misc fonts.
+    local f
+    for f in cursor.pcf.gz 6x13-ISO8859-1.pcf.gz 6x13B-ISO8859-1.pcf.gz 6x13.pcf.gz \
+             7x13-ISO8859-1.pcf.gz 8x13-ISO8859-1.pcf.gz 9x15-ISO8859-1.pcf.gz 10x20-ISO8859-1.pcf.gz; do
+        [ -f "$target/usr/share/fonts/X11/misc/$f" ] && \
+            install -m 0644 "$target/usr/share/fonts/X11/misc/$f" "$ROOTFS/usr/share/fonts/X11/misc/$f"
+    done
+    [ -f "$target/usr/share/fonts/X11/misc/fonts.alias" ] && \
+        install -m 0644 "$target/usr/share/fonts/X11/misc/fonts.alias" "$ROOTFS/usr/share/fonts/X11/misc/fonts.alias"
+    awk 'NR == 1 { next } { f = $1; if (system("test -f \"'"$ROOTFS"'/usr/share/fonts/X11/misc/" f "\"") == 0) lines[++n] = $0 }
+         END { print n + 0; for (i = 1; i <= n; i++) print lines[i] }' \
+        "$target/usr/share/fonts/X11/misc/fonts.dir" > "$ROOTFS/usr/share/fonts/X11/misc/fonts.dir"
+    # Minimal terminfo set for xterm and Linux console.
+    for f in a/ansi d/dumb l/linux v/vt100 v/vt220 x/xterm x/xterm-color x/xterm-256color; do
+        if [ -e "$target/usr/share/terminfo/$f" ]; then
+            mkdir -p "$ROOTFS/usr/share/terminfo/$(dirname "$f")"
+            cp -a "$target/usr/share/terminfo/$f" "$ROOTFS/usr/share/terminfo/$f"
+        fi
+    done
     build_desktop_config
     find "$ROOTFS" -exec touch -h -d "@$EPOCH" {} +
     build_initramfs "$OUT/initramfs-l2-desktop"

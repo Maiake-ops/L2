@@ -582,7 +582,11 @@ static void spawn_terminal(void) {
         signal(SIGINT, SIG_DFL);
         const char *term = getenv("L2WM_TERMINAL");
         if (!term || !*term) term = cfg.terminal;
-        execlp(term, term, (char *)NULL);
+        if (strcmp(term, "xterm") == 0) {
+            execlp("xterm", "xterm", "-fn", "fixed", "-sl", "256", (char *)NULL);
+        } else {
+            execlp(term, term, (char *)NULL);
+        }
         _exit(127);
     }
 }
