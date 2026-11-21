@@ -862,3 +862,16 @@ the flag on GNU, omits on busybox (live flow byte-identical).
   release-readiness.md (measured data + labeled predictions). README
   product refresh held until final sizes (Makefile alignment orphaned).
   Orphan-lane decision still user's.
+- 2026-11-21 L2-54 **INDEPENDENT make check VERIFICATION DONE**: EXIT=0
+  their side too (181 tests/11 suites + rcl2 selftest; lowram-make-check-
+  verify.log) — dual-verified green. Selftest RSS variance noted: L2-ea
+  44 / L2-54 48 KiB, same binary 07fb2c69 (make check didn't rebuild),
+  ±1 page, both ≪150 budget — NOT a defect. Committed rcl2/Makefile W7
+  recipe verified (-Oz/-fno-asynchronous-unwind-tables/force-unwind-
+  tables=no); their FINAL re-stamp rebuilds from source + compares sha.
+  **MATERIAL: actual v3 variant STRIPS EXT4/INET/NIC/SMP/VT** to reach 10M
+  (committed fragment was an UNBUILT functional draft; L2-54 preservation/
+  attribution correction issued; USER trade-off decision PENDING). Variant
+  = minimal-boot, NOT general-purpose. release-readiness.md UPDATED to
+  reflect trade-off + RSS range + release caveat. Integrated ISO blocker
+  unchanged (orphaned executor, user). rcl2 re-copy queued in sequence.

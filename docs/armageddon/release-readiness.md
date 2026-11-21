@@ -30,6 +30,17 @@ boot target. The default kernel retains real-hardware breadth at a 14M
 BIOS floor. UEFI low-RAM is bootloader-bound (Limine), not kernel-bound,
 for both.
 
+> **⚠ VARIANT FUNCTIONAL TRADE-OFF (PENDING USER DECISION):** the actual
+> v3 kernel that boots at 10M achieves it by **stripping EXT4, INET, NIC
+> drivers, SMP, and VT** (L2-54 preservation/attribution correction: the
+> committed `config/kernel.lowram` fragment was an *unbuilt functional
+> draft*; the built/tested v3 differs). The variant is therefore a
+> **minimal-boot configuration, NOT a general-purpose kernel** — no ext4
+> disk install, no networking, no SMP, no virtual terminal. The 10M boot
+> is real (MEASURED) but comes at this functional cost. Whether this
+> trade-off is acceptable for the variant's intended purpose is a USER
+> decision; do not present the variant as a drop-in replacement.
+
 ### <10M stretch — PREDICTED (not yet measured)
 L2-54 capacity model + v2/v3 evidence: at **9M**, present ≈8700K, reserved
 floor ~4800K → MemTotal ≈4416K, used ~3836K → available ~580K. This is
@@ -45,7 +56,7 @@ will settle this; do NOT claim 9M boots until measured.**
 | Metric | Value | Source |
 |---|---|---|
 | Binary size | **15,568 B** (sha256 `07fb2c69…3a3b`) | post-W7 build |
-| Selftest RSS | 44 KiB (budget 150) | `make -C rcl2 test` |
+| Selftest RSS | 44–48 KiB (budget 150; ±1 page variance) | dual-measured: L2-ea 44 / L2-54 48, same binary `07fb2c69` |
 | Boot-resident (VmRSS) | **36 KiB** | W7 boot proof / mempressure gate |
 | Live scratch caps | /tmp 12.5% RAM clamp 2–16 MiB; /run 6.25% clamp 1–8 MiB | sysinfo(2); at 256M → /tmp 16384K, /run 8192K |
 | Size carries | -Oz, force-unwind-tables=no, rss_report→g_iobuf, probe-byte refinement | all kept, none regressed |
@@ -186,10 +197,11 @@ L2_BUILD_DIR). Pin every staging input hash; do not assume compile repro.
 
 ## 8. Release recommendation (draft)
 
-- **Variant `l2-lowram.iso`:** on track for FINAL after WP2 re-verification
-  + sha pin (10M boot MEASURED, idle ~3.8M flat, MODULES=n minimal surface).
-  Recommend release once the 9M probe + repro double-build + mempressure
-  gate are stamped.
+- **Variant `l2-lowram.iso`:** 10M boot MEASURED, idle ~3.8M flat, but the
+  v3 kernel STRIPS EXT4/INET/NIC/SMP/VT (minimal-boot, not general-purpose).
+  Release requires BOTH (a) WP2 re-verification + 9M probe + repro
+  double-build + mempressure gate + sha pin, AND (b) USER acceptance of the
+  functional trade-off. Do not ship as a general kernel.
 - **Default integrated ISO:** implementation complete and green, but
   release BLOCKED on the orphaned-builder decision (item 1). Do not ship
   until an executor builds + verifies the integrated image with W1/W2/W6/W7.

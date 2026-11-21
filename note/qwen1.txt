@@ -658,6 +658,17 @@ PRIMARY TARGET ACHIEVED (variant):
   9M probe (<10M stretch) running. Variant FINAL (standalone l2-lowram.iso)
   proceeds INDEPENDENTLY of the orphaned default-kernel lane; only the
   integrated ISO is blocked (needs W6 green + an executor).
+- ⚠ VARIANT FUNCTIONAL TRADE-OFF (USER DECISION PENDING): the actual v3
+  kernel STRIPS EXT4/INET/NIC/SMP/VT to reach 10M (committed fragment was
+  an UNBUILT functional draft; L2-54 preservation/attribution correction).
+  Variant = minimal-boot configuration, NOT a general-purpose kernel (no
+  ext4 install, no net, no SMP, no VT). 10M boot is real but at this cost;
+  release requires user acceptance of the trade-off. release-readiness.md
+  carries a prominent caveat.
+- make check DUAL-VERIFIED green (L2-ea + L2-54 both EXIT=0, 181 tests/11
+  suites + rcl2 selftest). rcl2 selftest RSS 44-48 KiB (±1 page variance,
+  same binary 07fb2c69; not a defect). W7 Makefile recipe verified by peer.
+- W5 release-readiness.md DRAFTED (docs/armageddon/release-readiness.md).
 
 AGENTS (restored):
 - W2 heavy-coder: completed (integrated, rebased 264d82b86).
