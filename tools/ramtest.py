@@ -245,7 +245,7 @@ def main():
     ap.add_argument("--kernel"); ap.add_argument("--initrd"); ap.add_argument("--cmdline", default="loglevel=4")
     ap.add_argument("--sizes", default="256M,1G,4G,16G")
     ap.add_argument("--budget", type=int, default=int(os.environ.get("L2_RAM_BUDGET_KIB", 10240)))
-    ap.add_argument("--timeout", type=int, default=180); ap.add_argument("--settle", type=float, default=25.0)
+    ap.add_argument("--timeout", type=int, default=180); ap.add_argument("--settle", type=float, default=40.0)
     medium = ap.add_mutually_exclusive_group()
     medium.add_argument("--iso"); medium.add_argument("--disk")
     ap.add_argument("--ram", default="256")

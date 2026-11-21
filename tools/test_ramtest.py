@@ -66,3 +66,9 @@ class Ramtest(unittest.TestCase):
             with patch("sys.argv", ["ramtest", *flags]), self.assertRaises(SystemExit) as error:
                 ramtest.main()
             self.assertEqual(error.exception.code, 2)
+
+    def test_default_settling_protocol_and_override(self):
+        for flags, expected in (([], 40), (["--settle", "2"], 2)):
+            with patch("sys.argv", ["ramtest", "--iso", "a", *flags]), patch.object(ramtest, "boot_medium") as boot:
+                ramtest.main()
+                self.assertEqual(boot.call_args.args[0].settle, expected)
