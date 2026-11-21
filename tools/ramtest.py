@@ -212,13 +212,16 @@ def boot_medium(args):
             return 1
         probe = "uname -r"
         if args.disk:
-            probe += "; cat /etc/l2/installed 2>/dev/null; grep ' / ' /proc/mounts"
+            probe += "; test -f /etc/l2/installed && grep '^/dev/[^ ]* / ext4 ' /proc/mounts"
         g.buf = b""
         g.send(probe + "; echo L2RAM''DONE")
         if not g.read_until(MARK.encode() + b"\r", 20):
             print("    FAIL: shell probe timed out")
             return 1
         out = g.buf.decode(errors="replace").split("uname -r")[-1]
+        if args.disk and not re.search(r"^/dev/\S+ / ext4 ", out, re.MULTILINE):
+            print("    FAIL: installed ext4 root was not observed")
+            return 1
         for line in out.splitlines():
             s = line.strip()
             if s.startswith("7.") or "installed" in s or s.startswith("/dev/"):

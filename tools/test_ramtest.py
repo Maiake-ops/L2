@@ -43,3 +43,12 @@ class Ramtest(unittest.TestCase):
         self.guest.buf = b"L2RAMDONE\r"
         self.guest.read_until.side_effect = lambda token, _: token == ramtest.PROMPT or token in self.guest.buf
         self.assertEqual(ramtest.boot_medium(self.args), 1)
+
+    def test_disk_requires_guest_root_evidence(self):
+        self.args.iso, self.args.disk = None, "installed.img"
+        for root, expected in ((b"rootfs / rootfs rw", 1), (b"/dev/root / ext4 rw", 0)):
+            def reply(token, _):
+                self.guest.buf = b"7.3.3\r\n" + root + b"\r\nL2RAMDONE\r"
+                return True
+            self.guest.read_until.side_effect = reply
+            self.assertEqual(ramtest.boot_medium(self.args), expected)
