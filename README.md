@@ -71,8 +71,7 @@ x86-64 musl toolchain, Xorg, fbdev and evdev drivers, xinit, Xlib, bitmap
 fonts and xterm. The first build needs network access. Buildroot uses its
 download cache under `build/cache/buildroot/`. On NixOS the builder runs
 make inside a Nix FHS environment. On other Linux hosts it uses GNU make
-and the standard Buildroot host tools. `L2_DESKTOP_MAKE` can point to a
-make wrapper for an existing build environment.
+and the standard Buildroot host tools.
 
 At the tty1 login prompt enter `root` (empty password on live media), then
 run `startx`. The serial console retains the standard L2 root shell.

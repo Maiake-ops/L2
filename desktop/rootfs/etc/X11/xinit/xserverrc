@@ -1,9 +1,9 @@
 #!/bin/dash
 # L2 has devtmpfs but no udev daemon. Enumerate connected devices at session start.
 set -eu
-export HOME=${HOME:-/root} SHELL=/bin/dash
-session=$(mktemp -d /run/l2-x11.XXXXXX)
-trap 'rm -rf "$session"' EXIT
+umask 077
+session=/run/l2-x11
+mkdir -p "$session"
 conf=$session/xorg.conf
 cp /etc/X11/xorg.conf "$conf"
 layout=$session/layout
@@ -34,10 +34,4 @@ DEVICE
 done
 cat "$layout" >> "$conf"
 echo EndSection >> "$conf"
-export XAUTHORITY=$session/Xauthority
-touch "$XAUTHORITY"
-cookie=$(hexdump -n 16 -v -e '1/1 "%02x"' /dev/urandom)
-xauth -f "$XAUTHORITY" add :0 . "$cookie"
-client=/etc/X11/xinit/xinitrc
-[ ! -x "$HOME/.xinitrc" ] || client=$HOME/.xinitrc
-xinit "$client" -- /bin/Xorg :0 vt7 -nolisten tcp -auth "$XAUTHORITY" -config "$conf" -logfile /var/log/Xorg.0.log
+exec /bin/Xorg "$@" -nolisten tcp -config "$conf"

@@ -1535,6 +1535,7 @@ _make_iso() {
     printf '  '; ui_bar "$size" "$limit" 28; printf '  %s / %s MiB\n' "$(ui_size "$size")" "$limit_mb"
     if [ "$size" -gt "$limit" ]; then
         if [ "$L2_ALLOW_BIG_ISO" = 1 ]; then warn "over the ${limit_mb} MiB budget (allowed by L2_ALLOW_BIG_ISO=1)"
+        elif [ "$label" = desktop ]; then die "Desktop ISO exceeds L2_DESKTOP_ISO_LIMIT_MB=$limit_mb"
         else die "ISO is over the ${limit_mb} MiB budget; trim the kernel, set L2_SSL=wifi (openssl only on l2-wifi.iso) or L2_SSL=off, or L2_ALLOW_BIG_ISO=1"; fi
     fi
 }
@@ -1753,10 +1754,8 @@ doctor() {
     ui_kv gum "$(have gum && gum --version | head -1 || echo missing)"; ui_kv jobs "$JOBS"
     printf '\n'
     deps_check || true
-    if [ "$DISTRO" = nixos ] && [ -z "${L2_DESKTOP_MAKE:-}" ]; then
+    if [ "$DISTRO" = nixos ]; then
         have nix-build || warn "desktop compilation requires nix-build for its FHS environment"
-    elif [ -n "${L2_DESKTOP_MAKE:-}" ]; then
-        have "$L2_DESKTOP_MAKE" || warn "desktop make wrapper missing: $L2_DESKTOP_MAKE"
     else
         local tool
         for tool in /usr/bin/file wget rsync unzip c++ patch which bc flock; do

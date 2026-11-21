@@ -37,7 +37,7 @@ def type_line(monitor, line):
     key(monitor, "ret")
 
 
-def test(iso, firmware, temp):
+def test(iso, firmware, temp, autostart):
     monitor_path = str(Path(temp) / "monitor")
     argv = ["qemu-system-x86_64", "-m", "512", "-vga", "std", "-display", "none",
             "-serial", "stdio", "-monitor", f"unix:{monitor_path},server,nowait",
@@ -53,10 +53,17 @@ def test(iso, firmware, temp):
             require(guest, "pidof getty >/dev/null")
             type_line(monitor, "root")
             time.sleep(1)
-            type_line(monitor, "startx")
+            if not autostart:
+                type_line(monitor, "startx")
             require(guest, "pidof Xorg && pidof l2wm && pidof xterm")
             key(monitor, "meta_l-ret")
             require(guest, 'set -- $(pidof xterm) && [ "$#" = 2 ]')
+            for side, distance in (("left", -1600), ("right", 1600)):
+                monitor.sendall(f"mouse_move {distance} 0\n".encode())
+                time.sleep(0.3)
+                type_line(monitor, f"tty >/tmp/{side}")
+                require(guest, f"test -s /tmp/{side}")
+            require(guest, "! cmp -s /tmp/left /tmp/right")
             type_line(monitor, "stty size >/tmp/before")
             require(guest, "test -s /tmp/before")
             command(guest, "echo master_percent=70 > /etc/l2/l2wm.conf")
@@ -65,13 +72,17 @@ def test(iso, firmware, temp):
             require(guest, "test -s /tmp/after && ! cmp -s /tmp/before /tmp/after")
             key(monitor, "meta_l-esc")
             require(guest, "! pidof Xorg && ! pidof l2wm && ! pidof xterm")
+        result = command(guest, "l2install dir /installed && test -x /installed/bin/l2wm && "
+                         "test -s /installed/boot/initramfs && echo L2INSTALL''PASS")
+        if "\nL2INSTALLPASS\r" not in result:
+            raise RuntimeError("desktop directory install failed: " + result)
         guest.send("poweroff")
         if guest.p.wait(timeout=45):
             raise RuntimeError("guest poweroff failed")
-        print("PASS: console login, startx, Xorg, l2wm, two xterms, keyboard input, layout reload, logout and poweroff")
+        print("PASS: console login, startx, Xorg, l2wm, two xterms, keyboard input, pointer focus, layout reload, logout, directory install and poweroff")
     except Exception:
         if guest.p.poll() is None:
-            print(command(guest, "ps; tail -60 /var/log/Xorg.0.log"))
+            print(command(guest, "ps; cat /dev/vcs1; tail -n 65 /var/log/Xorg.0.log"))
         raise
     finally:
         guest.close()
@@ -81,10 +92,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("iso", type=Path)
     parser.add_argument("--uefi", action="store_true")
+    parser.add_argument("--autostart", action="store_true", help="expect X to start on tty1 login")
     parser.add_argument("--ovmf", help="override firmware detection")
     args = parser.parse_args()
     firmware = find_ovmf(args.ovmf) if args.uefi else None
     if args.uefi and not firmware:
         parser.error("use --ovmf to specify the OVMF firmware")
     with tempfile.TemporaryDirectory() as directory:
-        test(args.iso, firmware, directory)
+        test(args.iso, firmware, directory, args.autostart)
