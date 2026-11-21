@@ -1,0 +1,4 @@
+config BR2_PACKAGE_L2WM
+	bool "l2wm"
+	depends on BR2_PACKAGE_XORG7
+	select BR2_PACKAGE_XLIB_LIBX11

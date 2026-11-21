@@ -1,0 +1,3 @@
+#!/bin/dash
+xterm -fn fixed -e /bin/dash -i &
+exec l2wm

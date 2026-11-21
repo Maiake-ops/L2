@@ -1,0 +1,43 @@
+#!/bin/dash
+# L2 has devtmpfs but no udev daemon. Enumerate connected devices at session start.
+set -eu
+export HOME=${HOME:-/root} SHELL=/bin/dash
+session=$(mktemp -d /run/l2-x11.XXXXXX)
+trap 'rm -rf "$session"' EXIT
+conf=$session/xorg.conf
+cp /etc/X11/xorg.conf "$conf"
+layout=$session/layout
+printf 'Section "ServerLayout"\n Identifier "Desktop"\n Screen "Screen"\n' > "$layout"
+keyboard= pointer=
+for event in /sys/class/input/event*; do
+    [ -r "$event/device/capabilities/ev" ] || continue
+    read -r bits < "$event/device/capabilities/ev"
+    read -r keys < "$event/device/capabilities/key"
+    keys=${keys##* }
+    role=SendCoreEvents
+    if [ "$((0x$keys & 0x40000000))" -ne 0 ]; then
+        if [ -z "$keyboard" ]; then role=CoreKeyboard; keyboard=1; fi
+    elif [ "$((0x$bits & 12))" -ne 0 ]; then
+        if [ -z "$pointer" ]; then role=CorePointer; pointer=1; fi
+    else
+        continue
+    fi
+    name=${event##*/}
+    cat >> "$conf" <<DEVICE
+Section "InputDevice"
+    Identifier "$name"
+    Driver "evdev"
+    Option "Device" "/dev/input/$name"
+EndSection
+DEVICE
+    printf ' InputDevice "%s" "%s"\n' "$name" "$role" >> "$layout"
+done
+cat "$layout" >> "$conf"
+echo EndSection >> "$conf"
+export XAUTHORITY=$session/Xauthority
+touch "$XAUTHORITY"
+cookie=$(hexdump -n 16 -v -e '1/1 "%02x"' /dev/urandom)
+xauth -f "$XAUTHORITY" add :0 . "$cookie"
+client=/etc/X11/xinit/xinitrc
+[ ! -x "$HOME/.xinitrc" ] || client=$HOME/.xinitrc
+xinit "$client" -- /bin/Xorg :0 vt7 -nolisten tcp -auth "$XAUTHORITY" -config "$conf" -logfile /var/log/Xorg.0.log
