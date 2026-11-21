@@ -265,7 +265,8 @@ make_iso() {
     install -m 0644 "$lim/limine-uefi-cd.bin" "$isod/boot/limine/limine-uefi-cd.bin"
     local cmdline
     cmdline=$(tr -d '\n' < "$L2_ROOT/config/cmdline" 2>/dev/null || printf 'loglevel=4')
-    sed "s|@CMDLINE@|$cmdline|g" "$L2_ROOT/config/limine.conf" > "$isod/boot/limine/limine.conf"
+    # Keep the recovery menu accessible on the serial VM while shortening autoboot.
+    sed -e 's/^timeout: 3$/timeout: 1/' -e "s|@CMDLINE@|$cmdline|g" "$L2_ROOT/config/limine.conf" > "$isod/boot/limine/limine.conf"
     cp "$isod/boot/limine/limine.conf" "$isod/EFI/BOOT/limine.conf"
     # L2-LIVE marker: l2net find_pack stops immediately (no hw/wifi pack here).
     printf 'L2 live medium lowram\n' > "$isod/l2/L2-LIVE"

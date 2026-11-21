@@ -185,3 +185,7 @@ Started at `be8c7f7e4`. The two Qwen CLI processes were still present. Build out
 ### A11 · Measure boot allocations and reclaimable pages on the pinned ISO
 
 The standalone BIOS profiler (10 MiB, SMP2, 40 s) checks zone managed pages against MemTotal and probes the guest kernel log. It found 2,430 present and 1,360 managed pages, 4,800 KiB reserved, 2,012 KiB slab and zero reclaimable slab. Initmem released 452 KiB. Dropping dentries yielded no gain. In two disposable boots, unlinking the unused v3 Wi-Fi client reduced Shmem from 828 to 764 KiB. Moving that executable to an optional medium is a measured 64 KiB opportunity. No default payload was removed. Profile runs and assertions exited 0 (audit.log, verified.log).
+
+### A12 · Shorten serial VM autoboot while retaining recovery
+
+Host monotonic launch → first rcl2 output → shell was 4.136 → 4.155 s on v3 and 2.155 → 2.174 s with a one-second VM menu. Guest service time stayed at ~19 ms. Both real BIOS images booted at 10 MiB. Two isolated ISO assemblies matched SHA-256 a87dfa78653f85adfd0a85cebe99feea18f353f048bb35ce5ae9c3fc0d6da650 (cmp exit 0). The menu regression checks BIOS/EFI config equality and recovery availability. Hardware menu timeout is separate.
