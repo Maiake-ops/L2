@@ -92,6 +92,20 @@ class L2install(unittest.TestCase):
         self.assertIn("DISK", r.stdout)
         self.assertIn("KIND", r.stdout)
 
+    def test_image_requires_regular_target_even_with_confirmation(self):
+        regular = self.scratch / "existing.img"
+        regular.write_bytes(b"unchanged")
+        link = self.scratch / "image-link"
+        link.symlink_to(regular)
+        dangling = self.scratch / "dangling"
+        dangling.symlink_to(self.scratch / "missing")
+        fifo = self.scratch / "pipe"
+        os.mkfifo(fifo)
+        for target in (link, dangling, fifo, self.scratch):
+            with self.subTest(target=target):
+                self.run_installer("--yes", "--dry-run", "image", str(target), ok=False)
+        self.assertEqual(regular.read_bytes(), b"unchanged")
+
     def test_image_refuses_block_device(self):
         devs = sorted(Path("/dev").glob("sd*")) + sorted(Path("/dev").glob("loop*"))
         devs = [d for d in devs if d.is_block_device()]

@@ -201,3 +201,7 @@ New deterministic strace tests SIGKILL real install, remove, rollback and GC com
 ### A15 · Verify cached store contents before package reinstallation
 
 Reinstalling an unchanged archive used to bless prior file corruption by regenerating the manifest from the damaged cache. Test failed before (1). Reuse now compares the cached tree with the freshly extracted archive using existing manifest semantics. A changed file prevents activation and preserves the old manifest. Healthy reinstall and all 35 transaction tests passed (0). No on-disk format change.
+
+### A16 · Restrict image installation to regular file targets
+
+Four scratch dry-run cases exposed accepted target types (test exit 1). Image mode now rejects directories, FIFOs and both live and dangling symlinks even under --yes. Host tools receive an option terminator before the target. Existing refusal, mount ownership and cleanup tests plus the new cases passed, 19 tests (0). Validation assumes the caller controls the image parent directory throughout installation.

@@ -508,6 +508,9 @@ install_image() {
     _img=${1:-}; _size=${2:-512M}
     [ -n "$_img" ] || die "usage: l2install image out.img [SIZE]"
     [ -b "$_img" ] && die "image target must be a regular file, not a block device: $_img (use: l2install disk $_img)"
+    if [ -L "$_img" ] || { [ -e "$_img" ] && [ ! -f "$_img" ]; }; then
+        die "image target must be a regular file: $_img"
+    fi
     # F4: an existing non-empty file is somebody's data; truncate -s below
     # would destroy it (and the loop install forces YES=1).  Require --yes.
     if [ -e "$_img" ] && [ -s "$_img" ] && [ "$YES" != 1 ]; then
@@ -524,8 +527,8 @@ install_image() {
         STEP_T=1; return 0
     fi
     trap cleanup EXIT INT TERM
-    run truncate -s "$_size" "$_img"
-    LOOPDEV=$(losetup -fP --show "$_img") || die "losetup failed"
+    run truncate -s "$_size" -- "$_img"
+    LOOPDEV=$(losetup -fP --show -- "$_img") || die "losetup failed"
     say "image $_img -> $LOOPDEV"
     YES=1; install_disk "$LOOPDEV"
     ok "boot it with: qemu-system-x86_64 -m 256 -drive file=$_img,format=raw -nographic"
