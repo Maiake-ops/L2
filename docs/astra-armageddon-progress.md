@@ -213,3 +213,7 @@ The original media scan requested only ro. The new mount-contract assertion fail
 ### A18 · Canonicalize low-RAM initramfs archive order
 
 The same logical fixture with reversed input order produced unequal gzip archives on tmpfs (suite exit 1). The default temp filesystem happened to hide the difference. Sorting NUL-delimited paths under LC_ALL=C before cpio fixed it (tmpfs suite exit 0). Independent clean full initramfs builds on disk and tmpfs produced identical 420,733 B files, SHA-256 bf9850b0e658f34b71e5d81c25cc2b43339df53208a0e605a014c7ad37109d59 (cmp exit 0). Inputs were the existing hardware initramfs and freshly built rcl2.
+
+### A19 · Exercise selectable QEMU chipsets through the normal boot harness
+
+The boot and sweep APIs previously dropped the requested chipset (regression exit 1). Both now pass an explicit --machine argument to QEMU, preserving its default if omitted. Unit suite exit 0. The physical-hardware profile ISO booted under Q35 BIOS with 256 MiB, kernel 7.3.3-l2 and 7,120 KiB settled use. Shell probe and poweroff passed (0). No Q35 claim at 10 MiB.

@@ -72,3 +72,13 @@ class Ramtest(unittest.TestCase):
             with patch("sys.argv", ["ramtest", "--iso", "a", *flags]), patch.object(ramtest, "boot_medium") as boot:
                 ramtest.main()
                 self.assertEqual(boot.call_args.args[0].settle, expected)
+
+    def test_machine_type_reaches_medium_and_sweep(self):
+        self.args.machine = "q35"
+        self.args.cmdline = ""
+        with patch.object(ramtest, "Guest", return_value=self.guest) as guest:
+            ramtest.boot_medium(self.args)
+            ramtest.measure(self.args, "256M")
+            for call in guest.call_args_list:
+                argv = call.args[0]
+                self.assertEqual(argv[argv.index("-machine") + 1], "q35")

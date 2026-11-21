@@ -117,6 +117,8 @@ def measure(args, size_s):
         cmd = ["qemu-system-x86_64", "-m", size_s, "-smp", "2", "-display", "none", "-serial", "stdio",
                "-monitor", "none", "-no-reboot", "-kernel", args.kernel, "-initrd", args.initrd,
                "-append", f"rdinit=/init console=ttyS0,115200 panic=-1 {args.cmdline}"] + nic + accel()
+    if getattr(args, "machine", None):
+        cmd += ["-machine", args.machine]
     g = Guest(cmd)
     try:
         if not g.read_until(PROMPT, args.timeout):
@@ -192,6 +194,8 @@ def boot_medium(args):
             raise SystemExit("OVMF firmware not found; pass --ovmf /path/OVMF_CODE.fd")
         cmd += ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}"]
         mode = "UEFI"
+    if getattr(args, "machine", None):
+        cmd += ["-machine", args.machine]
     g = Guest(cmd)
     try:
         if not g.read_until(PROMPT, args.timeout):
@@ -251,6 +255,7 @@ def main():
     ap.add_argument("--ram", default="256")
     ap.add_argument("--uefi", action="store_true"); ap.add_argument("--ovmf")
     ap.add_argument("--with-nic", action="store_true")
+    ap.add_argument("--machine", help="QEMU machine type, for example q35")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
