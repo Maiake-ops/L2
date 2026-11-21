@@ -674,12 +674,19 @@ AGENTS (restored):
   All 4 carries kept (-Oz/unwind/rss/probe-byte), none regressed. rcl2 tree
   clean (committed d1959a232). Full make check still EXIT=2 (W6 l2install
   in progress); W7 rcl2 portion green. §10 heavy-test follow-ups queued.
-- W6 heavy-coder: PAUSED -> RESUMED. Tests committed (tools/test_l2net.py
-  7 tests; test_l2install.py expanded to 18) but l2install FIXES INCOMPLETE:
-  make check EXIT=2, 7 finding-tests fail (F3 host/live/cpio, F4, F5, F7,
-  F15). l2net N1 marker + N3 set -f present; l2install F3 gate partial.
-  MISSING: implement l2install fixes to turn 7 tests green + pass-after
-  evidence + report. Resumed with precise failure list.
+- W6 heavy-coder: PAUSED -> RESUMED -> COMPLETED. **DONE 2026-11-21, lead
+  verified + ACCEPTED, committed ac62c0101.** CRITICAL CORRECTION: the
+  script fixes were NOT committed at d1959a232 (only the test harness was;
+  scripts byte-identical to pre-fix HEAD -> resume make check EXIT=2). W6
+  applied all 8 fixes post-resume (F3/F4/F5/F7/F14/F15 + N1/N3). Lead
+  re-ran: test_l2install 18 OK, test_l2net 7 OK (25/25); full make check
+  EXIT=0 GREEN (181 unit tests + 5 rcl2 C suites). test_l2net wired into
+  check. CPIO AUDIT CORRECTED: busybox strips '/' by default but REJECTS
+  --no-absolute-filenames; GNU does NOT strip by default but ACCEPTS it ->
+  F3 containment was REAL on GNU; fixed via runtime probe (live busybox
+  flow byte-identical). N3 committed-test defect found+fixed (glob
+  mismatch). status()/vm-tuning/udhcpc untouched. P2 deferred (orphaned
+  build side).
 
 VERIFICATION (lead, post-restoration) — CORRECTED:
 - make check resume **EXIT=2 (FAILED)**, NOT 0. Earlier "EXIT=0" was the
@@ -690,6 +697,11 @@ VERIFICATION (lead, post-restoration) — CORRECTED:
   +l2gpt suites GREEN; only l2install red. W6 resumed with precise failure
   list to implement fixes -> green. Lead re-verifies + commits when green.
 - worktree .qwen/worktrees/campaigns/tools/test_mempressure.py present.
+- UPDATE 2026-11-21: W6 fixes landed (ac62c0101); make check now **EXIT=0
+  GREEN** (181 unit tests + 5 rcl2 C suites; a2-make-check-w6green.log).
+  ALL L2-ea workstreams W1/W2/W6/W7 DONE. L2-54 scope-violation revert done
+  (l2/README/.gitignore clean). Remaining: W5 release gates; orphaned
+  default-kernel lane (user decision); P2/N5 joint items pause.
 
 PEER ROSTER CHANGE:
 - Only L2-54 remains (ref 96af98 = old L2-96; started 2026-11-21T05:32Z).

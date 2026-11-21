@@ -11,12 +11,13 @@
 > `origin/campaigns/armageddon-ii`, backups `backup/armageddon-ii{,-pre-merge}`.
 > My commits rebased to NEW hashes: W1 1984055→`e34ab3d43`, W2 4acfd36→
 > `264d82b86`, wiring 1ec7140→`90a887c79`, notes 6b7e296→`ab303b3f2`,
-> audit-gate ec827b1→`7f4075f47`, dispute dd32ca7→`0d21a1cae`. W6/W7 fixes
-> committed by user (`d1959a232`); agents PAUSED→RESUMED to finish gates/
-> reports. **make check resume EXIT=2 (FAILED)** — W6 l2install fixes
-> INCOMPLETE: 7 finding-tests fail (TDD fail-before committed by user);
-> rcl2(W7)+l2pm(W2) suites green. (Earlier "EXIT=0" was the wrapper shell
-> code, misread — corrected.) Peer roster now only **L2-54** (ref
+> audit-gate ec827b1→`7f4075f47`, dispute dd32ca7→`0d21a1cae`. **W7 fixes
+> + W6 TEST HARNESS** committed by user (`d1959a232`); W6 SCRIPT fixes were
+> NOT committed (byte-identical to pre-fix HEAD) — applied post-resume,
+> committed `ac62c0101`. Agents PAUSED→RESUMED→COMPLETED. **make check now
+> EXIT=0 GREEN** (181 unit tests + 5 rcl2 C suites) after W6. (Resume-time
+> EXIT=2 was W6 incomplete; earlier "EXIT=0" was a wrapper-code misread —
+> both corrected.) Peer roster now only **L2-54** (ref
 > 96af98 = old L2-96); old L2-72/maiake-f6 sessions gone — agreements below
 > remain the reference but contacts changed. `notes/qwen1.txt` created per
 > user request (notes/ is gitignored; note/qwen1.txt is the tracked copy).
@@ -266,9 +267,11 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       follow-ups queued; test-live-install.py argparse sync optional.
       rcl2 post-W7 build ready for FINAL variant re-copy (L2-54); default
       integrated ISO build still ORPHANED (user decision).
-- [~] W6 shell safety hardening: l2install + l2net (62/64/66/67/221–240/261–280)
-      — **LAUNCHED 22:4x** (heavy-coder, background; P1 scope, 8 findings,
-      fail-before/pass-after required; P2 deferred per co-signed contract).
+- [x] W6 shell safety hardening: l2install + l2net (62/64/66/67/221–240/261–280)
+      — **DONE 2026-11-21, lead verified + ACCEPTED, committed ac62c0101**.
+      All 8 findings fixed (F3/F4/F5/F7/F14/F15 + N1/N3); 25/25 lane tests
+      green; fail-before/pass-after logged; full make check EXIT=0 (181
+      tests). test_l2net wired into check. P2 deferred per co-signed contract.
       udhcpc.script audited CLEAN (no changes needed). Peer F1 write-up:
       docs/armageddon/61-69-security-posture.md (exploit: attacker CD in sr0
       wins loop order over USB boot medium). **Phased fix**: P1 (my lane) =
@@ -433,7 +436,14 @@ Confirmed findings (none covered by tools/test_l2install.py's 10 tests):
 Falsified hypotheses (verified, NOT defects — do not "fix"): --efi-size and
 --hostname ARE validated at parse time (l2install:577-580) and preflight
 checks ESP+64 MiB against disk size BEFORE zap-all; /sbin/rcl2 resolves via
-sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
+sbin→bin symlink.
+**CPIO CLAIM CORRECTED (W6 empirical, 2026-11-21)**: my earlier "GNU/busybox
+both strip leading '/' by default / both support --no-absolute-filenames"
+was WRONG. Reality: busybox cpio STRIPS leading '/' by default but REJECTS
+--no-absolute-filenames; GNU cpio does NOT strip by default but ACCEPTS the
+flag. So F3 cpio containment was a REAL defect on GNU hosts (absolute member
+escaped on HEAD — test_f3_cpio fail-before). Fix: runtime support probe adds
+the flag on GNU, omits on busybox (live flow byte-identical).
 
 ## W6 audit — l2net + udhcpc.script (read-only; missions 221–240/261–280)
 
@@ -803,3 +813,19 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   PASS, idle ~3.8M flat** (12/16/32/256M); 9M probe in uefi sweep. Variant
   FINAL independent; integrated ISO blocked. My P2/N5 pause posture
   confirmed correct. W6 still running.
+- 2026-11-21 **W6 DONE — lead verified + ACCEPTED, committed ac62c0101**.
+  CRITICAL CORRECTION: W6 script fixes were NOT committed at d1959a232
+  (only the test harness was; scripts byte-identical to pre-fix HEAD —
+  hence resume make check EXIT=2). W6 applied all 8 fixes post-resume;
+  lead reviewed diffs + re-ran suites: test_l2install 18 OK, test_l2net
+  7 OK (25/25), full make check **EXIT=0 GREEN** (181 unit tests + 5 rcl2
+  C suites; a2-make-check-w6green.log). test_l2net wired into check.
+  **CPIO AUDIT CORRECTED**: busybox strips '/' by default but REJECTS
+  --no-absolute-filenames; GNU does NOT strip by default but ACCEPTS it →
+  F3 containment was REAL on GNU (fail-before captured); fixed via runtime
+  probe (live busybox flow byte-identical). N3 committed-test defect found
+  + fixed (planted glob mismatch). status()/vm-tuning/udhcpc untouched.
+  L2-54 scope-violation revert DONE (l2/README/.gitignore clean). ALL my
+  workstreams W1/W2/W6/W7 DONE; make check green. Remaining: W5 release
+  gates; orphaned default-kernel lane (user decision); P2/N5 joint items
+  pause. Heavy-test follow-ups queued (W6 live QEMU, W7 §10).
