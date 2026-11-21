@@ -39,6 +39,14 @@ def parse_meminfo(text):
     return d
 
 
+def used_memory(info):
+    available = info.get("MemAvailable")
+    if available is None:
+        available = (info["MemFree"] + info.get("Cached", 0) + info.get("Buffers", 0)
+                     + info.get("SReclaimable", 0) - info.get("Shmem", 0))
+    return info["MemTotal"] - min(info["MemTotal"], max(0, available))
+
+
 class Guest:
     def __init__(self, argv):
         self.p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -76,10 +84,9 @@ class Guest:
             if not self.read_until(MARK.encode() + b"\r", 20):
                 break
             info = parse_meminfo(self.buf.decode(errors="replace").split("cat /proc/meminfo")[-1])
-            if "MemTotal" not in info:
+            if "MemTotal" not in info or not ("MemAvailable" in info or "MemFree" in info):
                 break
-            avail = info.get("MemAvailable", info["MemFree"] + info.get("Cached", 0))
-            used = info["MemTotal"] - avail
+            used = used_memory(info)
             if best_used is None or used < best_used:
                 best_used, best_info = used, info
             time.sleep(2)
@@ -110,6 +117,8 @@ def measure(args, size_s):
         cmd = ["qemu-system-x86_64", "-m", size_s, "-smp", "2", "-display", "none", "-serial", "stdio",
                "-monitor", "none", "-no-reboot", "-kernel", args.kernel, "-initrd", args.initrd,
                "-append", f"rdinit=/init console=ttyS0,115200 panic=-1 {args.cmdline}"] + nic + accel()
+    if getattr(args, "machine", None):
+        cmd += ["-machine", args.machine]
     g = Guest(cmd)
     try:
         if not g.read_until(PROMPT, args.timeout):
@@ -118,8 +127,7 @@ def measure(args, size_s):
         info = g.meminfo()
         if not info:
             return {"size": size_s, "error": "could not parse meminfo"}
-        avail = info.get("MemAvailable", info["MemFree"] + info.get("Cached", 0))
-        used = info["MemTotal"] - avail
+        used = used_memory(info)
         return {"size": size_s, "installed": kib, "total": info["MemTotal"], "used": used,
                 "reserved": kib - info["MemTotal"], "slab": info.get("Slab", 0),
                 "pt": info.get("PageTables", 0), "stack": info.get("KernelStack", 0),
@@ -131,7 +139,10 @@ def measure(args, size_s):
 def ram_sweep(args):
     if not have("qemu-system-x86_64"):
         raise SystemExit("qemu-system-x86_64 not found (l2 deps install)")
-    sizes = [s for s in args.sizes.split(",") if s]
+    sizes = [s.strip().upper() for s in args.sizes.split(",")]
+    for size in sizes:
+        if parse_size(size) == 0:
+            raise SystemExit("RAM size must be positive")
     rows, bad = [], 0
     print(f"  {'RAM':>6} {'used':>9} {'budget':>9}  {'kernel reserved':>16}  slab  ptbl stack percpu")
     for s in sizes:
@@ -183,6 +194,8 @@ def boot_medium(args):
             raise SystemExit("OVMF firmware not found; pass --ovmf /path/OVMF_CODE.fd")
         cmd += ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}"]
         mode = "UEFI"
+    if getattr(args, "machine", None):
+        cmd += ["-machine", args.machine]
     g = Guest(cmd)
     try:
         if not g.read_until(PROMPT, args.timeout):
@@ -192,23 +205,49 @@ def boot_medium(args):
         time.sleep(args.settle)
         info = g.meminfo()
         print(f"  PASS {mode}: booted to the L2# shell  ({medium})")
-        if info:
-            avail = info.get("MemAvailable", info["MemFree"] + info.get("Cached", 0))
-            used = info["MemTotal"] - avail
-            ok = used <= args.budget
-            print(f"    idle RAM: {used} KiB used of {info['MemTotal']} KiB "
-                  f"(budget {args.budget} KiB)  {'OK' if ok else 'OVER BUDGET'}")
+        if not info:
+            print("    FAIL: no usable memory sample")
+            return 1
+        used = used_memory(info)
+        ok = used <= args.budget
+        print(f"    idle RAM: {used} KiB used of {info['MemTotal']} KiB "
+              f"(budget {args.budget} KiB)  {'OK' if ok else 'OVER BUDGET'}")
+        if not ok:
+            return 1
         probe = "uname -r"
+        pid1_budget = getattr(args, "pid1_budget", None)
+        if pid1_budget is not None:
+            probe += "; grep '^VmRSS:' /proc/1/status"
         if args.disk:
-            probe += "; cat /etc/l2/installed 2>/dev/null; grep ' / ' /proc/mounts"
+            probe += "; test -f /etc/l2/installed && grep '^/dev/[^ ]* / ext4 ' /proc/mounts"
+        g.buf = b""
         g.send(probe + "; echo L2RAM''DONE")
-        if g.read_until(MARK.encode() + b"\r", 20):
-            out = g.buf.decode(errors="replace").split("uname -r")[-1]
-            for line in out.splitlines():
-                s = line.strip()
-                if s.startswith("7.") or "installed" in s or s.startswith("/dev/"):
-                    print("   ", s)
+        if not g.read_until(MARK.encode() + b"\r", 20):
+            print("    FAIL: shell probe timed out")
+            return 1
+        out = g.buf.decode(errors="replace").split("uname -r")[-1]
+        if pid1_budget is not None:
+            rss = re.search(r"^VmRSS:\s+(\d+) kB\s*$", out, re.MULTILINE)
+            if not rss or not 0 < int(rss[1]) <= pid1_budget:
+                print(f"    FAIL: missing or excessive PID 1 RSS (budget {pid1_budget} KiB)")
+                return 1
+            print(f"    settled PID 1 RSS: {rss[1]} KiB")
+        if args.disk and not re.search(r"^/dev/\S+ / ext4 ", out, re.MULTILINE):
+            print("    FAIL: installed ext4 root was not observed")
+            return 1
+        for line in out.splitlines():
+            s = line.strip()
+            if s.startswith("7.") or "installed" in s or s.startswith("/dev/"):
+                print("   ", s)
         g.send("poweroff")
+        try:
+            status = g.p.wait(timeout=args.timeout)
+        except subprocess.TimeoutExpired:
+            print("    FAIL: guest did not power off")
+            return 1
+        if status:
+            print(f"    FAIL: QEMU exited with status {status}")
+            return 1
         return 0
     finally:
         g.close()
@@ -219,20 +258,30 @@ def main():
     ap.add_argument("--kernel"); ap.add_argument("--initrd"); ap.add_argument("--cmdline", default="loglevel=4")
     ap.add_argument("--sizes", default="256M,1G,4G,16G")
     ap.add_argument("--budget", type=int, default=int(os.environ.get("L2_RAM_BUDGET_KIB", 10240)))
-    ap.add_argument("--timeout", type=int, default=180); ap.add_argument("--settle", type=float, default=25.0)
-    ap.add_argument("--iso"); ap.add_argument("--disk"); ap.add_argument("--ram", default="256")
+    ap.add_argument("--timeout", type=int, default=180); ap.add_argument("--settle", type=float, default=40.0)
+    medium = ap.add_mutually_exclusive_group()
+    medium.add_argument("--iso"); medium.add_argument("--disk")
+    ap.add_argument("--ram", default="256")
     ap.add_argument("--uefi", action="store_true"); ap.add_argument("--ovmf")
     ap.add_argument("--with-nic", action="store_true")
+    ap.add_argument("--pid1-budget", type=int, help="maximum settled PID 1 RSS in KiB for medium checks")
+    ap.add_argument("--machine", help="QEMU machine type, for example q35")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
     if a.selftest:
         d = parse_meminfo("MemTotal:  1000 kB\nMemFree: 10 kB\nMemAvailable:   300 kB\n")
         assert d["MemTotal"] - d["MemAvailable"] == 700 and parse_size("1G") == 1048576 and parse_size("256M") == 262144
         print("selftest ok"); return 0
+    if a.disk and (a.initrd or a.kernel):
+        ap.error("--disk cannot be combined with a direct kernel")
+    if bool(a.kernel) != bool(a.initrd):
+        ap.error("--kernel and --initrd must be supplied together")
     if a.disk or (a.iso and not a.kernel):
         return boot_medium(a)
     if not (a.kernel and a.initrd):
         ap.error("need --kernel and --initrd (or --iso / --disk)")
+    if a.pid1_budget is not None:
+        ap.error("--pid1-budget requires a medium check")
     return ram_sweep(a)
 
 

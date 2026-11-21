@@ -92,6 +92,20 @@ class L2install(unittest.TestCase):
         self.assertIn("DISK", r.stdout)
         self.assertIn("KIND", r.stdout)
 
+    def test_image_requires_regular_target_even_with_confirmation(self):
+        regular = self.scratch / "existing.img"
+        regular.write_bytes(b"unchanged")
+        link = self.scratch / "image-link"
+        link.symlink_to(regular)
+        dangling = self.scratch / "dangling"
+        dangling.symlink_to(self.scratch / "missing")
+        fifo = self.scratch / "pipe"
+        os.mkfifo(fifo)
+        for target in (link, dangling, fifo, self.scratch):
+            with self.subTest(target=target):
+                self.run_installer("--yes", "--dry-run", "image", str(target), ok=False)
+        self.assertEqual(regular.read_bytes(), b"unchanged")
+
     def test_image_refuses_block_device(self):
         devs = sorted(Path("/dev").glob("sd*")) + sorted(Path("/dev").glob("loop*"))
         devs = [d for d in devs if d.is_block_device()]
@@ -277,6 +291,7 @@ class L2install(unittest.TestCase):
         self.build_medium(self.scratch / "media")  # L2_MEDIA points here
         env = self.record_shims()
         env["L2_SRC"] = str(src)
+        self.cat_pid1_shim("init")  # name alone cannot authorize a medium
         r = self.run_env(env, "-y", "-n", "disk", "/dev/l2-fake-disk", ok=False)
         self.assertIn("build all", r.stderr)
         self.assertIn("live", r.stderr)

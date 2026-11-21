@@ -35,6 +35,9 @@ check:
 	sh -n overlay/etc/l2/serial-getty
 	python3 -m py_compile tools/patch-kernel-ram.py
 	python3 tools/ramtest.py --selftest
+	python3 -m unittest discover -s tools -p 'test_ramtest.py'
+	python3 -m unittest discover -s tools -p 'test_lowram_matrix.py'
+	python3 -m unittest discover -s tools -p 'test_lowram_build.py'
 	python3 -m unittest discover -s tools -p 'test_stability_harness.py'
 	$(MAKE) -C rcl2 test
 	python3 -m unittest discover -s tools -p 'test_rcl2_lifecycle.py'
@@ -44,8 +47,10 @@ check:
 	python3 -m unittest discover -s tools -p 'test_l2pm_recipe_validation.py'
 	python3 -m unittest discover -s tools -p 'test_l2pm_features.py'
 	python3 -m unittest discover -s tools -p 'test_l2pm_transactions.py'
+	root=$$(mktemp -d) && trap 'rm -rf "$$root"' EXIT && L2PM_ROOT="$$root" $(MAKE) -C l2pm check
 	python3 -m unittest discover -s tools -p 'test_l2gpt.py'
 	python3 -m unittest discover -s tools -p 'test_l2install.py'
+	python3 -m unittest discover -s tools -p 'test_l2net.py'
 	$(MAKE) -C l2wifi
 	python3 -m unittest discover -s tools -p 'test_l2wifi.py'
 

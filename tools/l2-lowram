@@ -3,7 +3,7 @@
 #
 # Builds a SEPARATE VM/serial-oriented kernel (config/kernel.lowram on top of
 # `make tinyconfig`) whose goal is to boot the L2# shell with 10 MiB TOTAL guest
-# RAM (QEMU -m 10M, BIOS ISO).  The default kernel/ISO produced by ./l2 is never
+# RAM (QEMU -m 10M, BIOS ISO).  The hardware kernel/ISO produced by ./l2 build hardware is never
 # touched: this tool reads build/ only to copy the cached kernel tarball, the
 # current initramfs-l2 and the limine files, and writes everything under
 # build-lowram/ (override with L2_BUILD_DIR).
@@ -29,7 +29,7 @@ shopt -s nullglob
 SELF=$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]}")
 L2_ROOT=${L2_ROOT:-$(CDPATH= cd -- "$(dirname -- "$SELF")/.." && pwd)}
 BUILD=${L2_BUILD_DIR:-$L2_ROOT/build-lowram}   # SEPARATE from build/
-MAIN_BUILD=$L2_ROOT/build                      # read-only source of artifacts
+MAIN_BUILD=${L2_MAIN_BUILD_DIR:-$L2_ROOT/build}                      # read-only source of artifacts
 SRC=$BUILD/src
 OUT=$BUILD/out
 LOGS=$BUILD/logs
@@ -203,6 +203,9 @@ build_kernel() {
 # Assemble a lowram variant initramfs under build-lowram (never edits the
 # committed build/out/initramfs-l2).  Removes the 'service tty1' line from
 # rcl2.conf so a VT=n kernel does not respawn-fail on a missing /dev/tty1.
+# Optional L2_LOWRAM_RCL2=/path/to/rcl2 overrides bin/rcl2 (e.g. a re-stamped
+# rcl2/build/rcl2) without touching the main-tree initramfs; UNSET => the
+# default variant is byte-identical.
 # Repacked root-owned (cpio --owner=0:0) and reproducible (gzip -n, epoch mtimes).
 make_initramfs_variant() {
     init_epoch
@@ -220,8 +223,15 @@ make_initramfs_variant() {
     [ -f "$conf" ] || die "variant initramfs has no etc/rcl2.conf"
     grep -v '^[[:space:]]*service[[:space:]]\+tty1[[:space:]]' "$conf" > "$conf.tmp"
     mv "$conf.tmp" "$conf"
+    # Optional rcl2 refresh (bin/rcl2 is the verified rootfs path).  Installed
+    # before the epoch-touch so it gets the same mtime as every other file.
+    if [ -n "${L2_LOWRAM_RCL2:-}" ]; then
+        [ -f "$L2_LOWRAM_RCL2" ] || die "L2_LOWRAM_RCL2 is set but not a file: $L2_LOWRAM_RCL2"
+        install -m 0755 "$L2_LOWRAM_RCL2" "$work/bin/rcl2"
+        say "variant initramfs: bin/rcl2 overridden from $L2_LOWRAM_RCL2"
+    fi
     find "$work" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
-    ( cd "$work" && find . -print0 \
+    ( cd "$work" && find . -print0 | LC_ALL=C sort -z \
         | cpio --null -o -H newc --owner=0:0 --reproducible --quiet \
         | gzip -n -9 ) > "$out" || die "initramfs repack failed"
     say "variant initramfs: $out ($(stat -c%s "$out") B)"
@@ -230,7 +240,7 @@ make_initramfs_variant() {
 make_iso() {
     init_epoch
     have xorriso || die "xorriso is required"
-    local out=$OUT/l2-lowram.iso
+    local out=${1:-$OUT/l2-lowram.iso}
     local lim=$MAIN_BUILD/out/limine/share/limine
     local limbin=$MAIN_BUILD/out/limine/bin/limine
     # Prefer the lowram variant initramfs (tty1 service removed for VT=n);
@@ -255,7 +265,8 @@ make_iso() {
     install -m 0644 "$lim/limine-uefi-cd.bin" "$isod/boot/limine/limine-uefi-cd.bin"
     local cmdline
     cmdline=$(tr -d '\n' < "$L2_ROOT/config/cmdline" 2>/dev/null || printf 'loglevel=4')
-    sed "s|@CMDLINE@|$cmdline|g" "$L2_ROOT/config/limine.conf" > "$isod/boot/limine/limine.conf"
+    # Keep the recovery menu accessible on the serial VM while shortening autoboot.
+    sed -e 's/^timeout: 3$/timeout: 1/' -e "s|@CMDLINE@|$cmdline|g" "$L2_ROOT/config/limine.conf" > "$isod/boot/limine/limine.conf"
     cp "$isod/boot/limine/limine.conf" "$isod/EFI/BOOT/limine.conf"
     # L2-LIVE marker: l2net find_pack stops immediately (no hw/wifi pack here).
     printf 'L2 live medium lowram\n' > "$isod/l2/L2-LIVE"
@@ -310,7 +321,7 @@ cmd=${1:-all}
 case "$cmd" in
     build)     build_kernel ;;
     initramfs) make_initramfs_variant ;;
-    iso)       make_iso ;;
+    iso)       make_iso "${2:-}" ;;
     all)       build_kernel; make_initramfs_variant; make_iso ;;
     sizes)     show_sizes ;;
     -h|--help|help) usage ;;

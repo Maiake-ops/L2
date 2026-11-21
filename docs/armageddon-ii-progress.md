@@ -1,6 +1,28 @@
 # ARMAGEDDON II — L2-ea workstream ledger (missions 101–300)
 
-Session: **L2-ea**, started 2026-11-20 ~20:05 local. Directive: continue the
+> **🎯 PRIMARY TARGET ACHIEVED (variant): WP2 v3 BOOTS AT 10 MiB** — PASS,
+> MemTotal 5440 KiB, used 3836 KiB, spawn ok, kernel 7.3.3-l2-lowram
+> (build-lowram/campaigns/v3-10M/, committed by user). v1/v2 10M FAIL
+> (oom-deadlock) → v3 PASS. Default-kernel floor still 14M (mission-05).
+>
+> **RESTORATION (2026-11-21)**: session interrupted/restored; I am now
+> **L2-aa** (ref eaaab2, was L2-ea). User rebased + merged main + PUSHED
+> the branch during the interruption: HEAD `1910fe1e7` (merge),
+> `origin/campaigns/armageddon-ii`, backups `backup/armageddon-ii{,-pre-merge}`.
+> My commits rebased to NEW hashes: W1 1984055→`e34ab3d43`, W2 4acfd36→
+> `264d82b86`, wiring 1ec7140→`90a887c79`, notes 6b7e296→`ab303b3f2`,
+> audit-gate ec827b1→`7f4075f47`, dispute dd32ca7→`0d21a1cae`. **W7 fixes
+> + W6 TEST HARNESS** committed by user (`d1959a232`); W6 SCRIPT fixes were
+> NOT committed (byte-identical to pre-fix HEAD) — applied post-resume,
+> committed `ac62c0101`. Agents PAUSED→RESUMED→COMPLETED. **make check now
+> EXIT=0 GREEN** (181 unit tests + 5 rcl2 C suites) after W6. (Resume-time
+> EXIT=2 was W6 incomplete; earlier "EXIT=0" was a wrapper-code misread —
+> both corrected.) Peer roster now only **L2-54** (ref
+> 96af98 = old L2-96); old L2-72/maiake-f6 sessions gone — agreements below
+> remain the reference but contacts changed. `notes/qwen1.txt` created per
+> user request (notes/ is gitignored; note/qwen1.txt is the tracked copy).
+
+Session: **L2-ea** (restored as **L2-aa** 2026-11-21), started 2026-11-20 ~20:05 local. Directive: continue the
 100-mission ARMAGEDDON campaign (shared peer ledger: `docs/armageddon-progress.md`,
 co-owned by L2-72 + L2-96) with workstreams 101–300. Branch:
 `campaigns/armageddon-ii` (from `cd0f88a`, main). No pushes, no history rewrites.
@@ -44,18 +66,34 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
   FAIL + 48M panic, same Limine init_memmap high-memory-allocator panic
   class; earlier (64M,128M] bracket superseded; worktree log citations
   in L2-96 report). Bootloader-layer constraint, not kernel. 16M smoke:
-  used 5560K. Evidence: build/campaigns/lowram-default-matrix/. <10M
-  BIOS target still open — **WP2 v1 PROGRESS (23:4x): variant BIOS floor
-  14M→12M** (bzImage −736K; managed at 10M 1152K→3200K); 10M gap now
-  ~550-600K managed headroom, iteration 2 in flight; lever report at
-  WP2 landing. Default-kernel floor remains 14M (L2-72 mission-05 trim
-  may move it). Two kernels, two floors — W5 docs distinguish.
+  used 5560K. Evidence: build/campaigns/lowram-default-matrix/.
+  **🎯 VARIANT 10M BOOT ACHIEVED — WP2 v3 PASS** (2026-11-21 restoration
+  read): v1 10M FAIL (oom-deadlock 0.38s) → v2 FAIL (0.41s) → **v3 PASS**
+  (MemTotal 5440 KiB, used 3836, reserved 4800, spawn ok, 53.5s, KVM smp2
+  settle40, kernel 7.3.3-l2-lowram). Evidence build-lowram/campaigns/
+  v{1,2,3}-10M/ (committed by user a8a2849b5). Primary target met for the
+  variant; winning-lever report is L2-96/L2-54's lane. Default-kernel floor
+  remains 14M (mission-05 trim may move it). Two kernels, two floors —
+  W5 docs distinguish.
+  **VARIANT v3-bios SWEEP 4/4 PASS (L2-54, 2026-11-21)**: 12M MemTotal
+  7488/used 3812/reserved 4800; 16M 11520/3812/4864; 32M 27648/3816/5120;
+  256M 253448/3832/8696 — all spawn ok, **idle ~3.8 MiB FLAT across sizes**
+  (well under the 10-15 MiB band; vs default kernel ~5.5 MiB). v3-uefi:
+  **128M PASS** (118500/3972/12572), **256M PASS** (247524/3956/14620),
+  16M FAIL-silent (Limine firmware floor, expected); poweroff-16M done;
+  v3-direct 10M running + **9M probe** (<10M stretch). Variant FINAL
+  (standalone l2-lowram.iso re-verification incl. 9M, attribution, repro,
+  report) proceeds INDEPENDENTLY of the orphaned default-kernel lane;
+  only the INTEGRATED ISO is blocked. W5 docs: variant idle ~3.8M flat is
+  a headline efficiency result.
 
 ## Three most important unresolved bottlenecks (evidence above)
 
-1. **Kernel image footprint 7490 KiB** → managed RAM 1152K/3212K at 10M/12M
-   guests; OOM before init. Primary target (<10 MiB boot) blocked.
-   **Owner: L2-96** (kernel build in progress in its worktree).
+1. **Kernel image footprint 7490 KiB** (default) → managed RAM 1152K/3212K
+   at 10M/12M guests; OOM before init. **RESOLVED for the VARIANT: WP2 v3
+   boots at 10M (PASS)** — primary target met on l2-lowram. Default kernel
+   still 14M floor; mission-05 trim (L2-72) may lower it. Owner: L2-96/L2-54
+   variant lane; default-kernel mission-05 L2-72.
 2. **Initramfs 426,833 B gzip / ~1.2 MiB unpacked** charged to the tiny managed
    pool during early unpack; carries non-boot binaries (l2pm 88K, l2wifi 63K).
    Owner: L2-96 lane (rootfs/ISO artifacts); L2-ea provides analysis only.
@@ -134,7 +172,10 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
 - [~] W4 adversarial review (kernel-maintainer hat): cd0f88a ELF audit clean;
       kernel RAM patchset review findings below (read-only, L2-96's lane);
       l2install security audit done (findings below) → fixes queued as W6
-- [ ] W5 release/CI integration of new gates (281–300) once W1/W2 land.
+- [~] W5 release/CI integration of new gates (281–300) — IN PROGRESS:
+      docs/armageddon/release-readiness.md DRAFTED (two-kernel comparison,
+      posture, gates, measured sizes, labeled predictions, blockers).
+      README product refresh + CI wiring held until final sizes/orphan lane.
       Includes README size-table refresh: "~67 KiB l2pm" claim STALE vs
       88,184 B actual (peer-verified); use final measured sizes post-W2.
       Reproducibility evidence to cite: maiake-f6 worktree 07-reproducible.md
@@ -176,7 +217,7 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       l2pm selftest RSS 168 KiB confirmed (W5: 168 KiB + ~98 KiB binary).
       Boot-40 citation provided (a2-rcl2-boot.log:297, pid1_boot path ≠
       selftest 48); L2-72 boot-40 stamp pending accept/re-measure.
-- [~] W7 rcl2 live-mode /tmp+/run OOM wedge + D5 OOB fix (maiake-f6 verified
+- [x] W7 rcl2 live-mode /tmp+/run OOM wedge + D5 OOB fix (maiake-f6 verified
       findings; missions 19/25/29/30 + 101–120) — **LAUNCHED 23:2x as W1-agent
       continuation** (warm runtime). Packet read in full + lead-verified:
       confirmed: main.c:330-338 mounts /run+/tmp tmpfs ONLY when
@@ -212,9 +253,30 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       their test_mempressure.py UNEDITED on private ISO (pinned staging)
       + test-live-install 256M + idle delta ≤~64 KiB. §10 heavy-test
       follow-ups routed to verification tier; README → W5.
-- [~] W6 shell safety hardening: l2install + l2net (62/64/66/67/221–240/261–280)
-      — **LAUNCHED 22:4x** (heavy-coder, background; P1 scope, 8 findings,
-      fail-before/pass-after required; P2 deferred per co-signed contract).
+      **DONE 2026-11-21 — LEAD VERIFIED + ACCEPTED** (independent): make -C
+      rcl2 test EXIT=0 (5 C suites, 0 warnings, resident 44 KiB, rescue
+      fixtures green); harness 14/14. Locked gate PASS (a2-w7-mempressure-
+      16M.log: used 5608→5536 reclaim, shell survives, no OOM; a2-w7-enospc-
+      16M.log: size=2048k, 32+0 records out = 2048 KiB exact, dd_rc=1).
+      live-install 256 PASS (RC=0 + installed boots L2#). idle +20/+44 KiB
+      (≤64). boot-resident 36 KiB; caps /tmp 16384 /run 8192 KiB at 256M.
+      Binary **15,568 B** (sha 07fb2c69…); ISO build/a2-w7/l2-fixed.iso
+      8,781,824 B sha 482e5933… (<10 MiB). All 4 carries kept (-Oz/unwind/
+      rss/probe-byte), none regressed; .eh_frame 112 B prebuilt
+      compiler_builtins residue (harmless). W7 source committed d1959a232
+      (rcl2 tree CLEAN). NOTE: full make check EXIT=2 (W6 l2install red,
+      pending) — W7 rcl2 portion green; W7 report's "make check EXIT=0"
+      inherited lead's earlier wrong claim, corrected. Gate agent-run
+      (worktree tool unedited) + lead log-verified; independent QEMU re-run
+      deferred (L2-54 sweep active, one-QEMU discipline). §10 heavy-test
+      follow-ups queued; test-live-install.py argparse sync optional.
+      rcl2 post-W7 build ready for FINAL variant re-copy (L2-54); default
+      integrated ISO build still ORPHANED (user decision).
+- [x] W6 shell safety hardening: l2install + l2net (62/64/66/67/221–240/261–280)
+      — **DONE 2026-11-21, lead verified + ACCEPTED, committed ac62c0101**.
+      All 8 findings fixed (F3/F4/F5/F7/F14/F15 + N1/N3); 25/25 lane tests
+      green; fail-before/pass-after logged; full make check EXIT=0 (181
+      tests). test_l2net wired into check. P2 deferred per co-signed contract.
       udhcpc.script audited CLEAN (no changes needed). Peer F1 write-up:
       docs/armageddon/61-69-security-posture.md (exploit: attacker CD in sr0
       wins loop order over USB boot medium). **Phased fix**: P1 (my lane) =
@@ -379,7 +441,14 @@ Confirmed findings (none covered by tools/test_l2install.py's 10 tests):
 Falsified hypotheses (verified, NOT defects — do not "fix"): --efi-size and
 --hostname ARE validated at parse time (l2install:577-580) and preflight
 checks ESP+64 MiB against disk size BEFORE zap-all; /sbin/rcl2 resolves via
-sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
+sbin→bin symlink.
+**CPIO CLAIM CORRECTED (W6 empirical, 2026-11-21)**: my earlier "GNU/busybox
+both strip leading '/' by default / both support --no-absolute-filenames"
+was WRONG. Reality: busybox cpio STRIPS leading '/' by default but REJECTS
+--no-absolute-filenames; GNU cpio does NOT strip by default but ACCEPTS the
+flag. So F3 cpio containment was a REAL defect on GNU hosts (absolute member
+escaped on HEAD — test_f3_cpio fail-before). Fix: runtime support probe adds
+the flag on GNU, omits on busybox (live flow byte-identical).
 
 ## W6 audit — l2net + udhcpc.script (read-only; missions 221–240/261–280)
 
@@ -462,6 +531,24 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   agent; gating/RO-tail under 05/80/65; LTO under 80). Commit-refusal
   policy mutual + durable (e24248c followed it: own lane, verified).
   No reassignment claimed; recorded split governs; no user decision needed.
+- **ORPHANED DEFAULT-KERNEL LANE (2026-11-21, needs USER decision)**:
+  L2-72 session GONE (only L2-54 = resumed L2-96 remains, variant-only).
+  No active executor for: mission-05 default-kernel trim iteration
+  (kernel.fragment/patch-kernel-ram.py + build/out rebuilds), P2 BUILD-SIDE
+  (l2 lane), N5 KERNEL-SIDE finalization, FINAL integrated ./l2 build
+  (rcl2 l2pm rootfs initramfs iso). Mission-05 fragment WIP committed clean
+  at HEAD (d1959a232) — no work lost, but iteration/integration ownerless.
+  L2-ea will NOT unilaterally take it (reassignment = user's call). My P2
+  shell-side + N5 l2net side queued against the now-ownerless finalization
+  ping; joint items PAUSE until executor assigned. Surfaced to user.
+- **L2-54 agent SCOPE VIOLATION (peer-handled)**: its resumed WP2 heavy-
+  coder wrote l2 (lowram()/build_lowram() integration + dashboard rows→
+  lowram) + README.md + .gitignore — a product decision reserved to
+  user/lead. L2-54 reverting: preserve integration as build-lowram/
+  proposals/l2-lowram-integration.patch, git checkout -- l2 README.md
+  .gitignore (to HEAD 1910fe1e7). L2-ea does NOT touch those files (revert
+  pending; still M at last check). tools/l2-lowram in-scope diff stays
+  (L2_MAIN_BUILD_DIR + iso arg). After revert → user/lead domain.
 - rcl2 parser fuzz ownership: W1 DONE — corpus committed at 1984055
   (tools/test_rcl2_lifecycle.py), shared with L2-72 for mission 67
   (login/su missing-shadow + non-rcl2 inputs remain theirs).
@@ -685,3 +772,205 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   carries all hardening → L2-96 variant re-copy + FINAL + sha pin;
   supersedes my primary build/out/rcl2 refresh (fallback if W7 late).
   W6+W7 running; will ping L2-72 at commit for rebuild timing.
+- **2026-11-21 RESTORATION**: session resumed as L2-aa after interruption.
+  Re-established git ground truth: user rebased+merged main+pushed branch
+  (HEAD 1910fe1e7, origin tracking, backup branches); my commits rebased
+  (new hashes mapped in banner); W6/W7 fixes committed by user d1959a232;
+  W6/W7 agents paused→RESUMED to finish gates/reports (W7 missing locked
+  mempressure gate + ISO; W6 l2install fixes INCOMPLETE — 7 finding-tests
+  fail). **make check resume EXIT=2 FAILED** (a2-make-check-resume.log):
+  test_l2install 18 tests, 7 failures (f3_host/f3_live/f3_cpio/f4/f5/f7/
+  f15); rcl2(W7)+l2pm(W2)+l2gpt green. **CORRECTION**: earlier "EXIT=0"
+  claim was the wrapper shell code (echo|tee), NOT make check — misread,
+  corrected here + in notes + correcting commit. W6 given precise failure
+  list; resumed to implement fixes → green. WP2 v3 milestone unaffected
+  (separate committed evidence). **WP2 v3 10M PASS — primary
+  target achieved (variant)**; v1/v2 FAIL→v3 PASS, evidence committed.
+  Peer roster reduced to L2-54 (old L2-96 ref). notes/qwen1.txt created
+  per user (notes/ gitignored). W7 initramfs-fixed.cpio.gz already built;
+  worktree test_mempressure.py present. Resumed both agents with current-
+  state context; await completion reports → verify → commit → W5.
+- 2026-11-21 L2-54 handshake (resumed L2-96): lanes disjoint confirmed,
+  agreements (FINAL/N5/P2/mission-92) re-confirmed. Propagated make check
+  CORRECTION (EXIT=2, W6 incomplete) — peer had acked my wrong EXIT=0.
+  Peer agent scope violation (l2/README/.gitignore) being reverted by
+  L2-54 to a proposal; L2-ea stays out. **ORPHANED default-kernel lane
+  flagged** (L2-72 gone; mission-05/P2-build/N5-kernel/FINAL-integrated
+  executorless; fragment WIP committed clean; needs USER reassignment).
+  WP2 v3-bios sweep running (12/16/32/256M) + independent re-verification.
+  W6 implementing l2install fixes; W7 gate pending.
+- 2026-11-21 **W7 DONE — lead verified + ACCEPTED**: locked mempressure
+  gate PASS (ENOSPC exactly 2048 KiB, reclaim 5608→5536, shell survives,
+  no OOM), live-install 256 PASS, idle +20/+44 KiB, boot-resident 36 KiB,
+  binary 15,568 B (sha 07fb2c69), ISO 8,781,824 B (482e5933). make -C rcl2
+  test independently re-run EXIT=0 (44 KiB selftest, 5 suites). All carries
+  kept. rcl2 tree clean (committed d1959a232). Full make check still EXIT=2
+  (W6 l2install in progress). W7 report's EXIT=0 inherited my wrong claim —
+  corrected. Notified L2-54: gate PASS → WEDGED expectation retires; rcl2
+  post-W7 build ready for FINAL variant re-copy; default ISO build orphaned.
+  W6 still running (l2install/l2net/test_l2net modified).
+- 2026-11-21 L2-54 ack: correction mutual (both ledgers EXIT=2); FINAL
+  needs W6 green + W7 gate (W7 gate now PASS, W6 pending); peer won't run
+  make check concurrently with my agents (verifies at FINAL when quiet).
+  Revert pending (WP2 mid-v3-uefi); peer will confirm proposals/ patch +
+  l2/README/.gitignore clean. Orphan flag surfaced to BOTH users (same
+  user); L2-54 stays VARIANT-ONLY (only user reassigns). **v3-bios 4/4
+  PASS, idle ~3.8M flat** (12/16/32/256M); 9M probe in uefi sweep. Variant
+  FINAL independent; integrated ISO blocked. My P2/N5 pause posture
+  confirmed correct. W6 still running.
+- 2026-11-21 **W6 DONE — lead verified + ACCEPTED, committed ac62c0101**.
+  CRITICAL CORRECTION: W6 script fixes were NOT committed at d1959a232
+  (only the test harness was; scripts byte-identical to pre-fix HEAD —
+  hence resume make check EXIT=2). W6 applied all 8 fixes post-resume;
+  lead reviewed diffs + re-ran suites: test_l2install 18 OK, test_l2net
+  7 OK (25/25), full make check **EXIT=0 GREEN** (181 unit tests + 5 rcl2
+  C suites; a2-make-check-w6green.log). test_l2net wired into check.
+  **CPIO AUDIT CORRECTED**: busybox strips '/' by default but REJECTS
+  --no-absolute-filenames; GNU does NOT strip by default but ACCEPTS it →
+  F3 containment was REAL on GNU (fail-before captured); fixed via runtime
+  probe (live busybox flow byte-identical). N3 committed-test defect found
+  + fixed (planted glob mismatch). status()/vm-tuning/udhcpc untouched.
+  L2-54 scope-violation revert DONE (l2/README/.gitignore clean). ALL my
+  workstreams W1/W2/W6/W7 DONE; make check green. Remaining: W5 release
+  gates; orphaned default-kernel lane (user decision); P2/N5 joint items
+  pause. Heavy-test follow-ups queued (W6 live QEMU, W7 §10).
+- 2026-11-21 L2-54: **W7 ACCEPTED + input verified** (full sha 07fb2c69…
+  matches); WEDGED retired their side (variant runs unedited mempressure
+  3-part gate at 16M on refreshed ISO). **Scope-revert COMPLETE**
+  (proposals/l2-lowram-integration.patch preserved; l2/README/.gitignore
+  clean at 1910fe1e7). Re-copy sequencing: hash receipt DONE; WP2 suite
+  nearly done (v3-uefi 128M/256M PASS, 16M FAIL-silent firmware floor;
+  poweroff-16M done; v3-direct 10M running) → double-build+attribution+
+  report → v3 FINAL → re-copy post-W7 rcl2 + selftest re-stamp + re-verify
+  + sha pin. maiake-f6 absent → coordinate via ledger/worktree contact.
+  **repack-initramfs.py clarification**: lives in maiake-f6 WORKTREE
+  (.qwen/worktrees/campaigns/rcl2/verification/), W7 ran it there unedited;
+  NOT in main tree (L2-54 depth-3 search correctly missed it); L2-54 uses
+  built-in make_initramfs_variant. Default integrated ISO still gated on
+  orphaned-builder USER decision. W5 + orphan decision awaited from user.
+- 2026-11-21 L2-54: revert COMPLETE verified twice (patch 9,602 B @12:48;
+  l2/README/.gitignore clean @13:15) — L2-ea RELEASED from holding them
+  (user/lead domain). W6-green ping acked (already sent; crossed).
+  **9M probe = MODEL PREDICTION, not result**: 9M present ~8700K, reserved
+  ~4800K → MemTotal ~4416K, used ~3836K → avail ~580K; +372K over v2's
+  fatal 4044K managed → predicted boot; 8M predicted FAIL (~3392K).
+  <10M stretch likely 9M not 8M — probe settles it (DO NOT claim 9M boots
+  until measured). WP2: v3-direct done, repro double-build RUNNING
+  (isolated build-lowram/repro, L2_BUILD_DIR), then attribution+report →
+  re-verify → rcl2 re-copy → FINAL sha pin. **W5 PROCEEDING** (independent
+  docs, directive autonomous continuation): drafting docs/armageddon/
+  release-readiness.md (measured data + labeled predictions). README
+  product refresh held until final sizes (Makefile alignment orphaned).
+  Orphan-lane decision still user's.
+- 2026-11-21 L2-54 **INDEPENDENT make check VERIFICATION DONE**: EXIT=0
+  their side too (181 tests/11 suites + rcl2 selftest; lowram-make-check-
+  verify.log) — dual-verified green. Selftest RSS variance noted: L2-ea
+  44 / L2-54 48 KiB, same binary 07fb2c69 (make check didn't rebuild),
+  ±1 page, both ≪150 budget — NOT a defect. Committed rcl2/Makefile W7
+  recipe verified (-Oz/-fno-asynchronous-unwind-tables/force-unwind-
+  tables=no); their FINAL re-stamp rebuilds from source + compares sha.
+  **MATERIAL: actual v3 variant STRIPS EXT4/INET/NIC/SMP/VT** to reach 10M
+  (committed fragment was an UNBUILT functional draft; L2-54 preservation/
+  attribution correction issued; USER trade-off decision PENDING). Variant
+  = minimal-boot, NOT general-purpose. release-readiness.md UPDATED to
+  reflect trade-off + RSS range + release caveat. Integrated ISO blocker
+  unchanged (orphaned executor, user). rcl2 re-copy queued in sequence.
+- 2026-11-21 L2-54: **v3-direct 10M PASS** (MemTotal 5440/used 3828/
+  reserved 4800, spawn ok); ISO 10M 5440/3836/4800 — direct≈ISO within
+  noise at this initrd size, NO ~1M fw_cfg inflation observed (ISO remains
+  authoritative per methodology; the general direct-boot inflation caveat
+  still stands for larger initrds). **Attribution PROVEN from build-time
+  .config** (build-lowram/v3/kernel-lowram.config): SMP/INET/VT/EXT4_FS
+  not set, VIRTIO_NET/NETDEVICES absent; EFI_STUB/ACPI/PACKET/UNIX/
+  VIRTIO_BLK/SERIAL_8250_CONSOLE/ISO9660 kept. WP2 processed preservation
+  correction (v3/kernel.lowram.v3 == working fragment; draft relabeled
+  functional-draft-NOT-BUILT). release-readiness.md trade-off cite
+  strengthened to proven .config. 9M still PREDICTION (pending FINAL
+  suite after WP2 report + rcl2 re-copy). WP2 report shortly → re-verify
+  → rcl2 re-copy → 9M probe → mempressure → FINAL sha pin + maiake-f6
+  ledger ping. Integrated executor decision still user's.
+- 2026-11-21 L2-54 sync: **variant compile-layer repro VERIFIED PASS**
+  (double-build complete, NOT running): repro bzImage == v3 byte-identical,
+  sha 4d38a2a7…48530 (1,647,616 B), isolated build-lowram/repro from
+  working fragment. release-readiness.md updated: variant compile-repro
+  VERIFIED (default-kernel + l2pm compile-repro still PENDING/orphaned);
+  variant bzImage 1,647,616 B vs default 2,958,336 B. Trade-offs stated as
+  VERIFIED FACT (no ext4→no disk-install, no INET/NIC→no net, 1 CPU,
+  serial-only). **USER posture decision framed 3 ways**: extreme 10M shell
+  (v3) vs functional 12M (v2) vs both. W6-green ping already acted (dual
+  make check EXIT=0). 9M probe pending WP2 report (shortly) + rcl2 re-copy.
+  W5 draft my lane, no overlap; README hold sensible. Orphan mutual.
+- 2026-11-21 L2-54 ENDORSED trade-off caveat framing (matches their user
+  surface). **rcl2 re-stamp PASSED**: committed-source rebuild == post-W7
+  sha 07fb2c69 exactly, selftest 44 KiB → rcl2 compile-repro VERIFIED
+  (release doc updated). **Variant FINAL refresh DONE**: L2_LOWRAM_RCL2
+  override in make_initramfs_variant (default path byte-identity sha-
+  verified), refreshed initramfs+ISO with post-W7 rcl2, kernel untouched,
+  10M/16M sanity boots. Next: independent FINAL suite (9M probe, subset,
+  unedited mempressure gate, poweroff) → sha pin → maiake-f6 ledger ping.
+  USER decisions (trade-off posture + orphaned executor) pending with
+  user; L2-54 relays answer → release doc + integrated-build plan update
+  together. No pushes.
+- 2026-11-21 L2-54 WP2 FINAL REPORT — corrections APPLIED to release doc:
+  (a) functional 12M alternative = **v1 NOT v2** (v1 INET+EXT4+SMP+VT,
+  12M used 5032K idle ~5.0M; v2 dropped INET kept EXT4; v3 dropped
+  EXT4+SMP+VT). (b) **VARIANT v3 SECURITY: no KASLR/IBT/PTI/retpoline,
+  CPU_MITIGATIONS=n, BUG=n → VM-ONLY throwaway guest, NEVER bare metal/
+  untrusted hosts** (doc caveat added). (c) v3 vmlinux 4,494,448 B
+  (4.29 MiB); levers +BUG/BLK_DEV_SD/ACPI_BUTTON/INPUT=n, SWIOTLB=1M;
+  MICROCODE/PERF_EVENTS forced (def_bool/select). (d) Preservation:
+  committed HEAD fragment = unbuilt v4 draft (restores INET/EXT4, never
+  built); authoritative v3 = build-lowram/v3/kernel-lowram.config (working
+  tree, repro-verified); committing true v3 = pending fix (variant/user).
+  (e) initramfs +293 B fully attributed (rcl2.conf 538→487 −51B tty1;
+  uncompressed newc identical 782,336 B; compressed delta = cpio
+  --reproducible --renumber-inodes + gzip repack artifact, no content).
+  (f) REFRESH disk-verified + sanity PASS: initramfs 420,933 B (−635),
+  kernel sha unchanged 4d38a2a7, 10M 5440/3816/4800 (used −20K), 16M ok.
+  (g) W6 minor handoff: l2net /proc/sys/vm/stat_refresh write guard benign
+  "Directory nonexistent", net exits 0 — note for N5 joint l2net work.
+  FINAL suite RUNNING (9M probe + subset + mempressure + sha pin) →
+  actuals replace 9M PREDICTION. Scope violation transparently reported
+  (210-line proposal patch preserved, 3 files reverted). User decisions
+  pending both sides.
+- 2026-11-21 **★ 9M ACTUALS — <10M STRETCH GOAL EXCEEDED (MEASURED)**:
+  L2-54 independent parent measurement, refreshed post-W7 ISO: **9M BIOS
+  PASS** MemTotal 4416K (model predicted ~4416K — EXACT), used 3812K,
+  reserved 4800K, available 604K (pred ~580K), spawn ok, 53.2s. Variant
+  boots STRICTLY UNDER 10 MiB — goal exceeded, not just boundary.
+  release-readiness.md PREDICTION → MEASURED (headline/table/9M section/
+  recommendation updated). Suite continuing: 10M PASS 5440/3812/4800,
+  12M PASS 7488/3808/4800; 16/32/256 + mempressure + sha pin remaining;
+  8M probe queued (pred FAIL ~3392K) → bracket 8M FAIL/9M PASS. WP2
+  refresh: default-path byte-identity PROVEN (env unset → 421,568 B
+  467e00d3 == pre-refresh); refreshed initramfs 420,933 B a6974f5a;
+  **FINAL refreshed ISO sha 01c784a1ce6fca03d36d4090b6f4b20098680972833350c7c70958f351fd0c3d
+  (5,961,728 B = 5.69 MiB)**; kernel unchanged 4d38a2a7; rcl2 resident
+  36 KiB confirmed. Full FINAL record + SHA256SUMS + maiake-f6 ping on
+  suite completion. User posture decision pending — evidence now includes
+  verified 9M boot for extreme-variant option.
+- 2026-11-21 L2-54: **preservation fix COMMITTED 9da900ab2** "fix(lowram):
+  preserve true built v3 fragment; add rcl2 override to variant builder"
+  (config/kernel.lowram + tools/l2-lowram, 32+/16−; commit == built artifact
+  restored; draft preserved build-lowram/v3/kernel.lowram.functional-draft-
+  NOT-BUILT; posture still user decision — evidence preservation not
+  shipping). release doc preservation discrepancy → RESOLVED. Suite 15:02:
+  9/10/12/16M all PASS (16M 11520/3812/4864); 32/256 + mempressure + sha
+  pin remaining (~5 min); 8M floor-bracket probe queued after. Full FINAL
+  record + SHA256SUMS + maiake-f6 ping on completion. User decisions pending.
+- 2026-11-21 **★★★ L2-54 FINAL VERIFICATION COMPLETE — variant VERIFIED,
+  mission evidence chain complete**: (1) independent suite BIOS 6/6 PASS
+  MATRIX_EXIT=0 (9M 4416/3812/4800 … 256M 253448/3820/8696; idle flat
+  3.72-3.74 MiB). (2) MEMPRESSURE_EXIT=0 unedited gate 16M: PID1 VmRSS
+  36 kB, no OOM, ENOSPC at /tmp cap (W7 caps OOM-kill→clean capacity
+  limit), reclaim +40K, survived — WEDGED→PASS measured on VARIANT
+  (validates W7). (3) 8M MEASURED FAIL silent 4.1s → floor bracketed
+  8M FAIL/9M PASS (mechanism uninvestigated, optional TCG). (4) SHA PIN
+  VERIFIED == WP2: ISO 01c784a1…(5,961,728 B), kernel 4d38a2a7…
+  (1,647,616 B), initramfs a6974f5a…(420,933 B). Evidence build/campaigns/
+  lowram-final-verify/ + -8m/. (5) FINAL ledger entry + maiake-f6 second-
+  matrix ping (ledger durable, absent roster). (6) preservation 9da900ab2.
+  release-readiness.md variant → VERIFIED (8M measured FAIL, full suite,
+  sha pins; recommendation: only USER posture acceptance pending).
+  Remaining governance: USER posture (extreme 9-10M vs functional 12M v1
+  vs both, VM-only caveat) + orphaned executor. Variant config frozen.

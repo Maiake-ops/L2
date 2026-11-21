@@ -1167,15 +1167,13 @@ static void supervise(void)
         /* Without a self-pipe, a signal just before ppoll can lose its wakeup. */
         if (g_sig_rd < 0 && (wait == 0 || wait > 1000)) wait = 1000;
         struct kts tv;
-        if (wait == 0) {
-            if (r_sys5(SYS_ppoll, (long)&pf, 1L, 0L, 0L, 0L) < 0) sleep_ms(50);
-        } else {
-            if (wait < 50) wait = 50;    /* ppm-level bound against busy rearm */
+        if (wait) {
+            if (wait < 50) wait = 50;
             tv.tv_sec = wait / 1000;
             tv.tv_nsec = (long)(wait % 1000) * 1000000L;
-            long r = r_sys5(SYS_ppoll, (long)&pf, 1L, (long)&tv, 0L, 0L);
-            if (r < 0 && r != -EINTR) sleep_ms(50);
         }
+        long r = r_sys5(SYS_ppoll, (long)&pf, 1L, wait ? (long)&tv : 0L, 0L, 0L);
+        if (r < 0 && r != -EINTR) sleep_ms(50);
         if (pf.revents & POLLIN) pipe_drain();
     }
 }

@@ -2253,7 +2253,18 @@ static int install_tar(const char *file, const char *profile, struct txn *t)
             fprintf(stderr, "l2pm: store path exists but is not a directory: %s\n", store);
             rm_rf(tmp); free(tmp); free(store); return 1;
         }
+        /* A matching directory name alone cannot vouch for cached bytes. */
+        struct pathlist archive = {0}, cached = {0};
+        int match = manifest_collect(tmp, &archive) == 0 &&
+                    manifest_collect(store, &cached) == 0 && archive.n == cached.n;
+        for (size_t i = 0; match && i < archive.n; i++)
+            match = strcmp(archive.v[i], cached.v[i]) == 0;
+        pl_free(&archive); pl_free(&cached);
         rm_rf(tmp);
+        if (!match) {
+            fprintf(stderr, "l2pm: cached store differs from archive: %s\n", store);
+            free(tmp); free(store); return 1;
+        }
     } else {
         /* Extract to a sibling temp and rename, so a failed extraction
          * never leaves a half package in the store.  Both paths live under
@@ -2927,22 +2938,23 @@ static int cmd_verify(int argc, char **argv)
                     if (ok && sync_db_to_gen(pkgs, pn) == 0) {
                         char cur[MAXPATH];
                         long cg = -1;
-                        if (read_active_gen(pdir, prof, cur, sizeof(cur), &cg) != 0 ||
-                            strcmp(cur, rel) != 0)
-                            switch_profile_symlink(pdir, prof, rel);
-                        unlink(ip);
-                        printf("repaired: completed interrupted rollback of %s to generation %ld\n",
-                               prof, gen);
-                        done = 1;
+                        int active = read_active_gen(pdir, prof, cur, sizeof(cur), &cg) == 0 &&
+                                     !strcmp(cur, rel);
+                        if ((active || switch_profile_symlink(pdir, prof, rel) == 0) &&
+                            unlink(ip) == 0) {
+                            printf("repaired: completed interrupted rollback of %s to generation %ld\n",
+                                   prof, gen);
+                            done = 1;
+                        }
                     }
                     free_gen_pkgs(pkgs, pn);
                 }
                 free(gdir); free(rel);
             }
             if (!done) {
-                fprintf(stderr, "l2pm: cannot complete interrupted rollback from intent marker; "
-                                "reconciling profile to database\n");
-                unlink(ip);
+                fprintf(stderr, "l2pm: rollback recovery incomplete; retaining intent for retry\n");
+                free(ip); pl_free(&profiles); free(pdir);
+                return 1;
             }
         }
         free(ip);
