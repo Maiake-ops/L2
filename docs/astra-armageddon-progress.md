@@ -197,3 +197,7 @@ The fake syscall suite failed on an unexpected nanosleep after EINTR (make exit 
 ### A14 · Retain interrupted rollback intent until profile activation succeeds
 
 New deterministic strace tests SIGKILL real install, remove, rollback and GC commands inside private roots. Recovery used to report success while leaving generation 3 active when the requested switch to 1 failed (test exit 1). Failed activation now returns failure, retains the marker and avoids subsequent reconciliation against the wrong profile. After retry, generation 1 and the original executable survived. All 34 transaction tests passed (0). Process death was tested, not storage power loss.
+
+### A15 · Verify cached store contents before package reinstallation
+
+Reinstalling an unchanged archive used to bless prior file corruption by regenerating the manifest from the damaged cache. Test failed before (1). Reuse now compares the cached tree with the freshly extracted archive using existing manifest semantics. A changed file prevents activation and preserves the old manifest. Healthy reinstall and all 35 transaction tests passed (0). No on-disk format change.

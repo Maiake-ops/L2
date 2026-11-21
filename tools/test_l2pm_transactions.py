@@ -511,6 +511,20 @@ class GcSafety(L2pmTxnBase):
 
 
 class Integrity(L2pmTxnBase):
+    def test_reinstall_checks_cached_store_against_archive(self):
+        self.write_recipe("app")
+        self.l2pm("add", "app")
+        pkg = str(self.root / "l2/cache/app-1.0.l2p")
+        self.l2pm("install", pkg)
+        program = self.profiles_dir() / "default/usr/bin/app"
+        program.write_text("damaged file")
+        manifest = self.root / "l2/var/db/installed/app.manifest"
+        original = manifest.read_bytes()
+        self.l2pm("install", pkg, ok=False)
+        self.assertEqual(manifest.read_bytes(), original)
+        self.l2pm("verify", ok=False)
+
+
     """P3: missing manifest never silently passes; verify --repair rebuilds
     DB entries from the active generation and manifests from the store."""
 
