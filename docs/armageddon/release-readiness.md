@@ -20,7 +20,7 @@ L2 now ships two kernel configurations with distinct trade-offs:
 | Idle RAM (MEASURED) | ~5.5 MiB (16M used 5564K, 24M 5632K) | **~3.8 MiB FLAT** across 12–256M (used 3812–3836K) |
 | BIOS boot floor (MEASURED) | **14M** (13M OOM-deadlock) | **10M** (v3 PASS; v1/v2 10M FAIL) |
 | UEFI boot floor (MEASURED) | (96M,128M] — Limine `init_memmap` panic below | 128M PASS, 256M PASS; 16M FAIL-silent (firmware-bound) |
-| Kernel image | 7490 KiB decompressed (4891 code/351 rwdata/1392 rodata/692 init/164 bss); bzImage 2,958,336 B | bzImage **1,647,616 B** (1.57 MiB), compile-repro VERIFIED; strips EXT4/INET/NIC/SMP/VT |
+| Kernel image | 7490 KiB decompressed (4891 code/351 rwdata/1392 rodata/692 init/164 bss); bzImage 2,958,336 B | vmlinux **4,494,448 B (4.29 MiB)**, bzImage 1,647,616 B (compile-repro VERIFIED); strips EXT4/INET/NIC/SMP/VT + BUG/BLK_DEV_SD/ACPI_BUTTON/INPUT=n, SWIOTLB=1M |
 | Module-injection surface | present → W6 marker gate + P2 pin (pending) | **removed** (MODULES=n, no pack) |
 | Core ISO size (MEASURED baseline) | 8,787,968 B (8.38 MiB < 10 MiB gate) | variant ISO pending FINAL pin |
 
@@ -46,8 +46,19 @@ for both.
 > no ext4 → no disk-install from the variant; no INET/NIC → no networking;
 > 1 CPU (SMP off); serial-only (VT off). **USER posture decision (3
 > options):** (a) extreme 10M shell (v3, stripped), (b) functional 12M
-> (v2, retains more features at a higher floor), or (c) ship both. Do not
+> (v1, retains INET+EXT4+SMP+VT, idle ~5.0M), or (c) ship both. Do not
 > present the variant as a drop-in replacement.
+
+**Version attribution (WP2 FINAL, corrected):** v1 = INET+EXT4+SMP+VT
+retained (12M PASS, used 5032K, idle ~5.0M); v2 = dropped INET, kept
+EXT4; v3 = dropped EXT4+SMP+VT on top (10M PASS). The "functional 12M"
+alternative is **v1, NOT v2** (earlier v1/v2 conflation corrected).
+**Preservation discrepancy:** committed HEAD `config/kernel.lowram` =
+an *unbuilt v4 draft* (restores INET/EXT4; never built — v4 build
+interrupted at extraction, bulk commit captured the draft); the
+authoritative built v3 = `build-lowram/v3/kernel-lowram.config` (working
+tree, repro-verified). Committing the true v3 config is a pending
+preservation fix (variant lane / user).
 
 ### <10M stretch — PREDICTED (not yet measured)
 L2-54 capacity model + v2/v3 evidence: at **9M**, present ≈8700K, reserved
@@ -154,6 +165,12 @@ to change — each trades against the 10 MiB ISO / 15 MiB idle budgets):
 - **Variant MODULES=n** removes the ring-0 module-injection surface
   entirely (no module loading, no hw pack). Default MODULES=y relies on
   the W6 marker gate (landed) + P2 pin contract (pending) for pack trust.
+- **⚠ VARIANT v3 SECURITY POSTURE — VM-ONLY THROWAWAY GUEST:** the ON-list
+  above is the DEFAULT kernel. Variant v3 additionally has **no KASLR, no
+  IBT, no PTI, no retpoline, CPU_MITIGATIONS=n, BUG=n** → a VM-only
+  throwaway guest configuration. **NEVER run the variant on bare metal or
+  untrusted hosts.** (MICROCODE=y + PERF_EVENTS=y remain forced by
+  def_bool/select — not disableable without CPU_SUP_*=n / arch change.)
 - rcl2: root PID1, no capability separation (single-user tool distro;
   physical access ≈ root by design); console getty spawns root shell
   (no auth). busybox login/su vs missing `/etc/shadow` UNTESTED (mission

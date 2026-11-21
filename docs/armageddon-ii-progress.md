@@ -911,3 +911,25 @@ the flag on GNU, omits on busybox (live flow byte-identical).
   USER decisions (trade-off posture + orphaned executor) pending with
   user; L2-54 relays answer → release doc + integrated-build plan update
   together. No pushes.
+- 2026-11-21 L2-54 WP2 FINAL REPORT — corrections APPLIED to release doc:
+  (a) functional 12M alternative = **v1 NOT v2** (v1 INET+EXT4+SMP+VT,
+  12M used 5032K idle ~5.0M; v2 dropped INET kept EXT4; v3 dropped
+  EXT4+SMP+VT). (b) **VARIANT v3 SECURITY: no KASLR/IBT/PTI/retpoline,
+  CPU_MITIGATIONS=n, BUG=n → VM-ONLY throwaway guest, NEVER bare metal/
+  untrusted hosts** (doc caveat added). (c) v3 vmlinux 4,494,448 B
+  (4.29 MiB); levers +BUG/BLK_DEV_SD/ACPI_BUTTON/INPUT=n, SWIOTLB=1M;
+  MICROCODE/PERF_EVENTS forced (def_bool/select). (d) Preservation:
+  committed HEAD fragment = unbuilt v4 draft (restores INET/EXT4, never
+  built); authoritative v3 = build-lowram/v3/kernel-lowram.config (working
+  tree, repro-verified); committing true v3 = pending fix (variant/user).
+  (e) initramfs +293 B fully attributed (rcl2.conf 538→487 −51B tty1;
+  uncompressed newc identical 782,336 B; compressed delta = cpio
+  --reproducible --renumber-inodes + gzip repack artifact, no content).
+  (f) REFRESH disk-verified + sanity PASS: initramfs 420,933 B (−635),
+  kernel sha unchanged 4d38a2a7, 10M 5440/3816/4800 (used −20K), 16M ok.
+  (g) W6 minor handoff: l2net /proc/sys/vm/stat_refresh write guard benign
+  "Directory nonexistent", net exits 0 — note for N5 joint l2net work.
+  FINAL suite RUNNING (9M probe + subset + mempressure + sha pin) →
+  actuals replace 9M PREDICTION. Scope violation transparently reported
+  (210-line proposal patch preserved, 3 files reverted). User decisions
+  pending both sides.
