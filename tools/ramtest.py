@@ -227,6 +227,14 @@ def boot_medium(args):
             if s.startswith("7.") or "installed" in s or s.startswith("/dev/"):
                 print("   ", s)
         g.send("poweroff")
+        try:
+            status = g.p.wait(timeout=args.timeout)
+        except subprocess.TimeoutExpired:
+            print("    FAIL: guest did not power off")
+            return 1
+        if status:
+            print(f"    FAIL: QEMU exited with status {status}")
+            return 1
         return 0
     finally:
         g.close()

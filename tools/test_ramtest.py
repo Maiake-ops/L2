@@ -52,3 +52,10 @@ class Ramtest(unittest.TestCase):
                 return True
             self.guest.read_until.side_effect = reply
             self.assertEqual(ramtest.boot_medium(self.args), expected)
+
+    def test_shutdown_failure_is_observable(self):
+        self.guest.p.wait.side_effect = ramtest.subprocess.TimeoutExpired("qemu", 10)
+        self.assertEqual(ramtest.boot_medium(self.args), 1)
+        self.guest.p.wait.side_effect = None
+        self.guest.p.wait.return_value = 1
+        self.assertEqual(ramtest.boot_medium(self.args), 1)
