@@ -213,13 +213,16 @@ def boot_medium(args):
         probe = "uname -r"
         if args.disk:
             probe += "; cat /etc/l2/installed 2>/dev/null; grep ' / ' /proc/mounts"
+        g.buf = b""
         g.send(probe + "; echo L2RAM''DONE")
-        if g.read_until(MARK.encode() + b"\r", 20):
-            out = g.buf.decode(errors="replace").split("uname -r")[-1]
-            for line in out.splitlines():
-                s = line.strip()
-                if s.startswith("7.") or "installed" in s or s.startswith("/dev/"):
-                    print("   ", s)
+        if not g.read_until(MARK.encode() + b"\r", 20):
+            print("    FAIL: shell probe timed out")
+            return 1
+        out = g.buf.decode(errors="replace").split("uname -r")[-1]
+        for line in out.splitlines():
+            s = line.strip()
+            if s.startswith("7.") or "installed" in s or s.startswith("/dev/"):
+                print("   ", s)
         g.send("poweroff")
         return 0
     finally:

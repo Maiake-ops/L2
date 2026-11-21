@@ -38,3 +38,8 @@ class Ramtest(unittest.TestCase):
             self.guest.meminfo.return_value = info
             with self.subTest(info=info):
                 self.assertEqual(ramtest.boot_medium(self.args), 1)
+
+    def test_old_memory_marker_cannot_complete_probe(self):
+        self.guest.buf = b"L2RAMDONE\r"
+        self.guest.read_until.side_effect = lambda token, _: token == ramtest.PROMPT or token in self.guest.buf
+        self.assertEqual(ramtest.boot_medium(self.args), 1)
