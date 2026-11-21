@@ -99,7 +99,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("iso", type=Path)
     parser.add_argument("--uefi", action="store_true")
-    parser.add_argument("--autostart", action="store_true", help="expect X to start on tty1 login")
+    parser.add_argument("--autostart", action="store_true", default=True, help="expect X to start on root tty1 login (default)")
+    parser.add_argument("--no-autostart", dest="autostart", action="store_false", help="run startx manually after root tty1 login")
     parser.add_argument("--ovmf", help="override firmware detection")
     args = parser.parse_args()
     firmware = find_ovmf(args.ovmf) if args.uefi else None

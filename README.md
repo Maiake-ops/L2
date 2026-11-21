@@ -73,11 +73,11 @@ download cache under `build/cache/buildroot/`. On NixOS the builder runs
 make inside a Nix FHS environment. On other Linux hosts it uses GNU make
 and the standard Buildroot host tools.
 
-At the tty1 login prompt enter `root` (empty password on live media), then
-run `startx`. The serial console retains the standard L2 root shell.
-Xorg uses the firmware framebuffer and detects connected evdev keyboards
-and pointers at session startup. The default xinit session opens xterm
-under l2wm. An executable `~/.xinitrc` overrides that session.
+At the tty1 login prompt enter `root` (empty password on live media) and X11
+(`l2wm` + `xterm`) starts automatically. The serial console retains the
+standard L2 root shell. Xorg uses the firmware framebuffer and detects
+connected evdev keyboards and pointers at session startup. An executable
+`~/.xinitrc` overrides the default xinit session.
 
 | Shortcut | Action |
 |---|---|
@@ -94,8 +94,9 @@ under l2wm. An executable `~/.xinitrc` overrides that session.
 | Super+r (or `SIGHUP`) | Reload `/etc/l2/l2wm.conf` (and `~/.config/l2wm/l2wm.conf`) and retile |
 | Super+Escape | End the X session and return to the console |
 
-Set `L2_DESKTOP_AUTOSTART=1` when packaging to start X after tty1 login,
-or create `/etc/l2/desktop-autostart` on an installed desktop. Run
+Autostart on root tty1 login is enabled by default (`L2_DESKTOP_AUTOSTART=1`).
+Set `L2_DESKTOP_AUTOSTART=0` when packaging to stay at the console until you run
+`startx`, or remove `/etc/l2/desktop-autostart` on an installed desktop. Run
 `poweroff` for a clean rcl2 shutdown. To exercise the graphical session
 headlessly, run `python3 tools/test-desktop.py build/out/l2-desktop.iso`
 and repeat with `--uefi` for OVMF.

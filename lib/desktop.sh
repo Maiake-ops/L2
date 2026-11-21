@@ -43,10 +43,10 @@ build_desktop_config() {
     sed -i 's/^root:x:/root::/' "$ROOTFS/etc/passwd"
     sed -i 's|^service tty1 .*|service tty1 respawn /bin/getty 0 tty1 linux|' "$ROOTFS/etc/rcl2.conf"
     cat >> "$ROOTFS/etc/profile" <<'PROFILE'
-if [ -f /etc/l2/desktop-autostart ] && [ "$(tty)" = /dev/tty1 ]; then startx; fi
+if [ -f /etc/l2/desktop-autostart ] && [ -z "${DISPLAY:-}" ] && [ "$(id -u)" = 0 ] && [ "$(tty)" = /dev/tty1 ]; then startx; fi
 PROFILE
-    if [ "${L2_DESKTOP_AUTOSTART:-0}" = 1 ]; then touch "$ROOTFS/etc/l2/desktop-autostart"; fi
-    printf 'Desktop: log in as root on tty1 and run startx. Super+Return opens xterm.\n' >> "$ROOTFS/etc/motd"
+    if [ "${L2_DESKTOP_AUTOSTART:-1}" = 1 ]; then touch "$ROOTFS/etc/l2/desktop-autostart"; fi
+    printf 'Desktop: log in as root on tty1 to start X11 (l2wm). Super+Return opens xterm.\n' >> "$ROOTFS/etc/motd"
 }
 
 desktop_rootfs() {

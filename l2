@@ -1861,7 +1861,7 @@ environment:
   JOBS=8  L2_LOAD=6           parallelism per program (-j8 -l6)
   KERNEL_VERSION / MUSL_VERSION   override the lock
   L2_ISO_LIMIT_MB=10          core ISO size gate        L2_WIFI_ISO_LIMIT_MB=96
-  L2_DESKTOP_ISO_LIMIT_MB=128 desktop ISO size gate     L2_DESKTOP_AUTOSTART=1  start X on tty1 login
+  L2_DESKTOP_ISO_LIMIT_MB=128 desktop ISO size gate     L2_DESKTOP_AUTOSTART=1  start X on root tty1 login (0 to disable)
   L2_WIFI_FAMILIES="mt7921 iwlwifi ..."   firmware families (config/wifi-firmware.list)
   L2_FIRMWARE_SRC=/lib/firmware           reuse an existing firmware tree
   L2_SSL=core|wifi|off        where the openssl pack goes (never in RAM)   L2_SSL_EMBED=1  put it in the initramfs
