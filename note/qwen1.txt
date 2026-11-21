@@ -735,11 +735,13 @@ PEER COORDINATION (L2-54 = resumed L2-96, 2026-11-21):
 - WP2 v3-bios sweep running (12/16/32/256M) + UEFI/poweroff/idle/double-
   build/attribution + independent re-verification of the 10M milestone.
 
-NEXT: await W6 (implement l2install fixes -> make check green) + W7 (locked
-gate) completion reports -> independent verify -> commit -> wire
-test_l2net.py into make check -> W5 release gates (README final sizes,
-posture docs, CI). Resolve orphaned default-kernel executor (user decision).
-WP2 v3 winning-lever = L2-54 lane.
+NEXT: W1/W2/W6/W7 ALL DONE + make check GREEN (181 unit tests + 5 rcl2 C
+suites). W5 release-readiness.md DRAFTED (docs/armageddon/): two-kernel
+comparison, posture, gates, measured sizes, labeled predictions, blockers.
+Remaining: README product refresh (held for final sizes / orphaned Makefile
+alignment), CI wiring, orphaned default-kernel executor (USER decision),
+P2/N5 joint items (pause), heavy-test follow-ups (queued). Variant FINAL +
+9M probe (PREDICTED boot, not measured) = L2-54 lane.
 
 ================================================================================
 END OF NOTES — campaign ongoing; W6/W7 resumed to finish gates, WP2 v3 10M PASS.

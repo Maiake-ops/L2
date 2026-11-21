@@ -172,7 +172,10 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
 - [~] W4 adversarial review (kernel-maintainer hat): cd0f88a ELF audit clean;
       kernel RAM patchset review findings below (read-only, L2-96's lane);
       l2install security audit done (findings below) → fixes queued as W6
-- [ ] W5 release/CI integration of new gates (281–300) once W1/W2 land.
+- [~] W5 release/CI integration of new gates (281–300) — IN PROGRESS:
+      docs/armageddon/release-readiness.md DRAFTED (two-kernel comparison,
+      posture, gates, measured sizes, labeled predictions, blockers).
+      README product refresh + CI wiring held until final sizes/orphan lane.
       Includes README size-table refresh: "~67 KiB l2pm" claim STALE vs
       88,184 B actual (peer-verified); use final measured sizes post-W2.
       Reproducibility evidence to cite: maiake-f6 worktree 07-reproducible.md
@@ -845,3 +848,17 @@ the flag on GNU, omits on busybox (live flow byte-identical).
   NOT in main tree (L2-54 depth-3 search correctly missed it); L2-54 uses
   built-in make_initramfs_variant. Default integrated ISO still gated on
   orphaned-builder USER decision. W5 + orphan decision awaited from user.
+- 2026-11-21 L2-54: revert COMPLETE verified twice (patch 9,602 B @12:48;
+  l2/README/.gitignore clean @13:15) — L2-ea RELEASED from holding them
+  (user/lead domain). W6-green ping acked (already sent; crossed).
+  **9M probe = MODEL PREDICTION, not result**: 9M present ~8700K, reserved
+  ~4800K → MemTotal ~4416K, used ~3836K → avail ~580K; +372K over v2's
+  fatal 4044K managed → predicted boot; 8M predicted FAIL (~3392K).
+  <10M stretch likely 9M not 8M — probe settles it (DO NOT claim 9M boots
+  until measured). WP2: v3-direct done, repro double-build RUNNING
+  (isolated build-lowram/repro, L2_BUILD_DIR), then attribution+report →
+  re-verify → rcl2 re-copy → FINAL sha pin. **W5 PROCEEDING** (independent
+  docs, directive autonomous continuation): drafting docs/armageddon/
+  release-readiness.md (measured data + labeled predictions). README
+  product refresh held until final sizes (Makefile alignment orphaned).
+  Orphan-lane decision still user's.
