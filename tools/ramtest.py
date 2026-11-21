@@ -39,6 +39,14 @@ def parse_meminfo(text):
     return d
 
 
+def used_memory(info):
+    available = info.get("MemAvailable")
+    if available is None:
+        available = (info["MemFree"] + info.get("Cached", 0) + info.get("Buffers", 0)
+                     + info.get("SReclaimable", 0) - info.get("Shmem", 0))
+    return info["MemTotal"] - min(info["MemTotal"], max(0, available))
+
+
 class Guest:
     def __init__(self, argv):
         self.p = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -76,10 +84,9 @@ class Guest:
             if not self.read_until(MARK.encode() + b"\r", 20):
                 break
             info = parse_meminfo(self.buf.decode(errors="replace").split("cat /proc/meminfo")[-1])
-            if "MemTotal" not in info:
+            if "MemTotal" not in info or not ("MemAvailable" in info or "MemFree" in info):
                 break
-            avail = info.get("MemAvailable", info["MemFree"] + info.get("Cached", 0))
-            used = info["MemTotal"] - avail
+            used = used_memory(info)
             if best_used is None or used < best_used:
                 best_used, best_info = used, info
             time.sleep(2)
@@ -118,8 +125,7 @@ def measure(args, size_s):
         info = g.meminfo()
         if not info:
             return {"size": size_s, "error": "could not parse meminfo"}
-        avail = info.get("MemAvailable", info["MemFree"] + info.get("Cached", 0))
-        used = info["MemTotal"] - avail
+        used = used_memory(info)
         return {"size": size_s, "installed": kib, "total": info["MemTotal"], "used": used,
                 "reserved": kib - info["MemTotal"], "slab": info.get("Slab", 0),
                 "pt": info.get("PageTables", 0), "stack": info.get("KernelStack", 0),
@@ -196,8 +202,7 @@ def boot_medium(args):
         info = g.meminfo()
         print(f"  PASS {mode}: booted to the L2# shell  ({medium})")
         if info:
-            avail = info.get("MemAvailable", info["MemFree"] + info.get("Cached", 0))
-            used = info["MemTotal"] - avail
+            used = used_memory(info)
             ok = used <= args.budget
             print(f"    idle RAM: {used} KiB used of {info['MemTotal']} KiB "
                   f"(budget {args.budget} KiB)  {'OK' if ok else 'OVER BUDGET'}")

@@ -27,3 +27,8 @@ class Ramtest(unittest.TestCase):
                 with self.assertRaises(SystemExit):
                     ramtest.ram_sweep(self.args)
                 measure.assert_not_called()
+
+    def test_memory_accounting(self):
+        self.assertEqual(ramtest.used_memory({"MemTotal": 100, "MemFree": 10, "Cached": 60,
+                                             "Shmem": 50, "Buffers": 2, "SReclaimable": 3}), 75)
+        self.assertEqual(ramtest.used_memory({"MemTotal": 100, "MemAvailable": 70}), 30)
