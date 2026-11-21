@@ -74,6 +74,15 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
   variant; winning-lever report is L2-96/L2-54's lane. Default-kernel floor
   remains 14M (mission-05 trim may move it). Two kernels, two floors —
   W5 docs distinguish.
+  **VARIANT v3-bios SWEEP 4/4 PASS (L2-54, 2026-11-21)**: 12M MemTotal
+  7488/used 3812/reserved 4800; 16M 11520/3812/4864; 32M 27648/3816/5120;
+  256M 253448/3832/8696 — all spawn ok, **idle ~3.8 MiB FLAT across sizes**
+  (well under the 10-15 MiB band; vs default kernel ~5.5 MiB). v3-uefi
+  sweep running (16/128/256M) + **9M probe** (<10M stretch). Variant FINAL
+  (standalone l2-lowram.iso re-verification incl. 9M, attribution, repro,
+  report) proceeds INDEPENDENTLY of the orphaned default-kernel lane;
+  only the INTEGRATED ISO is blocked. W5 docs: variant idle ~3.8M flat is
+  a headline efficiency result.
 
 ## Three most important unresolved bottlenecks (evidence above)
 
@@ -785,3 +794,12 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   corrected. Notified L2-54: gate PASS → WEDGED expectation retires; rcl2
   post-W7 build ready for FINAL variant re-copy; default ISO build orphaned.
   W6 still running (l2install/l2net/test_l2net modified).
+- 2026-11-21 L2-54 ack: correction mutual (both ledgers EXIT=2); FINAL
+  needs W6 green + W7 gate (W7 gate now PASS, W6 pending); peer won't run
+  make check concurrently with my agents (verifies at FINAL when quiet).
+  Revert pending (WP2 mid-v3-uefi); peer will confirm proposals/ patch +
+  l2/README/.gitignore clean. Orphan flag surfaced to BOTH users (same
+  user); L2-54 stays VARIANT-ONLY (only user reassigns). **v3-bios 4/4
+  PASS, idle ~3.8M flat** (12/16/32/256M); 9M probe in uefi sweep. Variant
+  FINAL independent; integrated ISO blocked. My P2/N5 pause posture
+  confirmed correct. W6 still running.

@@ -652,6 +652,12 @@ PRIMARY TARGET ACHIEVED (variant):
 - Evidence: build-lowram/campaigns/v{1,2,3}-10M/ (committed a8a2849b5).
 - Winning lever = L2-96/L2-54 variant lane report. Default kernel floor
   still 14M (mission-05 trim may lower). <10M stretch still open.
+- v3-bios sweep 4/4 PASS (L2-54): 12/16/32/256M all spawn ok, idle ~3.8 MiB
+  FLAT across sizes (well under 10-15 MiB band; default kernel ~5.5 MiB) —
+  headline efficiency result for W5 two-kernel comparison. v3-uefi sweep +
+  9M probe (<10M stretch) running. Variant FINAL (standalone l2-lowram.iso)
+  proceeds INDEPENDENTLY of the orphaned default-kernel lane; only the
+  integrated ISO is blocked (needs W6 green + an executor).
 
 AGENTS (restored):
 - W2 heavy-coder: completed (integrated, rebased 264d82b86).
