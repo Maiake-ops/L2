@@ -45,6 +45,7 @@ check:
 	python3 -m unittest discover -s tools -p 'test_l2pm_recipe_validation.py'
 	python3 -m unittest discover -s tools -p 'test_l2pm_features.py'
 	python3 -m unittest discover -s tools -p 'test_l2pm_transactions.py'
+	root=$$(mktemp -d) && trap 'rm -rf "$$root"' EXIT && L2PM_ROOT="$$root" $(MAKE) -C l2pm check
 	python3 -m unittest discover -s tools -p 'test_l2gpt.py'
 	python3 -m unittest discover -s tools -p 'test_l2install.py'
 	python3 -m unittest discover -s tools -p 'test_l2net.py'
