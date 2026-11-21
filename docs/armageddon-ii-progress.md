@@ -202,7 +202,7 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       l2pm selftest RSS 168 KiB confirmed (W5: 168 KiB + ~98 KiB binary).
       Boot-40 citation provided (a2-rcl2-boot.log:297, pid1_boot path ≠
       selftest 48); L2-72 boot-40 stamp pending accept/re-measure.
-- [~] W7 rcl2 live-mode /tmp+/run OOM wedge + D5 OOB fix (maiake-f6 verified
+- [x] W7 rcl2 live-mode /tmp+/run OOM wedge + D5 OOB fix (maiake-f6 verified
       findings; missions 19/25/29/30 + 101–120) — **LAUNCHED 23:2x as W1-agent
       continuation** (warm runtime). Packet read in full + lead-verified:
       confirmed: main.c:330-338 mounts /run+/tmp tmpfs ONLY when
@@ -238,6 +238,25 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
       their test_mempressure.py UNEDITED on private ISO (pinned staging)
       + test-live-install 256M + idle delta ≤~64 KiB. §10 heavy-test
       follow-ups routed to verification tier; README → W5.
+      **DONE 2026-11-21 — LEAD VERIFIED + ACCEPTED** (independent): make -C
+      rcl2 test EXIT=0 (5 C suites, 0 warnings, resident 44 KiB, rescue
+      fixtures green); harness 14/14. Locked gate PASS (a2-w7-mempressure-
+      16M.log: used 5608→5536 reclaim, shell survives, no OOM; a2-w7-enospc-
+      16M.log: size=2048k, 32+0 records out = 2048 KiB exact, dd_rc=1).
+      live-install 256 PASS (RC=0 + installed boots L2#). idle +20/+44 KiB
+      (≤64). boot-resident 36 KiB; caps /tmp 16384 /run 8192 KiB at 256M.
+      Binary **15,568 B** (sha 07fb2c69…); ISO build/a2-w7/l2-fixed.iso
+      8,781,824 B sha 482e5933… (<10 MiB). All 4 carries kept (-Oz/unwind/
+      rss/probe-byte), none regressed; .eh_frame 112 B prebuilt
+      compiler_builtins residue (harmless). W7 source committed d1959a232
+      (rcl2 tree CLEAN). NOTE: full make check EXIT=2 (W6 l2install red,
+      pending) — W7 rcl2 portion green; W7 report's "make check EXIT=0"
+      inherited lead's earlier wrong claim, corrected. Gate agent-run
+      (worktree tool unedited) + lead log-verified; independent QEMU re-run
+      deferred (L2-54 sweep active, one-QEMU discipline). §10 heavy-test
+      follow-ups queued; test-live-install.py argparse sync optional.
+      rcl2 post-W7 build ready for FINAL variant re-copy (L2-54); default
+      integrated ISO build still ORPHANED (user decision).
 - [~] W6 shell safety hardening: l2install + l2net (62/64/66/67/221–240/261–280)
       — **LAUNCHED 22:4x** (heavy-coder, background; P1 scope, 8 findings,
       fail-before/pass-after required; P2 deferred per co-signed contract).
@@ -756,3 +775,13 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   executorless; fragment WIP committed clean; needs USER reassignment).
   WP2 v3-bios sweep running (12/16/32/256M) + independent re-verification.
   W6 implementing l2install fixes; W7 gate pending.
+- 2026-11-21 **W7 DONE — lead verified + ACCEPTED**: locked mempressure
+  gate PASS (ENOSPC exactly 2048 KiB, reclaim 5608→5536, shell survives,
+  no OOM), live-install 256 PASS, idle +20/+44 KiB, boot-resident 36 KiB,
+  binary 15,568 B (sha 07fb2c69), ISO 8,781,824 B (482e5933). make -C rcl2
+  test independently re-run EXIT=0 (44 KiB selftest, 5 suites). All carries
+  kept. rcl2 tree clean (committed d1959a232). Full make check still EXIT=2
+  (W6 l2install in progress). W7 report's EXIT=0 inherited my wrong claim —
+  corrected. Notified L2-54: gate PASS → WEDGED expectation retires; rcl2
+  post-W7 build ready for FINAL variant re-copy; default ISO build orphaned.
+  W6 still running (l2install/l2net/test_l2net modified).

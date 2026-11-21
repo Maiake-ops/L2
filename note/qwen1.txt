@@ -659,9 +659,15 @@ AGENTS (restored):
   D5 strlen-bounded console_has_ttys main.c:818-820, -Oz + force-unwind-
   tables=no Makefile:21/31, test-tmpcap dual-mode). All 5 rcl2 suites pass.
   build/a2-w7/initramfs-fixed.cpio.gz built; D5 prefix/postfix + tc objects
-  present; lifecycle 14/14 OK. MISSING: locked mempressure gate (ISO +
-  test_mempressure.py --ram 16M) + test-live-install 256 + idle delta.
-  Resumed to finish gate + report.
+  present; lifecycle 14/14 OK. **DONE 2026-11-21 — LEAD VERIFIED + ACCEPTED**:
+  locked gate PASS (ENOSPC exactly 2048 KiB, reclaim 5608->5536, shell
+  survives, no OOM); live-install 256 PASS (RC=0 + installed boots L2#);
+  idle +20/+44 KiB; boot-resident 36 KiB; binary 15,568 B (sha 07fb2c69);
+  ISO build/a2-w7/l2-fixed.iso 8,781,824 B (482e5933, <10 MiB). make -C rcl2
+  test independently re-run EXIT=0 (44 KiB selftest, 5 suites, 0 warnings).
+  All 4 carries kept (-Oz/unwind/rss/probe-byte), none regressed. rcl2 tree
+  clean (committed d1959a232). Full make check still EXIT=2 (W6 l2install
+  in progress); W7 rcl2 portion green. §10 heavy-test follow-ups queued.
 - W6 heavy-coder: PAUSED -> RESUMED. Tests committed (tools/test_l2net.py
   7 tests; test_l2install.py expanded to 18) but l2install FIXES INCOMPLETE:
   make check EXIT=2, 7 finding-tests fail (F3 host/live/cpio, F4, F5, F7,
