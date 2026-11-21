@@ -488,6 +488,24 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   agent; gating/RO-tail under 05/80/65; LTO under 80). Commit-refusal
   policy mutual + durable (e24248c followed it: own lane, verified).
   No reassignment claimed; recorded split governs; no user decision needed.
+- **ORPHANED DEFAULT-KERNEL LANE (2026-11-21, needs USER decision)**:
+  L2-72 session GONE (only L2-54 = resumed L2-96 remains, variant-only).
+  No active executor for: mission-05 default-kernel trim iteration
+  (kernel.fragment/patch-kernel-ram.py + build/out rebuilds), P2 BUILD-SIDE
+  (l2 lane), N5 KERNEL-SIDE finalization, FINAL integrated ./l2 build
+  (rcl2 l2pm rootfs initramfs iso). Mission-05 fragment WIP committed clean
+  at HEAD (d1959a232) — no work lost, but iteration/integration ownerless.
+  L2-ea will NOT unilaterally take it (reassignment = user's call). My P2
+  shell-side + N5 l2net side queued against the now-ownerless finalization
+  ping; joint items PAUSE until executor assigned. Surfaced to user.
+- **L2-54 agent SCOPE VIOLATION (peer-handled)**: its resumed WP2 heavy-
+  coder wrote l2 (lowram()/build_lowram() integration + dashboard rows→
+  lowram) + README.md + .gitignore — a product decision reserved to
+  user/lead. L2-54 reverting: preserve integration as build-lowram/
+  proposals/l2-lowram-integration.patch, git checkout -- l2 README.md
+  .gitignore (to HEAD 1910fe1e7). L2-ea does NOT touch those files (revert
+  pending; still M at last check). tools/l2-lowram in-scope diff stays
+  (L2_MAIN_BUILD_DIR + iso arg). After revert → user/lead domain.
 - rcl2 parser fuzz ownership: W1 DONE — corpus committed at 1984055
   (tools/test_rcl2_lifecycle.py), shared with L2-72 for mission 67
   (login/su missing-shadow + non-rcl2 inputs remain theirs).
@@ -729,3 +747,12 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   per user (notes/ gitignored). W7 initramfs-fixed.cpio.gz already built;
   worktree test_mempressure.py present. Resumed both agents with current-
   state context; await completion reports → verify → commit → W5.
+- 2026-11-21 L2-54 handshake (resumed L2-96): lanes disjoint confirmed,
+  agreements (FINAL/N5/P2/mission-92) re-confirmed. Propagated make check
+  CORRECTION (EXIT=2, W6 incomplete) — peer had acked my wrong EXIT=0.
+  Peer agent scope violation (l2/README/.gitignore) being reverted by
+  L2-54 to a proposal; L2-ea stays out. **ORPHANED default-kernel lane
+  flagged** (L2-72 gone; mission-05/P2-build/N5-kernel/FINAL-integrated
+  executorless; fragment WIP committed clean; needs USER reassignment).
+  WP2 v3-bios sweep running (12/16/32/256M) + independent re-verification.
+  W6 implementing l2install fixes; W7 gate pending.

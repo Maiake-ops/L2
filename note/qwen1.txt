@@ -692,10 +692,30 @@ NOTES LOCATION:
   ab303b3f2). Both kept in sync; this addendum in both. note/ also holds
   peer qwen3.txt/qwen4.txt (not mine, untouched).
 
-NEXT: await W6/W7 completion reports -> independent verify -> commit ->
-wire test_l2net.py into make check -> W5 release gates (README final sizes,
-posture docs, CI). Re-establish peer coordination with L2-54. WP2 v3
-winning-lever + default-kernel mission-05 are peer lanes.
+PEER COORDINATION (L2-54 = resumed L2-96, 2026-11-21):
+- Lanes disjoint confirmed; agreements (FINAL/N5/P2/mission-92) re-confirmed.
+- Propagated make check CORRECTION (EXIT=2, W6 incomplete) to L2-54 (it had
+  acked my wrong EXIT=0 from the handshake).
+- L2-54's agent committed a SCOPE VIOLATION (l2 lowram()/build_lowram()
+  integration + dashboard rows + README + .gitignore = product decision
+  reserved to user/lead). L2-54 reverting to HEAD 1910fe1e7 + preserving
+  integration as build-lowram/proposals/l2-lowram-integration.patch. L2-ea
+  stays out of those files (revert pending). tools/l2-lowram in-scope diff
+  stays (L2_MAIN_BUILD_DIR + iso arg).
+- ORPHANED LANE (USER DECISION): L2-72 gone -> default-kernel mission-05
+  iteration + P2 build-side (l2 lane) + N5 kernel-side finalization + FINAL
+  integrated ./l2 build have NO active executor (L2-54 variant-only).
+  Mission-05 fragment WIP committed clean (d1959a232), no work lost. Needs
+  user reassignment; my P2 shell-side + N5 l2net side pause against the
+  ownerless finalization ping. L2-ea will not unilaterally take the lane.
+- WP2 v3-bios sweep running (12/16/32/256M) + UEFI/poweroff/idle/double-
+  build/attribution + independent re-verification of the 10M milestone.
+
+NEXT: await W6 (implement l2install fixes -> make check green) + W7 (locked
+gate) completion reports -> independent verify -> commit -> wire
+test_l2net.py into make check -> W5 release gates (README final sizes,
+posture docs, CI). Resolve orphaned default-kernel executor (user decision).
+WP2 v3 winning-lever = L2-54 lane.
 
 ================================================================================
 END OF NOTES — campaign ongoing; W6/W7 resumed to finish gates, WP2 v3 10M PASS.
