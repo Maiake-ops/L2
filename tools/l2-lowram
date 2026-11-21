@@ -231,7 +231,7 @@ make_initramfs_variant() {
         say "variant initramfs: bin/rcl2 overridden from $L2_LOWRAM_RCL2"
     fi
     find "$work" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
-    ( cd "$work" && find . -print0 \
+    ( cd "$work" && find . -print0 | LC_ALL=C sort -z \
         | cpio --null -o -H newc --owner=0:0 --reproducible --quiet \
         | gzip -n -9 ) > "$out" || die "initramfs repack failed"
     say "variant initramfs: $out ($(stat -c%s "$out") B)"

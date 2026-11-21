@@ -209,3 +209,7 @@ Four scratch dry-run cases exposed accepted target types (test exit 1). Image mo
 ### A17 · Mount discovered network packs with device and set-id privileges disabled
 
 The original media scan requested only ro. The new mount-contract assertion failed (1). Scanned ISO media now get ro,nodev,nosuid before marker inspection, while genuine pack executables remain usable. All seven packaged-dash networking tests passed (0). This applies to mounts made by l2net. Existing host mounts retain their original flags. Cryptographic pins remain pending the coordinated build-side release.
+
+### A18 · Canonicalize low-RAM initramfs archive order
+
+The same logical fixture with reversed input order produced unequal gzip archives on tmpfs (suite exit 1). The default temp filesystem happened to hide the difference. Sorting NUL-delimited paths under LC_ALL=C before cpio fixed it (tmpfs suite exit 0). Independent clean full initramfs builds on disk and tmpfs produced identical 420,733 B files, SHA-256 bf9850b0e658f34b71e5d81c25cc2b43339df53208a0e605a014c7ad37109d59 (cmp exit 0). Inputs were the existing hardware initramfs and freshly built rcl2.

@@ -1,4 +1,5 @@
 """Regression checks for the VM image builder in private output directories."""
+import gzip
 import os
 from pathlib import Path
 import subprocess
@@ -25,3 +26,25 @@ class LowramBuild(unittest.TestCase):
             self.assertIn("timeout: 1\n", config)
             self.assertIn("l2.rescue=1", config)
             self.assertEqual(config, (build / "iso.lowram/EFI/BOOT/limine.conf").read_text())
+
+    def test_initramfs_is_independent_of_input_member_order(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            source = base / "files"
+            (source / "etc").mkdir(parents=True)
+            (source / "etc/rcl2.conf").write_text("hostname L2\n")
+            for name in ("alpha", "beta", "gamma"):
+                (source / name).write_text(name)
+            images = []
+            for number, names in enumerate((["alpha", "beta", "gamma"], ["gamma", "beta", "alpha"])):
+                build = base / str(number)
+                payload = build / "out"
+                payload.mkdir(parents=True)
+                members = "\n".join([".", "etc", "etc/rcl2.conf", *names, ""])
+                archive = subprocess.check_output(["cpio", "-o", "-H", "newc", "--quiet"],
+                                                  input=members.encode(), cwd=source)
+                (payload / "initramfs-l2").write_bytes(gzip.compress(archive, mtime=0))
+                subprocess.run([ROOT / "tools/l2-lowram", "initramfs"], check=True,
+                               env=dict(os.environ, L2_BUILD_DIR=str(build), L2_MAIN_BUILD_DIR=str(build)))
+                images.append((payload / "initramfs-l2-lowram").read_bytes())
+            self.assertEqual(images[0], images[1])
