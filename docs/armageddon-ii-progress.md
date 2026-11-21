@@ -958,3 +958,19 @@ the flag on GNU, omits on busybox (live flow byte-identical).
   9/10/12/16M all PASS (16M 11520/3812/4864); 32/256 + mempressure + sha
   pin remaining (~5 min); 8M floor-bracket probe queued after. Full FINAL
   record + SHA256SUMS + maiake-f6 ping on completion. User decisions pending.
+- 2026-11-21 **★★★ L2-54 FINAL VERIFICATION COMPLETE — variant VERIFIED,
+  mission evidence chain complete**: (1) independent suite BIOS 6/6 PASS
+  MATRIX_EXIT=0 (9M 4416/3812/4800 … 256M 253448/3820/8696; idle flat
+  3.72-3.74 MiB). (2) MEMPRESSURE_EXIT=0 unedited gate 16M: PID1 VmRSS
+  36 kB, no OOM, ENOSPC at /tmp cap (W7 caps OOM-kill→clean capacity
+  limit), reclaim +40K, survived — WEDGED→PASS measured on VARIANT
+  (validates W7). (3) 8M MEASURED FAIL silent 4.1s → floor bracketed
+  8M FAIL/9M PASS (mechanism uninvestigated, optional TCG). (4) SHA PIN
+  VERIFIED == WP2: ISO 01c784a1…(5,961,728 B), kernel 4d38a2a7…
+  (1,647,616 B), initramfs a6974f5a…(420,933 B). Evidence build/campaigns/
+  lowram-final-verify/ + -8m/. (5) FINAL ledger entry + maiake-f6 second-
+  matrix ping (ledger durable, absent roster). (6) preservation 9da900ab2.
+  release-readiness.md variant → VERIFIED (8M measured FAIL, full suite,
+  sha pins; recommendation: only USER posture acceptance pending).
+  Remaining governance: USER posture (extreme 9-10M vs functional 12M v1
+  vs both, VM-only caveat) + orphaned executor. Variant config frozen.

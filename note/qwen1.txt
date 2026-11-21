@@ -686,6 +686,16 @@ PRIMARY TARGET ACHIEVED (variant):
   suites + rcl2 selftest). rcl2 selftest RSS 44-48 KiB (±1 page variance,
   same binary 07fb2c69; not a defect). W7 Makefile recipe verified by peer.
 - W5 release-readiness.md DRAFTED (docs/armageddon/release-readiness.md).
+- ★★★ VARIANT FINAL VERIFICATION COMPLETE (L2-54): BIOS 6/6 PASS
+  (MATRIX_EXIT=0, 9-256M, idle flat 3.72-3.74 MiB), mempressure PASS
+  (MEMPRESSURE_EXIT=0, W7 caps → clean ENOSPC no OOM, reclaim +40K —
+  WEDGED→PASS measured on variant, validates W7), 8M MEASURED FAIL
+  (silent 4.1s → floor bracketed 8M FAIL/9M PASS), sha pin VERIFIED
+  (ISO 01c784a1 5,961,728 B / kernel 4d38a2a7 1,647,616 B / initramfs
+  a6974f5a 420,933 B). Evidence build/campaigns/lowram-final-verify/.
+  Variant lane VERIFIED; release needs ONLY user posture acceptance.
+  Mission evidence chain complete. Remaining: USER posture + orphaned
+  integrated-ISO executor.
 
 AGENTS (restored):
 - W2 heavy-coder: completed (integrated, rebased 264d82b86).

@@ -1,6 +1,6 @@
 # L2 ARMAGEDDON II — Release Readiness (W5, missions 281–300)
 
-Status: **DRAFT** · Author: L2-ea / L2-aa (lead) · 2026-11-21
+Status: **DRAFT — variant lane VERIFIED; default integrated ISO pending builder** · Author: L2-ea / L2-aa (lead) · 2026-11-21
 Scope: release-engineering summary of VERIFIED campaign state. Data is
 labelled **MEASURED**, **PREDICTED**, or **PENDING**. Companion live ledger:
 `docs/armageddon-ii-progress.md`; session record: `notes/qwen1.txt`.
@@ -17,12 +17,12 @@ L2 now ships two kernel configurations with distinct trade-offs:
 |---|---|---|
 | Purpose | real-hardware breadth (NVMe/AHCI/USB/HID/PS2/EFI-fb/ACPI, modules) | ultra-low-RAM boot, minimal surface |
 | Modules | `MODULES=y` (hw pack on medium, modalias load) | `MODULES=n` (no module loading; no hw pack) |
-| Idle RAM (MEASURED) | ~5.5 MiB (16M used 5564K, 24M 5632K) | **~3.8 MiB FLAT** across 12–256M (used 3812–3836K) |
-| BIOS boot floor (MEASURED) | **14M** (13M OOM-deadlock) | **9M** (v3 PASS — under-10M goal EXCEEDED; 8M probe pending; v1/v2 10M FAIL) |
+| Idle RAM (MEASURED) | ~5.5 MiB (16M used 5564K, 24M 5632K) | **3.72–3.74 MiB FLAT** across 9–256M (used 3808–3832K) |
+| BIOS boot floor (MEASURED) | **14M** (13M OOM-deadlock) | **9M** (8M FAIL / 9M PASS bracketed; under-10M goal EXCEEDED; v1/v2 10M FAIL) |
 | UEFI boot floor (MEASURED) | (96M,128M] — Limine `init_memmap` panic below | 128M PASS, 256M PASS; 16M FAIL-silent (firmware-bound) |
 | Kernel image | 7490 KiB decompressed (4891 code/351 rwdata/1392 rodata/692 init/164 bss); bzImage 2,958,336 B | vmlinux **4,494,448 B (4.29 MiB)**, bzImage 1,647,616 B (compile-repro VERIFIED); strips EXT4/INET/NIC/SMP/VT + BUG/BLK_DEV_SD/ACPI_BUTTON/INPUT=n, SWIOTLB=1M |
 | Module-injection surface | present → W6 marker gate + P2 pin (pending) | **removed** (MODULES=n, no pack) |
-| Core ISO size (MEASURED baseline) | 8,787,968 B (8.38 MiB < 10 MiB gate) | variant FINAL ISO **5,961,728 B (5.69 MiB)**, sha `01c784a1…` (full-suite sha pin pending) |
+| Core ISO size (MEASURED) | 8,787,968 B (8.38 MiB < 10 MiB gate) | variant FINAL ISO **5,961,728 B (5.69 MiB)**, sha `01c784a1…` **VERIFIED** |
 
 **Headline:** the variant boots at **9 MiB (strictly under 10 MiB)** total
 guest RAM with ~3.8 MiB idle — flat across guest sizes — **exceeding** the
@@ -69,10 +69,15 @@ ISO): MemTotal **4416K** (capacity model predicted ~4416K — measured
 EXACTLY), used 3812K, reserved 4800K, available 604K (predicted ~580K),
 spawn ok, 53.2 s. The variant boots at **STRICTLY UNDER 10 MiB** total
 guest RAM — the campaign stretch goal is **EXCEEDED**, not just met.
-Suite continuing: 10M PASS (5440/3812/4800), 12M PASS (7488/3808/4800);
-16/32/256 + unedited mempressure gate + sha pin remaining. **8M probe
-queued** (model predicts FAIL, managed ~3392K < v2's fatal 4044K) — will
-bracket the floor 8M FAIL / 9M PASS if confirmed.
+**FULL SUITE COMPLETE — BIOS 6/6 PASS, MATRIX_EXIT=0** (committed harness,
+refreshed ISO): 9M 4416/3812/4800, 10M 5440/3812/4800, 12M 7488/3808/4800,
+16M 11520/3812/4864, 32M 27648/3832/5120, 256M 253448/3820/8696; idle flat
+3.72–3.74 MiB. **MEMPRESSURE_EXIT=0** (unedited worktree gate, 16M): PID1
+VmRSS 36 kB, NO OOM trace — dd hit ENOSPC at the /tmp cap (W7 caps converted
+OOM-kill → clean capacity limit, as designed), reclaim +40K, survived. The
+WEDGED→PASS transition is measured on the VARIANT too. **8M MEASURED FAIL**
+(silent, 4.1 s, QEMU exit before prompt) → **floor bracketed 8M FAIL / 9M
+PASS** (mechanism uninvestigated; optional TCG follow-up).
 
 ---
 
@@ -216,11 +221,13 @@ exactly, selftest ok 44 KiB). Pin every staging input hash.
    wait for L2-72, or pause. **The integrated default ISO is unblocked on
    the implementation side (W6 green + W7 gate PASS) — only the builder is
    missing.**
-2. **Variant FINAL (L2-54 lane, in progress):** WP2 v3 repro double-build →
-   attribution + report → re-verification (10M/9M/subset/mempressure) →
-   post-W7 rcl2 re-copy + selftest re-stamp → FINAL sha pin. Proceeds
-   INDEPENDENTLY of the orphaned lane.
-3. **9M stretch probe** (PREDICTED boot; measure in FINAL suite).
+2. **Variant FINAL (L2-54 lane): COMPLETE + VERIFIED.** BIOS 6/6 PASS
+   (MATRIX_EXIT=0), mempressure PASS (MEMPRESSURE_EXIT=0, clean ENOSPC),
+   8M FAIL/9M PASS bracket, repro double-build PASS, sha pin verified.
+   Evidence: `build/campaigns/lowram-final-verify/` (+ `-8m/`). Config
+   frozen pending USER posture decision.
+3. **9M stretch: MEASURED PASS** (goal exceeded); 8M MEASURED FAIL — floor
+   bracketed. (8M failure mechanism uninvestigated; optional TCG follow-up.)
 4. **l2pm Makefile alignment** (orphaned) → final sizes → README refresh.
 5. **N5 joint threshold policy:** kernel-side (orphaned) + l2net boot()
    gate must share one policy and land together; l2net side ready, pauses.
@@ -233,12 +240,14 @@ exactly, selftest ok 44 KiB). Pin every staging input hash.
 
 ## 8. Release recommendation (draft)
 
-- **Variant `l2-lowram.iso`:** **9M boot MEASURED (under-10M goal exceeded)**,
-  idle ~3.8M flat, FINAL ISO 5,961,728 B (sha 01c784a1…), but the v3 kernel
+- **Variant `l2-lowram.iso`:** **VERIFIED** — BIOS 6/6 PASS (9M floor, 8M
+  FAIL bracketed), mempressure PASS (W7 caps → clean ENOSPC, no OOM),
+  reproducible, sha pin verified: ISO `01c784a1…` (5,961,728 B), kernel
+  `4d38a2a7…` (1,647,616 B), initramfs `a6974f5a…` (420,933 B). BUT v3
   STRIPS EXT4/INET/NIC/SMP/VT + hardening (VM-only throwaway, not
-  general-purpose). Release requires BOTH (a) WP2 full-suite completion
-  (mempressure gate + 8M bracket + sha pin) AND (b) USER acceptance of the
-  functional + security trade-off. Do not ship as a general kernel.
+  general-purpose). Release now requires ONLY **USER acceptance of the
+  functional + security trade-off** (posture: extreme 9–10M shell vs
+  functional 12M v1 vs both). Do not ship as a general kernel.
 - **Default integrated ISO:** implementation complete and green, but
   release BLOCKED on the orphaned-builder decision (item 1). Do not ship
   until an executor builds + verifies the integrated image with W1/W2/W6/W7.
