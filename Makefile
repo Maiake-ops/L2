@@ -35,6 +35,7 @@ check:
 	sh -n overlay/etc/l2/serial-getty
 	python3 -m py_compile tools/patch-kernel-ram.py
 	python3 tools/ramtest.py --selftest
+	python3 -m unittest discover -s tools -p 'test_ramtest.py'
 	python3 -m unittest discover -s tools -p 'test_lowram_matrix.py'
 	python3 -m unittest discover -s tools -p 'test_stability_harness.py'
 	$(MAKE) -C rcl2 test

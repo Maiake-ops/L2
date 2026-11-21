@@ -131,7 +131,10 @@ def measure(args, size_s):
 def ram_sweep(args):
     if not have("qemu-system-x86_64"):
         raise SystemExit("qemu-system-x86_64 not found (l2 deps install)")
-    sizes = [s for s in args.sizes.split(",") if s]
+    sizes = [s.strip().upper() for s in args.sizes.split(",")]
+    for size in sizes:
+        if parse_size(size) == 0:
+            raise SystemExit("RAM size must be positive")
     rows, bad = [], 0
     print(f"  {'RAM':>6} {'used':>9} {'budget':>9}  {'kernel reserved':>16}  slab  ptbl stack percpu")
     for s in sizes:
