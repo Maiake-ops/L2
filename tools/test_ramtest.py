@@ -59,3 +59,10 @@ class Ramtest(unittest.TestCase):
         self.guest.p.wait.side_effect = None
         self.guest.p.wait.return_value = 1
         self.assertEqual(ramtest.boot_medium(self.args), 1)
+
+    def test_ambiguous_media_are_rejected(self):
+        for flags in (["--iso", "a", "--disk", "b"], ["--disk", "a", "--kernel", "k"],
+                      ["--iso", "a", "--initrd", "i"]):
+            with patch("sys.argv", ["ramtest", *flags]), self.assertRaises(SystemExit) as error:
+                ramtest.main()
+            self.assertEqual(error.exception.code, 2)

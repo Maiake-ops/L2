@@ -246,7 +246,9 @@ def main():
     ap.add_argument("--sizes", default="256M,1G,4G,16G")
     ap.add_argument("--budget", type=int, default=int(os.environ.get("L2_RAM_BUDGET_KIB", 10240)))
     ap.add_argument("--timeout", type=int, default=180); ap.add_argument("--settle", type=float, default=25.0)
-    ap.add_argument("--iso"); ap.add_argument("--disk"); ap.add_argument("--ram", default="256")
+    medium = ap.add_mutually_exclusive_group()
+    medium.add_argument("--iso"); medium.add_argument("--disk")
+    ap.add_argument("--ram", default="256")
     ap.add_argument("--uefi", action="store_true"); ap.add_argument("--ovmf")
     ap.add_argument("--with-nic", action="store_true")
     ap.add_argument("--selftest", action="store_true")
@@ -255,6 +257,10 @@ def main():
         d = parse_meminfo("MemTotal:  1000 kB\nMemFree: 10 kB\nMemAvailable:   300 kB\n")
         assert d["MemTotal"] - d["MemAvailable"] == 700 and parse_size("1G") == 1048576 and parse_size("256M") == 262144
         print("selftest ok"); return 0
+    if a.disk and (a.initrd or a.kernel):
+        ap.error("--disk cannot be combined with a direct kernel")
+    if bool(a.kernel) != bool(a.initrd):
+        ap.error("--kernel and --initrd must be supplied together")
     if a.disk or (a.iso and not a.kernel):
         return boot_medium(a)
     if not (a.kernel and a.initrd):
