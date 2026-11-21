@@ -32,3 +32,9 @@ class Ramtest(unittest.TestCase):
         self.assertEqual(ramtest.used_memory({"MemTotal": 100, "MemFree": 10, "Cached": 60,
                                              "Shmem": 50, "Buffers": 2, "SReclaimable": 3}), 75)
         self.assertEqual(ramtest.used_memory({"MemTotal": 100, "MemAvailable": 70}), 30)
+
+    def test_medium_requires_memory_within_budget(self):
+        for info in (None, {"MemTotal": 1000, "MemFree": 0}):
+            self.guest.meminfo.return_value = info
+            with self.subTest(info=info):
+                self.assertEqual(ramtest.boot_medium(self.args), 1)

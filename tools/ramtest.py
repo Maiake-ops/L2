@@ -201,11 +201,15 @@ def boot_medium(args):
         time.sleep(args.settle)
         info = g.meminfo()
         print(f"  PASS {mode}: booted to the L2# shell  ({medium})")
-        if info:
-            used = used_memory(info)
-            ok = used <= args.budget
-            print(f"    idle RAM: {used} KiB used of {info['MemTotal']} KiB "
-                  f"(budget {args.budget} KiB)  {'OK' if ok else 'OVER BUDGET'}")
+        if not info:
+            print("    FAIL: no usable memory sample")
+            return 1
+        used = used_memory(info)
+        ok = used <= args.budget
+        print(f"    idle RAM: {used} KiB used of {info['MemTotal']} KiB "
+              f"(budget {args.budget} KiB)  {'OK' if ok else 'OVER BUDGET'}")
+        if not ok:
+            return 1
         probe = "uname -r"
         if args.disk:
             probe += "; cat /etc/l2/installed 2>/dev/null; grep ' / ' /proc/mounts"
