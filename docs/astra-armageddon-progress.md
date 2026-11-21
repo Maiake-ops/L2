@@ -177,3 +177,11 @@ The handoffs assign domains and W1–W7 to ranges. They provide no individual ti
 2. Obtain the original 101–300 manifest and confirm ownership for default-kernel mission 05, P2 build-side pinning, N5 integration and the final integrated hardware image. The installed-disk pass used an existing hardware ISO and cannot sign off newly compiled W6 or W7 contents in a hardware release.
 3. Resolve trust policy for package signatures and hardware-pack authentication. The existing live-medium marker and local checksums do not authenticate publishers. The root serial console and reduced kernel mitigations constrain where v3 can be deployed.
 4. After integration, rerun pinned media through the supported RAM/firmware matrix and the full stability gate. This batch did not run a 72-hour soak, 100-boot endurance campaign, physical power-loss injection or bare-metal validation. The remaining work is outside these ten missions.
+
+## Batch 2 · 2026-11-21
+
+Started at `be8c7f7e4`. The two Qwen CLI processes were still present. Build outputs in this batch are private to `build/astra-b2/`. The existing low-RAM files, campaign worktree, and reserved default builder were left with their owners.
+
+### A11 · Measure boot allocations and reclaimable pages on the pinned ISO
+
+The standalone BIOS profiler (10 MiB, SMP2, 40 s) checks zone managed pages against MemTotal and probes the guest kernel log. It found 2,430 present and 1,360 managed pages, 4,800 KiB reserved, 2,012 KiB slab and zero reclaimable slab. Initmem released 452 KiB. Dropping dentries yielded no gain. In two disposable boots, unlinking the unused v3 Wi-Fi client reduced Shmem from 828 to 764 KiB. Moving that executable to an optional medium is a measured 64 KiB opportunity. No default payload was removed. Profile runs and assertions exited 0 (audit.log, verified.log).
