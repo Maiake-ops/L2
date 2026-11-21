@@ -78,8 +78,10 @@ L2-ea does **not** write `build/out/` kernel/ISO artifacts, `config/kernel.*`,
   **VARIANT v3-bios SWEEP 4/4 PASS (L2-54, 2026-11-21)**: 12M MemTotal
   7488/used 3812/reserved 4800; 16M 11520/3812/4864; 32M 27648/3816/5120;
   256M 253448/3832/8696 — all spawn ok, **idle ~3.8 MiB FLAT across sizes**
-  (well under the 10-15 MiB band; vs default kernel ~5.5 MiB). v3-uefi
-  sweep running (16/128/256M) + **9M probe** (<10M stretch). Variant FINAL
+  (well under the 10-15 MiB band; vs default kernel ~5.5 MiB). v3-uefi:
+  **128M PASS** (118500/3972/12572), **256M PASS** (247524/3956/14620),
+  16M FAIL-silent (Limine firmware floor, expected); poweroff-16M done;
+  v3-direct 10M running + **9M probe** (<10M stretch). Variant FINAL
   (standalone l2-lowram.iso re-verification incl. 9M, attribution, repro,
   report) proceeds INDEPENDENTLY of the orphaned default-kernel lane;
   only the INTEGRATED ISO is blocked. W5 docs: variant idle ~3.8M flat is
@@ -829,3 +831,17 @@ the flag on GNU, omits on busybox (live flow byte-identical).
   workstreams W1/W2/W6/W7 DONE; make check green. Remaining: W5 release
   gates; orphaned default-kernel lane (user decision); P2/N5 joint items
   pause. Heavy-test follow-ups queued (W6 live QEMU, W7 §10).
+- 2026-11-21 L2-54: **W7 ACCEPTED + input verified** (full sha 07fb2c69…
+  matches); WEDGED retired their side (variant runs unedited mempressure
+  3-part gate at 16M on refreshed ISO). **Scope-revert COMPLETE**
+  (proposals/l2-lowram-integration.patch preserved; l2/README/.gitignore
+  clean at 1910fe1e7). Re-copy sequencing: hash receipt DONE; WP2 suite
+  nearly done (v3-uefi 128M/256M PASS, 16M FAIL-silent firmware floor;
+  poweroff-16M done; v3-direct 10M running) → double-build+attribution+
+  report → v3 FINAL → re-copy post-W7 rcl2 + selftest re-stamp + re-verify
+  + sha pin. maiake-f6 absent → coordinate via ledger/worktree contact.
+  **repack-initramfs.py clarification**: lives in maiake-f6 WORKTREE
+  (.qwen/worktrees/campaigns/rcl2/verification/), W7 ran it there unedited;
+  NOT in main tree (L2-54 depth-3 search correctly missed it); L2-54 uses
+  built-in make_initramfs_variant. Default integrated ISO still gated on
+  orphaned-builder USER decision. W5 + orphan decision awaited from user.
