@@ -949,3 +949,12 @@ the flag on GNU, omits on busybox (live flow byte-identical).
   36 KiB confirmed. Full FINAL record + SHA256SUMS + maiake-f6 ping on
   suite completion. User posture decision pending — evidence now includes
   verified 9M boot for extreme-variant option.
+- 2026-11-21 L2-54: **preservation fix COMMITTED 9da900ab2** "fix(lowram):
+  preserve true built v3 fragment; add rcl2 override to variant builder"
+  (config/kernel.lowram + tools/l2-lowram, 32+/16−; commit == built artifact
+  restored; draft preserved build-lowram/v3/kernel.lowram.functional-draft-
+  NOT-BUILT; posture still user decision — evidence preservation not
+  shipping). release doc preservation discrepancy → RESOLVED. Suite 15:02:
+  9/10/12/16M all PASS (16M 11520/3812/4864); 32/256 + mempressure + sha
+  pin remaining (~5 min); 8M floor-bracket probe queued after. Full FINAL
+  record + SHA256SUMS + maiake-f6 ping on completion. User decisions pending.

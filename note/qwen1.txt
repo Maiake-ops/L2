@@ -677,10 +677,11 @@ PRIMARY TARGET ACHIEVED (variant):
   untrusted hosts. v3 vmlinux 4,494,448 B (4.29 MiB). Functional 12M
   alternative = v1 (NOT v2 — v1/v2 conflation corrected): v1 retains
   INET+EXT4+SMP+VT (idle ~5.0M), v2 dropped INET, v3 dropped EXT4+SMP+VT.
-  Posture options: 10M v3 / 12M v1 / both. Preservation: committed HEAD
-  config/kernel.lowram = unbuilt v4 draft; true built v3 = build-lowram/
-  v3/kernel-lowram.config (working tree, repro-verified); committing true
-  v3 = pending fix. Variant compile-repro + rcl2 compile-repro VERIFIED.
+  Posture options: 10M v3 / 12M v1 / both. Preservation RESOLVED: true
+  built v3 fragment committed 9da900ab2 (config/kernel.lowram + tools/
+  l2-lowram; commit == built artifact); unbuilt v4 draft preserved at
+  build-lowram/v3/kernel.lowram.functional-draft-NOT-BUILT. Variant
+  compile-repro + rcl2 compile-repro VERIFIED.
 - make check DUAL-VERIFIED green (L2-ea + L2-54 both EXIT=0, 181 tests/11
   suites + rcl2 selftest). rcl2 selftest RSS 44-48 KiB (±1 page variance,
   same binary 07fb2c69; not a defect). W7 Makefile recipe verified by peer.

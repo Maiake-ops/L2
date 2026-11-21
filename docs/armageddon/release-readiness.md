@@ -53,12 +53,15 @@ real-hardware breadth at a 14M BIOS floor. UEFI low-RAM is bootloader-bound
 retained (12M PASS, used 5032K, idle ~5.0M); v2 = dropped INET, kept
 EXT4; v3 = dropped EXT4+SMP+VT on top (10M PASS). The "functional 12M"
 alternative is **v1, NOT v2** (earlier v1/v2 conflation corrected).
-**Preservation discrepancy:** committed HEAD `config/kernel.lowram` =
-an *unbuilt v4 draft* (restores INET/EXT4; never built — v4 build
-interrupted at extraction, bulk commit captured the draft); the
-authoritative built v3 = `build-lowram/v3/kernel-lowram.config` (working
-tree, repro-verified). Committing the true v3 config is a pending
-preservation fix (variant lane / user).
+**Preservation (RESOLVED — committed `9da900ab2`):** the earlier committed
+HEAD `config/kernel.lowram` was an *unbuilt v4 draft* (restores INET/EXT4;
+never built — v4 build interrupted at extraction, bulk commit captured the
+draft). L2-54 commit `9da900ab2` "fix(lowram): preserve true built v3
+fragment; add rcl2 override to variant builder" restores commit == built
+artifact (`config/kernel.lowram` + `tools/l2-lowram`, 32+/16−); the draft
+is preserved at `build-lowram/v3/kernel.lowram.functional-draft-NOT-BUILT`.
+Posture remains a USER decision (evidence preservation, not shipping).
+Authoritative built v3 config also at `build-lowram/v3/kernel-lowram.config`.
 
 ### <10M stretch — MEASURED: 9M BIOS PASS (goal EXCEEDED)
 **9M BIOS PASS** (L2-54 independent parent measurement, refreshed post-W7
