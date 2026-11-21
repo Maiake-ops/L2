@@ -34,7 +34,12 @@ for both.
 > v3 kernel that boots at 10M achieves it by **stripping EXT4, INET, NIC
 > drivers, SMP, and VT** (L2-54 preservation/attribution correction: the
 > committed `config/kernel.lowram` fragment was an *unbuilt functional
-> draft*; the built/tested v3 differs). The variant is therefore a
+> draft*; the built/tested v3 differs). **Attribution PROVEN from the
+> build-time `.config`** (`build-lowram/v3/kernel-lowram.config`):
+> `SMP/INET/VT/EXT4_FS` not set, `VIRTIO_NET/NETDEVICES` absent;
+> `EFI_STUB/ACPI/PACKET/UNIX/VIRTIO_BLK/SERIAL_8250_CONSOLE/ISO9660` kept
+> (boots from ISO + serial console, but no IP networking, ext4, SMP, VT).
+> The variant is therefore a
 > **minimal-boot configuration, NOT a general-purpose kernel** — no ext4
 > disk install, no networking, no SMP, no virtual terminal. The 10M boot
 > is real (MEASURED) but comes at this functional cost. Whether this

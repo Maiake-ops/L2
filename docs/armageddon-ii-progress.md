@@ -875,3 +875,17 @@ the flag on GNU, omits on busybox (live flow byte-identical).
   = minimal-boot, NOT general-purpose. release-readiness.md UPDATED to
   reflect trade-off + RSS range + release caveat. Integrated ISO blocker
   unchanged (orphaned executor, user). rcl2 re-copy queued in sequence.
+- 2026-11-21 L2-54: **v3-direct 10M PASS** (MemTotal 5440/used 3828/
+  reserved 4800, spawn ok); ISO 10M 5440/3836/4800 — direct≈ISO within
+  noise at this initrd size, NO ~1M fw_cfg inflation observed (ISO remains
+  authoritative per methodology; the general direct-boot inflation caveat
+  still stands for larger initrds). **Attribution PROVEN from build-time
+  .config** (build-lowram/v3/kernel-lowram.config): SMP/INET/VT/EXT4_FS
+  not set, VIRTIO_NET/NETDEVICES absent; EFI_STUB/ACPI/PACKET/UNIX/
+  VIRTIO_BLK/SERIAL_8250_CONSOLE/ISO9660 kept. WP2 processed preservation
+  correction (v3/kernel.lowram.v3 == working fragment; draft relabeled
+  functional-draft-NOT-BUILT). release-readiness.md trade-off cite
+  strengthened to proven .config. 9M still PREDICTION (pending FINAL
+  suite after WP2 report + rcl2 re-copy). WP2 report shortly → re-verify
+  → rcl2 re-copy → 9M probe → mempressure → FINAL sha pin + maiake-f6
+  ledger ping. Integrated executor decision still user's.
