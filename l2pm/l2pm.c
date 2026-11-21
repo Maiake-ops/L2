@@ -2927,22 +2927,23 @@ static int cmd_verify(int argc, char **argv)
                     if (ok && sync_db_to_gen(pkgs, pn) == 0) {
                         char cur[MAXPATH];
                         long cg = -1;
-                        if (read_active_gen(pdir, prof, cur, sizeof(cur), &cg) != 0 ||
-                            strcmp(cur, rel) != 0)
-                            switch_profile_symlink(pdir, prof, rel);
-                        unlink(ip);
-                        printf("repaired: completed interrupted rollback of %s to generation %ld\n",
-                               prof, gen);
-                        done = 1;
+                        int active = read_active_gen(pdir, prof, cur, sizeof(cur), &cg) == 0 &&
+                                     !strcmp(cur, rel);
+                        if ((active || switch_profile_symlink(pdir, prof, rel) == 0) &&
+                            unlink(ip) == 0) {
+                            printf("repaired: completed interrupted rollback of %s to generation %ld\n",
+                                   prof, gen);
+                            done = 1;
+                        }
                     }
                     free_gen_pkgs(pkgs, pn);
                 }
                 free(gdir); free(rel);
             }
             if (!done) {
-                fprintf(stderr, "l2pm: cannot complete interrupted rollback from intent marker; "
-                                "reconciling profile to database\n");
-                unlink(ip);
+                fprintf(stderr, "l2pm: rollback recovery incomplete; retaining intent for retry\n");
+                free(ip); pl_free(&profiles); free(pdir);
+                return 1;
             }
         }
         free(ip);

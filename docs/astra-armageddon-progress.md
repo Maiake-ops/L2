@@ -193,3 +193,7 @@ Host monotonic launch → first rcl2 output → shell was 4.136 → 4.155 s on v
 ### A13 · Reap promptly when the idle supervisor poll is interrupted
 
 The fake syscall suite failed on an unexpected nanosleep after EINTR (make exit 2). The timed and indefinite ppoll paths now share error handling, eliminating the 50 ms delay on ordinary signals. The isolated rcl2 build and five native suites passed (0). ELF shrank 15,568 → 15,536 B. A fresh candidate ISO booted with 10 MiB, honored net wait completion before ttyS0, held 128 KiB in scratch while the console crashed three times, restarted it after 1/2/4 s and powered down (0). Serial PID 1 RSS in this run was 40 KiB. rcl2 provides ordered wait services, without a declared dependency graph.
+
+### A14 · Retain interrupted rollback intent until profile activation succeeds
+
+New deterministic strace tests SIGKILL real install, remove, rollback and GC commands inside private roots. Recovery used to report success while leaving generation 3 active when the requested switch to 1 failed (test exit 1). Failed activation now returns failure, retains the marker and avoids subsequent reconciliation against the wrong profile. After retry, generation 1 and the original executable survived. All 34 transaction tests passed (0). Process death was tested, not storage power loss.

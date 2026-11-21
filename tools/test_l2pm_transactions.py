@@ -197,6 +197,48 @@ class TransactionRollback(L2pmTxnBase):
 
 
 class TornStateRepair(L2pmTxnBase):
+    @unittest.skipUnless(shutil.which("strace"), "needs strace syscall injection")
+    def test_interrupted_commands_preserve_live_stores(self):
+        def interrupt(call, nth, *args):
+            trace = self.scratch / "trace"
+            proc = subprocess.run(["strace", "-o", str(trace), "-e", f"inject={call}:signal=SIGKILL:when={nth}",
+                                   str(self.bin), *args], env=self.env, capture_output=True, timeout=60)
+            self.assertEqual(proc.returncode, -9, trace.read_text()[-1500:])
+
+        self.write_recipe("keep")
+        self.l2pm("add", "keep")
+        self.write_recipe("app")
+        self.l2pm("build", "app")
+        archive = str(self.root / "l2/cache/app-1.0.l2p")
+        interrupt("rename", 2, "install", archive)
+        self.l2pm("verify", "--repair")
+        self.l2pm("install", archive)
+        interrupt("unlink", 2, "remove", "app")
+        self.l2pm("verify", "--repair")
+        self.assertIn("app", self.db_names())
+        self.write_recipe("app", version="2.0")
+        self.l2pm("add", "app")
+        interrupt("rename", 2, "rollback", "1")
+        intent = self.root / "l2/var/rollback-intent"
+        self.assertTrue(intent.is_file())
+        retry = subprocess.run(["strace", "-o", str(self.scratch / "retry.trace"),
+                                "-e", "inject=symlink:error=EIO:when=1", str(self.bin),
+                                "verify", "--repair"], env=self.env, capture_output=True, timeout=60)
+        self.assertNotEqual(retry.returncode, 0)
+        self.assertTrue(intent.is_file(), "failed recovery discarded rollback target")
+        self.l2pm("verify", "--repair")
+        self.assertEqual(self.active_link(), "default-1-link")
+        self.assertEqual(self.db_names(), ["keep"])
+        orphan = self.root / "l2/store/orphan"
+        orphan.mkdir()
+        (orphan / "unused").touch()
+        interrupt("unlink", 1, "gc", "--prune-generations")
+        self.l2pm("gc", "--prune-generations")
+        self.l2pm("verify")
+        active = self.profiles_dir() / "default/usr/bin/keep"
+        self.assertEqual(subprocess.check_output([active], text=True).strip(), "keep-1.0")
+
+
     def test_torn_install_db_ahead_of_profile(self):
         # Simulate a crash after db_write but before rebuild_profile:
         # DB has b, the profile symlink still points at generation 1.
