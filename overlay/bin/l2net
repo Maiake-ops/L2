@@ -63,7 +63,7 @@ find_pack() {
                  /dev/vd[a-z] /dev/vd[a-z][0-9] /dev/nvme[0-9]n[0-9] /dev/nvme[0-9]n[0-9]p[0-9] \
                  /dev/mmcblk[0-9] /dev/mmcblk[0-9]p[0-9]; do
             [ -b "$d" ] || continue
-            mount -t iso9660 -o ro "$d" "$MEDIUM" 2>/dev/null || continue
+            mount -t iso9660 -o ro,nodev,nosuid "$d" "$MEDIUM" 2>/dev/null || continue
             if [ -f "$MEDIUM/l2/L2-LIVE" ]; then
                 if [ -d "$MEDIUM/l2/wifi" ]; then use_pack "$MEDIUM/l2/wifi"; return 0; fi
                 if [ -d "$MEDIUM/l2/hw" ]; then use_pack "$MEDIUM/l2/hw"; return 0; fi

@@ -215,6 +215,10 @@ class L2net(unittest.TestCase):
         env = dict(self.env, L2_PACK_DEV=devs[0])
         self.run_net("modules", env=env)
         self.assertTrue((self.pack_link() / "GENUINE").exists())
+        mounts = [line for line in self.lines() if line.startswith("mount ")]
+        self.assertTrue(mounts)
+        for line in mounts:
+            self.assertTrue({"ro", "nodev", "nosuid"} <= set(line.split()[4].split(",")))
 
     # ------------------------------------------------ N3: modalias globs
     def probe_function(self):

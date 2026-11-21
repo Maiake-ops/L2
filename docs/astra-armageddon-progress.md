@@ -205,3 +205,7 @@ Reinstalling an unchanged archive used to bless prior file corruption by regener
 ### A16 · Restrict image installation to regular file targets
 
 Four scratch dry-run cases exposed accepted target types (test exit 1). Image mode now rejects directories, FIFOs and both live and dangling symlinks even under --yes. Host tools receive an option terminator before the target. Existing refusal, mount ownership and cleanup tests plus the new cases passed, 19 tests (0). Validation assumes the caller controls the image parent directory throughout installation.
+
+### A17 · Mount discovered network packs with device and set-id privileges disabled
+
+The original media scan requested only ro. The new mount-contract assertion failed (1). Scanned ISO media now get ro,nodev,nosuid before marker inspection, while genuine pack executables remain usable. All seven packaged-dash networking tests passed (0). This applies to mounts made by l2net. Existing host mounts retain their original flags. Cryptographic pins remain pending the coordinated build-side release.
