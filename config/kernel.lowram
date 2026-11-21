@@ -241,10 +241,13 @@ CONFIG_VIRTIO_MENU=y
 CONFIG_VIRTIO=y
 CONFIG_VIRTIO_PCI=y
 CONFIG_VIRTIO_BLK=y
-# EXT4 KEPT (ext4 root for `l2install disk`).  The 10 MiB goal is reached via
-# SMP=n + VT=n rather than dropping ext4.  ISO9660/JOLIET for the live CD.
-CONFIG_EXT4_FS=y
-CONFIG_EXT4_USE_FOR_EXT2=y
+# EXT4 dropped to reach the 10 MiB goal (next-largest fs contributor, ~450 KiB
+# image).  TRADE-OFF: no ext4 root — `l2install disk` (ext4) will not work from
+# this variant; the live shell boots from the initramfs (tmpfs) + ISO9660 CD.
+# The DEFAULT kernel keeps EXT4.  Re-enable EXT4_FS=y for disk-install support
+# (raises the boot floor by ~1 MiB).
+CONFIG_EXT4_FS=n
+CONFIG_EXT4_USE_FOR_EXT2=n
 CONFIG_ISO9660_FS=y
 CONFIG_JOLIET=y
 CONFIG_NLS=y
@@ -351,12 +354,15 @@ CONFIG_X86_AMD_PLATFORM_DEVICE=n
 CONFIG_PNP_DEBUG_MESSAGES=n
 
 # ---------------------------------------------------------------- networking
-# TCP/IP (INET) KEPT (udhcpc/DHCP, TCP/UDP).  The 10 MiB goal is reached via the
-# SMP=n + VT=n levers below instead of gutting networking.  IPv6, wifi, physical
-# NIC vendors and the firmware loader are gone; virtio-net is the only NIC.
-# AF_UNIX + AF_PACKET also kept for local sockets.
+# TCP/IP (INET) DROPPED to reach the 10 MiB goal.  Measured forensics: with INET
+# the idle unreclaimable slab is ~2.8 MiB (ACPI namespace + rootfs metadata +
+# IPv4 stacks); INET is the next-largest Built-in.a contributor (net ~1.1 MiB)
+# after drivers.  TRADE-OFF: no IPv4/IPv6, no udhcpc/DHCP, no TCP/UDP sockets.
+# This is a VM/serial shell variant booted with -nic none; AF_UNIX + AF_PACKET +
+# the NET core (lo) remain for local sockets.  The DEFAULT kernel keeps full
+# INET.  Re-enable INET=y for a networking lowram variant (raises the floor).
 CONFIG_NET=y
-CONFIG_INET=y
+CONFIG_INET=n
 CONFIG_UNIX=y
 CONFIG_PACKET=y
 CONFIG_IPV6=n
@@ -375,9 +381,9 @@ CONFIG_XFRM_USER=n
 CONFIG_NET_SCHED=n
 CONFIG_NET_CLS=n
 CONFIG_NETFILTER=n
-CONFIG_NETDEVICES=y
-CONFIG_ETHERNET=y
-CONFIG_VIRTIO_NET=y
+CONFIG_NETDEVICES=n
+CONFIG_ETHERNET=n
+CONFIG_VIRTIO_NET=n
 CONFIG_ETHTOOL_NETLINK=n
 CONFIG_NET_VENDOR_INTEL=n
 CONFIG_NET_VENDOR_REALTEK=n
