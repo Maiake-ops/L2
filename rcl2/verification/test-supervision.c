@@ -137,7 +137,7 @@ static long fake_syscall(long nr, long a, long b, long c,
         if (polls++ == 0) {
             CHECK(pf->fd == 3 && timeout == 0);
             g_sig_rd = -1;
-            return 0;
+            return -EINTR;  /* the wakeup must not take a nanosleep detour */
         }
         CHECK(pf->fd == -1 && timeout != 0);
         CHECK(timeout->tv_sec == 1 && timeout->tv_nsec == 0);

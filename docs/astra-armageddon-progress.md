@@ -189,3 +189,7 @@ The standalone BIOS profiler (10 MiB, SMP2, 40 s) checks zone managed pages agai
 ### A12 · Shorten serial VM autoboot while retaining recovery
 
 Host monotonic launch → first rcl2 output → shell was 4.136 → 4.155 s on v3 and 2.155 → 2.174 s with a one-second VM menu. Guest service time stayed at ~19 ms. Both real BIOS images booted at 10 MiB. Two isolated ISO assemblies matched SHA-256 a87dfa78653f85adfd0a85cebe99feea18f353f048bb35ce5ae9c3fc0d6da650 (cmp exit 0). The menu regression checks BIOS/EFI config equality and recovery availability. Hardware menu timeout is separate.
+
+### A13 · Reap promptly when the idle supervisor poll is interrupted
+
+The fake syscall suite failed on an unexpected nanosleep after EINTR (make exit 2). The timed and indefinite ppoll paths now share error handling, eliminating the 50 ms delay on ordinary signals. The isolated rcl2 build and five native suites passed (0). ELF shrank 15,568 → 15,536 B. A fresh candidate ISO booted with 10 MiB, honored net wait completion before ttyS0, held 128 KiB in scratch while the console crashed three times, restarted it after 1/2/4 s and powered down (0). Serial PID 1 RSS in this run was 40 KiB. rcl2 provides ordered wait services, without a declared dependency graph.
