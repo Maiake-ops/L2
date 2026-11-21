@@ -662,15 +662,21 @@ AGENTS (restored):
   present; lifecycle 14/14 OK. MISSING: locked mempressure gate (ISO +
   test_mempressure.py --ram 16M) + test-live-install 256 + idle delta.
   Resumed to finish gate + report.
-- W6 heavy-coder: PAUSED -> RESUMED. Fixes committed (l2net L2-LIVE marker
-  N1 + set -f N3; l2install F3 /proc/1/comm gate + F4/F5/F7/F14/F15).
-  tools/test_l2net.py (7 tests) exists; fail-before 2 N1 tests captured.
-  MISSING: pass-after confirmation + all-8-findings evidence + report.
-  Resumed to finish.
+- W6 heavy-coder: PAUSED -> RESUMED. Tests committed (tools/test_l2net.py
+  7 tests; test_l2install.py expanded to 18) but l2install FIXES INCOMPLETE:
+  make check EXIT=2, 7 finding-tests fail (F3 host/live/cpio, F4, F5, F7,
+  F15). l2net N1 marker + N3 set -f present; l2install F3 gate partial.
+  MISSING: implement l2install fixes to turn 7 tests green + pass-after
+  evidence + report. Resumed with precise failure list.
 
-VERIFICATION (lead, post-restoration):
-- make check resume EXIT=0 (build/campaigns/a2-make-check-resume.log) —
-  committed W6/W7 state green (166+ unit tests + 5 rcl2 C suites).
+VERIFICATION (lead, post-restoration) — CORRECTED:
+- make check resume **EXIT=2 (FAILED)**, NOT 0. Earlier "EXIT=0" was the
+  wrapper shell's code (echo|tee succeeded), misread as make check's.
+  build/campaigns/a2-make-check-resume.log: test_l2install 18 tests, 7
+  FAILURES (f3_host/f3_live/f3_cpio/f4/f5/f7/f15) = W6 l2install fixes
+  INCOMPLETE (TDD fail-before state committed by user). rcl2(W7)+l2pm(W2)
+  +l2gpt suites GREEN; only l2install red. W6 resumed with precise failure
+  list to implement fixes -> green. Lead re-verifies + commits when green.
 - worktree .qwen/worktrees/campaigns/tools/test_mempressure.py present.
 
 PEER ROSTER CHANGE:

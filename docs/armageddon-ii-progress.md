@@ -13,7 +13,10 @@
 > `264d82b86`, wiring 1ec7140→`90a887c79`, notes 6b7e296→`ab303b3f2`,
 > audit-gate ec827b1→`7f4075f47`, dispute dd32ca7→`0d21a1cae`. W6/W7 fixes
 > committed by user (`d1959a232`); agents PAUSED→RESUMED to finish gates/
-> reports. make check resume EXIT=0. Peer roster now only **L2-54** (ref
+> reports. **make check resume EXIT=2 (FAILED)** — W6 l2install fixes
+> INCOMPLETE: 7 finding-tests fail (TDD fail-before committed by user);
+> rcl2(W7)+l2pm(W2) suites green. (Earlier "EXIT=0" was the wrapper shell
+> code, misread — corrected.) Peer roster now only **L2-54** (ref
 > 96af98 = old L2-96); old L2-72/maiake-f6 sessions gone — agreements below
 > remain the reference but contacts changed. `notes/qwen1.txt` created per
 > user request (notes/ is gitignored; note/qwen1.txt is the tracked copy).
@@ -713,8 +716,14 @@ sbin→bin symlink; GNU/busybox cpio strip leading '/' by default.
   (HEAD 1910fe1e7, origin tracking, backup branches); my commits rebased
   (new hashes mapped in banner); W6/W7 fixes committed by user d1959a232;
   W6/W7 agents paused→RESUMED to finish gates/reports (W7 missing locked
-  mempressure gate + ISO; W6 missing pass-after confirmation). make check
-  resume EXIT=0 (a2-make-check-resume.log). **WP2 v3 10M PASS — primary
+  mempressure gate + ISO; W6 l2install fixes INCOMPLETE — 7 finding-tests
+  fail). **make check resume EXIT=2 FAILED** (a2-make-check-resume.log):
+  test_l2install 18 tests, 7 failures (f3_host/f3_live/f3_cpio/f4/f5/f7/
+  f15); rcl2(W7)+l2pm(W2)+l2gpt green. **CORRECTION**: earlier "EXIT=0"
+  claim was the wrapper shell code (echo|tee), NOT make check — misread,
+  corrected here + in notes + correcting commit. W6 given precise failure
+  list; resumed to implement fixes → green. WP2 v3 milestone unaffected
+  (separate committed evidence). **WP2 v3 10M PASS — primary
   target achieved (variant)**; v1/v2 FAIL→v3 PASS, evidence committed.
   Peer roster reduced to L2-54 (old L2-96 ref). notes/qwen1.txt created
   per user (notes/ gitignored). W7 initramfs-fixed.cpio.gz already built;
