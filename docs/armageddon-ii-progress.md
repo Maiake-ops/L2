@@ -889,3 +889,14 @@ the flag on GNU, omits on busybox (live flow byte-identical).
   suite after WP2 report + rcl2 re-copy). WP2 report shortly → re-verify
   → rcl2 re-copy → 9M probe → mempressure → FINAL sha pin + maiake-f6
   ledger ping. Integrated executor decision still user's.
+- 2026-11-21 L2-54 sync: **variant compile-layer repro VERIFIED PASS**
+  (double-build complete, NOT running): repro bzImage == v3 byte-identical,
+  sha 4d38a2a7…48530 (1,647,616 B), isolated build-lowram/repro from
+  working fragment. release-readiness.md updated: variant compile-repro
+  VERIFIED (default-kernel + l2pm compile-repro still PENDING/orphaned);
+  variant bzImage 1,647,616 B vs default 2,958,336 B. Trade-offs stated as
+  VERIFIED FACT (no ext4→no disk-install, no INET/NIC→no net, 1 CPU,
+  serial-only). **USER posture decision framed 3 ways**: extreme 10M shell
+  (v3) vs functional 12M (v2) vs both. W6-green ping already acted (dual
+  make check EXIT=0). 9M probe pending WP2 report (shortly) + rcl2 re-copy.
+  W5 draft my lane, no overlap; README hold sensible. Orphan mutual.

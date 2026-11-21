@@ -20,7 +20,7 @@ L2 now ships two kernel configurations with distinct trade-offs:
 | Idle RAM (MEASURED) | ~5.5 MiB (16M used 5564K, 24M 5632K) | **~3.8 MiB FLAT** across 12–256M (used 3812–3836K) |
 | BIOS boot floor (MEASURED) | **14M** (13M OOM-deadlock) | **10M** (v3 PASS; v1/v2 10M FAIL) |
 | UEFI boot floor (MEASURED) | (96M,128M] — Limine `init_memmap` panic below | 128M PASS, 256M PASS; 16M FAIL-silent (firmware-bound) |
-| Decompressed image | 7490 KiB (4891 code/351 rwdata/1392 rodata/692 init/164 bss) | reduced (bzImage −736K at v1; v3 lever report pending) |
+| Kernel image | 7490 KiB decompressed (4891 code/351 rwdata/1392 rodata/692 init/164 bss); bzImage 2,958,336 B | bzImage **1,647,616 B** (1.57 MiB), compile-repro VERIFIED; strips EXT4/INET/NIC/SMP/VT |
 | Module-injection surface | present → W6 marker gate + P2 pin (pending) | **removed** (MODULES=n, no pack) |
 | Core ISO size (MEASURED baseline) | 8,787,968 B (8.38 MiB < 10 MiB gate) | variant ISO pending FINAL pin |
 
@@ -42,9 +42,12 @@ for both.
 > The variant is therefore a
 > **minimal-boot configuration, NOT a general-purpose kernel** — no ext4
 > disk install, no networking, no SMP, no virtual terminal. The 10M boot
-> is real (MEASURED) but comes at this functional cost. Whether this
-> trade-off is acceptable for the variant's intended purpose is a USER
-> decision; do not present the variant as a drop-in replacement.
+> is real (MEASURED) but comes at this functional cost — **VERIFIED FACT**:
+> no ext4 → no disk-install from the variant; no INET/NIC → no networking;
+> 1 CPU (SMP off); serial-only (VT off). **USER posture decision (3
+> options):** (a) extreme 10M shell (v3, stripped), (b) functional 12M
+> (v2, retains more features at a higher floor), or (c) ship both. Do not
+> present the variant as a drop-in replacement.
 
 ### <10M stretch — PREDICTED (not yet measured)
 L2-54 capacity model + v2/v3 evidence: at **9M**, present ≈8700K, reserved
@@ -169,9 +172,12 @@ C suites** (selftest/supervision/truncation/lifecycle/tmpcap+tmpcap-real)
 All four implementation workstreams W1/W2/W6/W7 DONE + lead-verified.
 
 Reproducibility: ISO **assembly** byte-reproducible proven (xorriso +
-limine + MBR-pin given identical staging; 06a4fd1e twice). **Compile-layer**
-double-build proof RUNNING for the variant (isolated `build-lowram/repro`,
-L2_BUILD_DIR). Pin every staging input hash; do not assume compile repro.
+limine + MBR-pin given identical staging; 06a4fd1e twice). **Variant
+kernel compile-layer double-build VERIFIED PASS** (L2-54): repro bzImage
+== v3 byte-identical, sha256 `4d38a2a76248065af70d8f9bd73d5f65f624604a48c24eb0eaea291c20048530`
+(1,647,616 B), built in isolated `build-lowram/repro` (L2_BUILD_DIR) from
+the working fragment. **Default-kernel + l2pm compile-layer repro still
+PENDING** (maiake-f6 campaign 7, orphaned). Pin every staging input hash.
 
 ---
 
