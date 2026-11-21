@@ -4,7 +4,7 @@ xorriso : NOTE : Environment variable SOURCE_DATE_EPOCH encountered with value 1
 Drive current: -outdev 'stdio:/home/maiake/L2/build-lowram/out/l2-lowram.iso'
 Media current: stdio file, overwriteable
 Media status : is blank
-Media summary: 0 sessions, 0 data blocks, 0 data,  697g free
+Media summary: 0 sessions, 0 data blocks, 0 data,  701g free
 Added to ISO image: directory '/'='/home/maiake/L2/build-lowram/iso.lowram'
 xorriso : UPDATE :      14 files added in 1 seconds
 xorriso : UPDATE :      14 files added in 1 seconds

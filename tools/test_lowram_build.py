@@ -48,3 +48,14 @@ class LowramBuild(unittest.TestCase):
                                env=dict(os.environ, L2_BUILD_DIR=str(build), L2_MAIN_BUILD_DIR=str(build)))
                 images.append((payload / "initramfs-l2-lowram").read_bytes())
             self.assertEqual(images[0], images[1])
+
+    def test_release_rejects_unpinned_or_oversize_media_before_boot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            image = Path(temp) / "candidate.iso"
+            for size, message in ((32, "digest mismatch"), (10 * 1024**2, "size outside")):
+                with image.open("wb") as stream:
+                    stream.truncate(size)
+                result = subprocess.run(["python3", ROOT / "tools/verify-lowram.py", image, "0" * 64],
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(message, result.stderr)

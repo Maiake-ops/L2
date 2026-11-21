@@ -291,6 +291,7 @@ class L2install(unittest.TestCase):
         self.build_medium(self.scratch / "media")  # L2_MEDIA points here
         env = self.record_shims()
         env["L2_SRC"] = str(src)
+        self.cat_pid1_shim("init")  # name alone cannot authorize a medium
         r = self.run_env(env, "-y", "-n", "disk", "/dev/l2-fake-disk", ok=False)
         self.assertIn("build all", r.stderr)
         self.assertIn("live", r.stderr)

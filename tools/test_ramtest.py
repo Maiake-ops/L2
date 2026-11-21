@@ -82,3 +82,13 @@ class Ramtest(unittest.TestCase):
             for call in guest.call_args_list:
                 argv = call.args[0]
                 self.assertEqual(argv[argv.index("-machine") + 1], "q35")
+
+    def test_release_requires_measured_pid1_rss_within_budget(self):
+        self.args.pid1_budget = 50
+        for output, expected in ((b"", 1), (b"VmRSS: 0 kB", 1), (b"VmRSS: 52 kB", 1),
+                                 (b"VmRSS: 36 kB", 0)):
+            def reply(token, _):
+                self.guest.buf = b"7.3.3\r\n" + output + b"\r\nL2RAMDONE\r"
+                return True
+            self.guest.read_until.side_effect = reply
+            self.assertEqual(ramtest.boot_medium(self.args), expected)

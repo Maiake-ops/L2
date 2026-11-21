@@ -147,7 +147,9 @@ setup_live() {
     # There PID 1 is rcl2; on a host an inserted medium must never supply
     # root-executed install tools.  /proc/1/comm cannot be spoofed without
     # controlling PID 1 itself.
-    if [ "$(cat /proc/1/comm 2>/dev/null)" != rcl2 ]; then
+    # rdinit=/init preserves the symlink name in comm. Verify its executable.
+    _comm=$(cat /proc/1/comm 2>/dev/null)
+    if [ "$_comm" != rcl2 ] && ! { [ "$_comm" = init ] && [ /proc/1/exe -ef /bin/rcl2 ]; }; then
         die "no build tree in $L2_SRC/build and this is not the booted L2 live system (PID 1 is not rcl2); build on a host: $L2_SRC/l2 build all - or boot the live medium and run: l2install disk"
     fi
     find_medium || return 1

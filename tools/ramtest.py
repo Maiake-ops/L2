@@ -215,6 +215,9 @@ def boot_medium(args):
         if not ok:
             return 1
         probe = "uname -r"
+        pid1_budget = getattr(args, "pid1_budget", None)
+        if pid1_budget is not None:
+            probe += "; grep '^VmRSS:' /proc/1/status"
         if args.disk:
             probe += "; test -f /etc/l2/installed && grep '^/dev/[^ ]* / ext4 ' /proc/mounts"
         g.buf = b""
@@ -223,6 +226,12 @@ def boot_medium(args):
             print("    FAIL: shell probe timed out")
             return 1
         out = g.buf.decode(errors="replace").split("uname -r")[-1]
+        if pid1_budget is not None:
+            rss = re.search(r"^VmRSS:\s+(\d+) kB\s*$", out, re.MULTILINE)
+            if not rss or not 0 < int(rss[1]) <= pid1_budget:
+                print(f"    FAIL: missing or excessive PID 1 RSS (budget {pid1_budget} KiB)")
+                return 1
+            print(f"    settled PID 1 RSS: {rss[1]} KiB")
         if args.disk and not re.search(r"^/dev/\S+ / ext4 ", out, re.MULTILINE):
             print("    FAIL: installed ext4 root was not observed")
             return 1
@@ -255,6 +264,7 @@ def main():
     ap.add_argument("--ram", default="256")
     ap.add_argument("--uefi", action="store_true"); ap.add_argument("--ovmf")
     ap.add_argument("--with-nic", action="store_true")
+    ap.add_argument("--pid1-budget", type=int, help="maximum settled PID 1 RSS in KiB for medium checks")
     ap.add_argument("--machine", help="QEMU machine type, for example q35")
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
@@ -270,6 +280,8 @@ def main():
         return boot_medium(a)
     if not (a.kernel and a.initrd):
         ap.error("need --kernel and --initrd (or --iso / --disk)")
+    if a.pid1_budget is not None:
+        ap.error("--pid1-budget requires a medium check")
     return ram_sweep(a)
 
 

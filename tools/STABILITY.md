@@ -110,3 +110,15 @@ deliberately invoke the OOM killer, exhaust process limits, or exercise kernel
 fault-injection interfaces. Those remain separate VM scenarios. Review the
 recorded limitations and repair logs before treating a passing automated run
 as release approval.
+
+## Low-RAM release screening
+
+From the repository root, run the following command with the published digest or the independently recorded digest for the candidate under review.
+
+```sh
+python3 tools/verify-lowram.py path/to/l2-lowram.iso EXPECTED_SHA256
+```
+
+The command checks the digest and strict 10 MiB size limit on a private snapshot, runs `make check`, then boots that snapshot under BIOS at 10 MiB and UEFI at 128 MiB. Both runs use two virtual CPUs, a 40-second settle, a 50 KiB PID 1 RSS ceiling, a fresh shell response and a successful poweroff. Missing QEMU or OVMF fails screening. A matching hash establishes artifact identity. Publisher authenticity requires a trusted source for that hash.
+
+The v3 profile targets a trusted serial VM. Its root console is unauthenticated, and its kernel omits IP networking, ext4, SMP and several CPU mitigations. The hardware media marker and restricted mount flags still require a trusted boot medium. Signed package distribution, authenticated hardware-pack pins, bare-metal qualification and the endurance gates have separate acceptance criteria.
