@@ -177,7 +177,9 @@ kernel compile-layer double-build VERIFIED PASS** (L2-54): repro bzImage
 == v3 byte-identical, sha256 `4d38a2a76248065af70d8f9bd73d5f65f624604a48c24eb0eaea291c20048530`
 (1,647,616 B), built in isolated `build-lowram/repro` (L2_BUILD_DIR) from
 the working fragment. **Default-kernel + l2pm compile-layer repro still
-PENDING** (maiake-f6 campaign 7, orphaned). Pin every staging input hash.
+PENDING** (maiake-f6 campaign 7, orphaned). **rcl2 compile-repro VERIFIED**
+(L2-54 re-stamp: committed-source rebuild == post-W7 sha `07fb2c69…`
+exactly, selftest ok 44 KiB). Pin every staging input hash.
 
 ---
 

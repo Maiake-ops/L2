@@ -900,3 +900,14 @@ the flag on GNU, omits on busybox (live flow byte-identical).
   (v3) vs functional 12M (v2) vs both. W6-green ping already acted (dual
   make check EXIT=0). 9M probe pending WP2 report (shortly) + rcl2 re-copy.
   W5 draft my lane, no overlap; README hold sensible. Orphan mutual.
+- 2026-11-21 L2-54 ENDORSED trade-off caveat framing (matches their user
+  surface). **rcl2 re-stamp PASSED**: committed-source rebuild == post-W7
+  sha 07fb2c69 exactly, selftest 44 KiB → rcl2 compile-repro VERIFIED
+  (release doc updated). **Variant FINAL refresh DONE**: L2_LOWRAM_RCL2
+  override in make_initramfs_variant (default path byte-identity sha-
+  verified), refreshed initramfs+ISO with post-W7 rcl2, kernel untouched,
+  10M/16M sanity boots. Next: independent FINAL suite (9M probe, subset,
+  unedited mempressure gate, poweroff) → sha pin → maiake-f6 ledger ping.
+  USER decisions (trade-off posture + orphaned executor) pending with
+  user; L2-54 relays answer → release doc + integrated-build plan update
+  together. No pushes.
