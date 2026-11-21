@@ -68,13 +68,14 @@ working from this checkout, use `./l2pm/l2pm` instead.
 | `compile` | Shell command to compile the source. Requires `install`. |
 | `install` | Shell command to put package files under `$DESTDIR`. Can be used alone. |
 | `build` | Legacy single command combining compilation and staging. |
-| `deps` | Dependency metadata stored in the package; L2PM does not automatically resolve or install it. |
+| `deps` | Dependency recipe names (whitespace or comma separated). `l2pm add` automatically builds and installs missing dependencies; `l2pm remove` refuses if installed packages depend on the target unless `--force` is given. |
 | `epoch` | Unix timestamp for package metadata. Overrides `SOURCE_DATE_EPOCH`; the fallback is `315532800` (1980-01-01 UTC). |
 
 Do not combine `source` with `repo`, use `ref` without `repo`, or combine
 `build` with either `compile` or `install`. `sha256` is ignored with `repo`.
 Keep names and versions below 128 bytes and each command below 16,384 bytes:
-the current parser uses fixed buffers and silently truncates oversized values.
+the parser rejects oversized values before executing any build commands and
+reports the recipe path, line number, field, and byte limit.
 
 ## How execution works
 
