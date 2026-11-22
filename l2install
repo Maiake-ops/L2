@@ -109,6 +109,7 @@ out_dir()    { printf '%s' "${L2_OUT_DIR:-$L2_SRC/build/out}"; }
 wifi_dir()   { printf '%s' "${L2_WIFI_DIR:-$L2_SRC/build/wifi}"; }
 ssl_dir()    { printf '%s' "${L2_SSL_DIR:-$L2_SRC/build/ssl}"; }
 hw_dir()     { printf '%s' "${L2_HW_DIR:-$L2_SRC/build/hw}"; }
+desktop_dir() { printf '%s' "${L2_DESKTOP_DIR:-}"; }
 config_dir() { printf '%s' "${L2_CONFIG_DIR:-$L2_SRC/config}"; }
 
 # ------------------------------------------------------- live system support
@@ -185,7 +186,8 @@ setup_live() {
     [ -d "$MEDIUM/l2/wifi" ] && L2_WIFI_DIR=$MEDIUM/l2/wifi
     [ -d "$MEDIUM/l2/ssl" ] && L2_SSL_DIR=$MEDIUM/l2/ssl
     [ -d "$MEDIUM/l2/hw" ] && L2_HW_DIR=$MEDIUM/l2/hw
-    export L2_ROOTFS_DIR L2_OUT_DIR L2_CONFIG_DIR L2_WIFI_DIR L2_SSL_DIR L2_HW_DIR
+    [ -d "$MEDIUM/l2/desktop" ] && L2_DESKTOP_DIR=$MEDIUM/l2/desktop
+    export L2_ROOTFS_DIR L2_OUT_DIR L2_CONFIG_DIR L2_WIFI_DIR L2_SSL_DIR L2_HW_DIR L2_DESKTOP_DIR
     ok "live system: using install tools and payloads from the boot medium ($MEDIUM)"
 }
 
@@ -361,6 +363,16 @@ copy_payload_to() {
     [ -f "$_out/vmlinuz-l2" ] || die "kernel missing in $_out"
     run mkdir -p "$_dest"
     run cp -a "$_rf/." "$_dest/"
+    if [ -n "$(desktop_dir)" ] && [ -d "$(desktop_dir)" ]; then
+        run rm -rf "$_dest/usr/lib" "$_dest/usr/share"
+        for _f in "$_dest/lib"/*; do
+            [ -L "$_f" ] && run rm -f "$_f"
+        done
+        for _b in Xorg xterm startx xinit xauth mcookie xkbcomp l2wm l2audio netsurf-fb; do
+            run rm -f "$_dest/bin/$_b"
+        done
+        run cp -a "$(desktop_dir)/." "$_dest/"
+    fi
     if [ "$WITH_WIFI" = 1 ] && [ -d "$(wifi_dir)" ]; then
         run cp -a "$(wifi_dir)/." "$_dest/"
     elif [ -d "$(hw_dir)" ]; then

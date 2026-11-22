@@ -141,6 +141,72 @@ def main() -> int:
                 "\t\t}\n"
                 "\t}",
             ),
+            (
+                "lowmem_reserve_ratio_small",
+                "static int sysctl_lowmem_reserve_ratio[MAX_NR_ZONES] = {\n"
+                "#ifdef CONFIG_ZONE_DMA\n"
+                "\t[ZONE_DMA] = 256,\n"
+                "#endif\n"
+                "#ifdef CONFIG_ZONE_DMA32\n"
+                "\t[ZONE_DMA32] = 256,\n"
+                "#endif\n"
+                "\t[ZONE_NORMAL] = 32,\n"
+                "#ifdef CONFIG_HIGHMEM\n"
+                "\t[ZONE_HIGHMEM] = 0,\n"
+                "#endif\n"
+                "\t[ZONE_MOVABLE] = 0,\n"
+                "};",
+                "static int sysctl_lowmem_reserve_ratio[MAX_NR_ZONES] = {\n"
+                "#ifdef CONFIG_ZONE_DMA\n"
+                "\t[ZONE_DMA] = IS_ENABLED(CONFIG_BASE_SMALL) ? 0 : 256,\n"
+                "#endif\n"
+                "#ifdef CONFIG_ZONE_DMA32\n"
+                "\t[ZONE_DMA32] = IS_ENABLED(CONFIG_BASE_SMALL) ? 0 : 256,\n"
+                "#endif\n"
+                "\t[ZONE_NORMAL] = IS_ENABLED(CONFIG_BASE_SMALL) ? 0 : 32,\n"
+                "#ifdef CONFIG_HIGHMEM\n"
+                "\t[ZONE_HIGHMEM] = 0,\n"
+                "#endif\n"
+                "\t[ZONE_MOVABLE] = 0,\n"
+                "};",
+            ),
+        ],
+    )
+
+    patch_file(
+        kdir / "drivers/nvme/host/pci.c",
+        [
+            (
+                "nvme_max_hmb_small",
+                "static unsigned int max_host_mem_size_mb = 128;",
+                "static unsigned int max_host_mem_size_mb = IS_ENABLED(CONFIG_BASE_SMALL) ? 0 : 128;",
+            ),
+            (
+                "nvme_setup_host_mem_disabled",
+                "static int nvme_setup_host_mem(struct nvme_dev *dev)\n"
+                "{\n"
+                "\tu64 max = (u64)max_host_mem_size_mb * SZ_1M;\n"
+                "\tu64 preferred = (u64)dev->ctrl.hmpre * 4096;\n"
+                "\tu64 min = (u64)dev->ctrl.hmmin * 4096;\n"
+                "\tu32 enable_bits = NVME_HOST_MEM_ENABLE;\n"
+                "\tint ret;\n\n"
+                "\tif (!dev->ctrl.hmpre)\n"
+                "\t\treturn 0;",
+                "static int nvme_setup_host_mem(struct nvme_dev *dev)\n"
+                "{\n"
+                "\tu64 max = (u64)max_host_mem_size_mb * SZ_1M;\n"
+                "\tu64 preferred = (u64)dev->ctrl.hmpre * 4096;\n"
+                "\tu64 min = (u64)dev->ctrl.hmmin * 4096;\n"
+                "\tu32 enable_bits = NVME_HOST_MEM_ENABLE;\n"
+                "\tint ret;\n\n"
+                "\tif (!dev->ctrl.hmpre || !max_host_mem_size_mb)\n"
+                "\t\treturn 0;",
+            ),
+            (
+                "nvme_io_queue_depth_small",
+                "static unsigned int io_queue_depth = 1024;",
+                "static unsigned int io_queue_depth = IS_ENABLED(CONFIG_BASE_SMALL) ? 64 : 1024;",
+            ),
         ],
     )
 

@@ -14,9 +14,9 @@ AGENTS.md
 graphify-out
 /website/
 notes/
-/build-lowram/cache/
+/build-lowram/
+tools/verify-lowram.py
 *.qcow2
 *.ko
 *.tar.xz
 note/
-notes/

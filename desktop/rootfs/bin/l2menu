@@ -1,0 +1,8 @@
+#!/bin/dash
+pid=$(pidof l2wm 2>/dev/null || true)
+if [ -n "$pid" ]; then
+    # shellcheck disable=SC2086
+    exec kill -USR2 $pid
+fi
+echo "l2menu: l2wm is not running" >&2
+exit 1

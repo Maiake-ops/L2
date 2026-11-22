@@ -1,0 +1,27 @@
+! L2 Midnight theme (loaded natively by libXt via XENVIRONMENT)
+XTerm*background: #0d1117
+XTerm*foreground: #e6edf3
+XTerm*cursorColor: #7ebae4
+XTerm*pointerColor: #7ebae4
+XTerm*internalBorder: 10
+XTerm*scrollBar: false
+XTerm*saveLines: 256
+XTerm*font: fixed
+XTerm*backarrowKey: false
+XTerm*ttyModes: erase ^?
+XTerm*color0:  #161b22
+XTerm*color1:  #ff7b72
+XTerm*color2:  #7ee787
+XTerm*color3:  #ffa657
+XTerm*color4:  #79c0ff
+XTerm*color5:  #d2a8ff
+XTerm*color6:  #7ebae4
+XTerm*color7:  #b1bac4
+XTerm*color8:  #485466
+XTerm*color9:  #ffa198
+XTerm*color10: #a5f3b0
+XTerm*color11: #ffc680
+XTerm*color12: #a5d6ff
+XTerm*color13: #e2c5ff
+XTerm*color14: #a5d6ff
+XTerm*color15: #f0f6fc

@@ -1,0 +1,19 @@
+#!/bin/dash
+export NETSURFRES=${NETSURFRES:-/usr/share/netsurf}
+[ -r "$NETSURFRES/ca-bundle.txt" ] && export SSL_CERT_FILE="$NETSURFRES/ca-bundle.txt"
+fbw=1280
+fbh=800
+if [ -r /sys/class/graphics/fb0/virtual_size ]; then
+    IFS=, read -r fbw fbh < /sys/class/graphics/fb0/virtual_size || { fbw=1280; fbh=800; }
+fi
+w=$((fbw - 4))
+h=$((fbh - 28))
+[ "$w" -lt 320 ] && w=320
+[ "$h" -lt 240 ] && h=240
+if [ "$#" -eq 0 ]; then
+    set -- "file://$NETSURFRES/welcome.html"
+fi
+if [ -n "${DISPLAY:-}" ]; then
+    exec /bin/netsurf-fb -f sdl -w "$w" -h "$h" "$@"
+fi
+exec /bin/netsurf-fb -w "$w" -h "$h" "$@"

@@ -1,3 +1,6 @@
 #!/bin/dash
+[ -f /run/l2-vol ] || printf '75 0\n' > /run/l2-vol 2>/dev/null || true
+export XENVIRONMENT=/etc/X11/Xresources
 xterm -fn fixed -sl 256 -e /bin/dash -i &
+(sleep 1; echo 3 > /proc/sys/vm/drop_caches; echo 100000 > /proc/sys/vm/percpu_pagelist_high_fraction; echo 1 > /proc/sys/vm/stat_refresh) 2>/dev/null &
 exec l2wm

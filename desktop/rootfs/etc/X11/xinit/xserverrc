@@ -2,6 +2,26 @@
 # L2 has devtmpfs but no udev daemon. Enumerate connected devices at session start.
 set -eu
 umask 077
+
+# Ensure any I2C/HID touchpad modules are bound if modules.alias is available.
+krel=$(cat /proc/sys/kernel/osrelease 2>/dev/null || true)
+if [ -n "$krel" ] && [ -r "/lib/modules/$krel/modules.alias" ]; then
+    for bus in platform i2c hid; do
+        mods=""
+        for mf in /sys/bus/"$bus"/devices/*/modalias; do
+            [ -r "$mf" ] || continue
+            read -r a < "$mf" || continue
+            [ -n "$a" ] && mods="$mods $a"
+        done
+        if [ -n "$mods" ]; then
+            set -f
+            # shellcheck disable=SC2086
+            modprobe -a -q $mods 2>/dev/null || true
+            set +f
+        fi
+    done
+fi
+
 session=/run/l2-x11
 mkdir -p "$session"
 conf=$session/xorg.conf
@@ -9,27 +29,78 @@ cp /etc/X11/xorg.conf "$conf"
 layout=$session/layout
 printf 'Section "ServerLayout"\n Identifier "Desktop"\n Screen "Screen"\n' > "$layout"
 keyboard= pointer=
+has_syn=0
+[ -e /usr/lib/xorg/modules/input/synaptics_drv.so ] && has_syn=1
+
 for event in /sys/class/input/event*; do
     [ -r "$event/device/capabilities/ev" ] || continue
     read -r bits < "$event/device/capabilities/ev"
-    read -r keys < "$event/device/capabilities/key"
-    keys=${keys##* }
+    read -r full_keys < "$event/device/capabilities/key"
+    low_key=${full_keys##* }
     role=SendCoreEvents
-    if [ "$((0x$keys & 0x40000000))" -ne 0 ]; then
+    is_tp=0
+    props=0
+    [ -r "$event/device/properties" ] && read -r props < "$event/device/properties"
+
+    if [ "$((0x$low_key & 0x40000000))" -ne 0 ]; then
         if [ -z "$keyboard" ]; then role=CoreKeyboard; keyboard=1; fi
     elif [ "$((0x$bits & 12))" -ne 0 ]; then
         if [ -z "$pointer" ]; then role=CorePointer; pointer=1; fi
+        if [ "$has_syn" = 1 ] && [ "$((0x$bits & 8))" -ne 0 ]; then
+            devname=""
+            [ -r "$event/device/name" ] && read -r devname < "$event/device/name"
+            set -f
+            # Word 6 from right covers keycodes 0x140..0x17f (bit 0x20 = BTN_TOOL_FINGER).
+            # shellcheck disable=SC2086
+            set -- $full_keys
+            while [ "$#" -gt 6 ]; do shift; done
+            w6=0
+            [ "$#" -eq 6 ] && w6=$1
+            set +f
+            case "$devname" in
+                *[Tt]ouch[Pp]ad*|*[Tt]rack[Pp]ad*|*SynPS/2*|*ETPS/2*|*AlpsPS/2*|*FSPPS/2*) is_tp=1 ;;
+            esac
+            [ "$((0x$w6 & 0x20))" -ne 0 ] && is_tp=1
+            [ "$((0x${props:-0} & 4))" -ne 0 ] && is_tp=1
+        fi
     else
         continue
     fi
+
     name=${event##*/}
-    cat >> "$conf" <<DEVICE
+    if [ "$is_tp" = 1 ]; then
+        cat >> "$conf" <<DEVICE
+Section "InputDevice"
+    Identifier "$name"
+    Driver "synaptics"
+    Option "Device" "/dev/input/$name"
+    Option "TapButton1" "1"
+    Option "TapButton2" "3"
+    Option "TapButton3" "2"
+    Option "ClickFinger1" "1"
+    Option "ClickFinger2" "3"
+    Option "ClickFinger3" "2"
+    Option "VertTwoFingerScroll" "on"
+    Option "HorizTwoFingerScroll" "on"
+    Option "VertEdgeScroll" "on"
+    Option "PalmDetect" "1"
+DEVICE
+        if [ "$((0x${props:-0} & 4))" -ne 0 ]; then
+            cat >> "$conf" <<'CLICKPAD'
+    Option "ClickPad" "true"
+    Option "SoftButtonAreas" "50% 0 82% 0 0 0 0 0"
+CLICKPAD
+        fi
+        printf 'EndSection\n' >> "$conf"
+    else
+        cat >> "$conf" <<DEVICE
 Section "InputDevice"
     Identifier "$name"
     Driver "evdev"
     Option "Device" "/dev/input/$name"
 EndSection
 DEVICE
+    fi
     printf ' InputDevice "%s" "%s"\n' "$name" "$role" >> "$layout"
 done
 cat "$layout" >> "$conf"

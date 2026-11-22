@@ -1494,9 +1494,13 @@ _make_iso() {
     if [ "$wifi" = 1 ]; then
         [ -d "$BUILD/wifi" ] || die "wifi pack missing; run: l2 build wifipack"
         mkdir -p "$isod/l2/wifi"; cp -a "$BUILD/wifi/." "$isod/l2/wifi/"
-    elif [ -d "$BUILD/hw" ]; then
-        # core ISO: on-demand hardware drivers ride on the medium, not in RAM
+    fi
+    if [ -d "$BUILD/hw" ]; then
+        # on-demand hardware drivers ride on the medium, not in RAM
         mkdir -p "$isod/l2/hw"; cp -a "$BUILD/hw/." "$isod/l2/hw/"
+    fi
+    if [ "$label" = desktop ] && [ -d "$BUILD/desktop/pack" ]; then
+        mkdir -p "$isod/l2/desktop"; cp -a "$BUILD/desktop/pack/." "$isod/l2/desktop/"
     fi
     # disk-install tools (sgdisk/mke2fs/mkfs.fat/limine) ride on the medium so
     # `l2install disk` works from inside the live system; zero idle RAM cost

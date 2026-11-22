@@ -39,15 +39,22 @@ have_wifi_hw() {
 # Live ISO: they sit on the boot medium (never copied into RAM); mount it,
 # point /lib/modules and the firmware search path at it.
 find_pack() {
-    [ -d "$MODDIR/$KREL" ] && [ -f "$MODDIR/$KREL/modules.dep" ] && return 0
+    _pref=${1:-wifi}
+    if [ -d "$MODDIR/$KREL" ] && [ -f "$MODDIR/$KREL/modules.dep" ]; then
+        [ ! -L "$MODDIR/$KREL" ] && return 0
+        [ "$_pref" = hw ] && return 0
+        case $(readlink "$MODDIR/$KREL" 2>/dev/null) in */l2/wifi/*) return 0 ;; esac
+    fi
     # Pack trust chain, step 1 (N1/F1): only a medium carrying the L2-LIVE
     # marker may supply packs.  Any other inserted medium is untrusted:
     # never load its modules/firmware or run its binaries as root.
     # Step 2 (manifest hash vs the /etc/l2/pack-hash pin, see
     # docs/armageddon/p2-pack-pin-contract.md) slots in before use_pack.
     if [ -f "$MEDIUM/l2/L2-LIVE" ]; then
+        [ "$_pref" = hw ] && [ -d "$MEDIUM/l2/hw" ] && { use_pack "$MEDIUM/l2/hw"; return 0; }
         [ -d "$MEDIUM/l2/wifi" ] && { use_pack "$MEDIUM/l2/wifi"; return 0; }
         [ -d "$MEDIUM/l2/hw" ] && { use_pack "$MEDIUM/l2/hw"; return 0; }
+        [ -d "$MEDIUM/l2/desktop" ] && return 0
     fi
     # No block device at all (initramfs-only boot, no medium): nothing to find,
     # so do not spend ~10s retrying.  Real hardware always has a boot device.
@@ -65,8 +72,10 @@ find_pack() {
             [ -b "$d" ] || continue
             mount -t iso9660 -o ro,nodev,nosuid "$d" "$MEDIUM" 2>/dev/null || continue
             if [ -f "$MEDIUM/l2/L2-LIVE" ]; then
+                if [ "$_pref" = hw ] && [ -d "$MEDIUM/l2/hw" ]; then use_pack "$MEDIUM/l2/hw"; return 0; fi
                 if [ -d "$MEDIUM/l2/wifi" ]; then use_pack "$MEDIUM/l2/wifi"; return 0; fi
                 if [ -d "$MEDIUM/l2/hw" ]; then use_pack "$MEDIUM/l2/hw"; return 0; fi
+                if [ -d "$MEDIUM/l2/desktop" ]; then return 0; fi
                 # An L2 live medium without a pack will not grow one: stop
                 # searching instead of retrying for ~10s on every core-ISO boot.
                 umount "$MEDIUM" 2>/dev/null; return 1
@@ -89,8 +98,8 @@ use_pack() {
 }
 
 # Load only modules whose alias matches a device that exists.
-# Two passes: host/platform buses first (creates i2c/hid/usb child buses),
-# then child buses.
+# Probe in bus hierarchy order (PCI/ACPI -> platform -> i2c -> hid) so multi-level
+# devices such as I2C-HID touchpads bind through to hid-multitouch in one call.
 probe_modaliases() {
     _list=""
     for f in "$@"; do
@@ -117,8 +126,10 @@ load_modules() {
     [ -f "$MODDIR/$KREL/modules.alias" ] || return 0
     probe_modaliases /sys/bus/pci/devices/*/modalias /sys/bus/usb/devices/*/modalias \
                      /sys/bus/acpi/devices/*/modalias /sys/bus/platform/devices/*/modalias
-    probe_modaliases /sys/bus/i2c/devices/*/modalias /sys/bus/hid/devices/*/modalias \
+    probe_modaliases /sys/bus/platform/devices/*/modalias /sys/bus/i2c/devices/*/modalias \
                      /sys/bus/usb/devices/*/modalias
+    probe_modaliases /sys/bus/i2c/devices/*/modalias /sys/bus/hid/devices/*/modalias
+    probe_modaliases /sys/bus/hid/devices/*/modalias
     echo 3 > /proc/sys/vm/drop_caches 2>/dev/null
     return 0
 }
@@ -245,9 +256,13 @@ boot() {
     ip link set lo up 2>/dev/null
     mkdir -p /run "$MEDIUM"
     unblock
-    # Load on-demand drivers (hw pack / wifi pack) only for hardware that is
-    # actually present, matched by modalias.  Nothing is loaded at idle otherwise.
-    find_pack >/dev/null 2>&1 && load_modules
+    # Load on-demand drivers only for hardware that is needed at idle.
+    # Defer the Wi-Fi stack (~5.5 MiB) until a saved network exists or l2wifi runs.
+    if [ "$WIFI" != off ] && grep -qs '^network=' "$CONF" 2>/dev/null; then
+        find_pack wifi >/dev/null 2>&1 && load_modules
+    else
+        find_pack hw >/dev/null 2>&1 && load_modules
+    fi
     if [ "$ETH" != off ]; then
         _pending=""
         for i in $(eth_ifaces); do
