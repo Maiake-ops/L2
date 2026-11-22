@@ -32,11 +32,26 @@ keyboard= pointer=
 has_syn=0
 [ -e /usr/lib/xorg/modules/input/synaptics_drv.so ] && has_syn=1
 
+key_w6() {
+    set -f
+    # shellcheck disable=SC2086
+    set -- $1
+    while [ "$#" -gt 6 ]; do shift; done
+    if [ "$#" -eq 6 ]; then
+        w6=$1
+        while [ "${#w6}" -gt 4 ]; do w6=${w6#?}; done
+    else
+        w6=0
+    fi
+    set +f
+}
+
 for event in /sys/class/input/event*; do
     [ -r "$event/device/capabilities/ev" ] || continue
     read -r bits < "$event/device/capabilities/ev"
     read -r full_keys < "$event/device/capabilities/key"
     low_key=${full_keys##* }
+    while [ "${#low_key}" -gt 8 ]; do low_key=${low_key#?}; done
     role=SendCoreEvents
     is_tp=0
     props=0
@@ -49,14 +64,7 @@ for event in /sys/class/input/event*; do
         if [ "$has_syn" = 1 ] && [ "$((0x$bits & 8))" -ne 0 ]; then
             devname=""
             [ -r "$event/device/name" ] && read -r devname < "$event/device/name"
-            set -f
-            # Word 6 from right covers keycodes 0x140..0x17f (bit 0x20 = BTN_TOOL_FINGER).
-            # shellcheck disable=SC2086
-            set -- $full_keys
-            while [ "$#" -gt 6 ]; do shift; done
-            w6=0
-            [ "$#" -eq 6 ] && w6=$1
-            set +f
+            key_w6 "$full_keys"
             case "$devname" in
                 *[Tt]ouch[Pp]ad*|*[Tt]rack[Pp]ad*|*SynPS/2*|*ETPS/2*|*AlpsPS/2*|*FSPPS/2*) is_tp=1 ;;
             esac
