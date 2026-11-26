@@ -2043,7 +2043,8 @@ struct txn_saved {
 struct txn {
     const char *profile;
     int have_gen;
-    long gen;       /* active generation at begin, -1 when none */
+    long gen;           /* active generation at begin, -1 when none */
+    long start_max_gen; /* highest existing generation at begin, -1 when none */
     struct txn_saved *saved;
     size_t n, cap;
 };
@@ -2056,12 +2057,24 @@ static void txn_begin(struct txn *t, const char *profile)
     memset(t, 0, sizeof(*t));
     t->profile = profile;
     t->gen = -1;
+    t->start_max_gen = -1;
     char *pdir = l2path("var/profiles");
     char target[MAXPATH];
     long g = -1;
     if (read_active_gen(pdir, profile, target, sizeof(target), &g) == 0) {
         t->have_gen = 1;
         t->gen = g;
+        t->start_max_gen = g;
+    }
+    DIR *d = opendir(pdir);
+    if (d) {
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            long eg = 0;
+            if (parse_gen_for_profile(e->d_name, profile, &eg) && eg > t->start_max_gen)
+                t->start_max_gen = eg;
+        }
+        closedir(d);
     }
     free(pdir);
 }
@@ -2115,16 +2128,18 @@ static int txn_record(struct txn *t, const char *name)
 static void txn_restore_profile(struct txn *t)
 {
     char *pdir = l2path("var/profiles");
+    int mutated = 0;
     DIR *d = opendir(pdir);
     if (d) {
         struct dirent *e;
         while ((e = readdir(d))) {
             long g = 0;
             if (!parse_gen_for_profile(e->d_name, t->profile, &g)) continue;
-            if (t->have_gen && g <= t->gen) continue;
+            if (g <= t->start_max_gen) continue;
             char *p = fmt("%s/%s", pdir, e->d_name);
             rm_rf(p);
             free(p);
+            mutated = 1;
         }
         closedir(d);
     }
@@ -2135,9 +2150,13 @@ static void txn_restore_profile(struct txn *t)
     } else {
         char *cur = fmt("%s/%s", pdir, t->profile);
         struct stat st;
-        if (lstat(cur, &st) == 0 && S_ISLNK(st.st_mode)) unlink(cur);
+        if (lstat(cur, &st) == 0 && S_ISLNK(st.st_mode)) {
+            unlink(cur);
+            mutated = 1;
+        }
         free(cur);
     }
+    if (mutated) fsync_dir(pdir);
     free(pdir);
 }
 
@@ -2147,11 +2166,16 @@ static void txn_abort(struct txn *t)
         struct txn_saved *s = &t->saved[i - 1];
         char *dbp = l2path("var/db/installed/%s", s->name);
         char *mpp = l2path("var/db/installed/%s.manifest", s->name);
-        if (s->db) write_file_atomic(dbp, s->db, strlen(s->db));
-        else unlink(dbp);
         if (s->manifest) write_file_atomic(mpp, s->manifest, strlen(s->manifest));
         else unlink(mpp);
+        if (s->db) write_file_atomic(dbp, s->db, strlen(s->db));
+        else unlink(dbp);
         free(dbp); free(mpp);
+    }
+    if (t->n > 0) {
+        char *dbdir = l2path("var/db/installed");
+        fsync_dir(dbdir);
+        free(dbdir);
     }
     txn_restore_profile(t);
     if (t->n > 0)
@@ -2494,6 +2518,7 @@ static int cmd_build(int argc, char **argv)
 
 static int install_tar(const char *file, const char *profile, struct txn *t)
 {
+    (void)profile;
     ensure_layout();
     /* Hash the whole archive before anything is extracted. */
     char hash[65];
@@ -2561,9 +2586,11 @@ static int install_tar(const char *file, const char *profile, struct txn *t)
     }
     pl_free(&decl_deps);
     if (txn_record(t, name) != 0) { free(store); return 1; }
-    if (db_write(name, ver, hash, store, deps) != 0) { free(store); return 1; }
+    /* Write manifest before DB entry so a crash never exposes a DB entry
+     * without its integrity manifest. Profile rebuild is deferred to the end
+     * of the transaction so multi-package installs produce one atomic gen. */
     if (manifest_write(name, store) != 0) { free(store); return 1; }
-    if (rebuild_profile(profile) != 0) { free(store); return 1; }
+    if (db_write(name, ver, hash, store, deps) != 0) { free(store); return 1; }
     printf("installed %s %s -> %s\n", name, ver, store);
     free(store);
     return 0;
@@ -2587,6 +2614,7 @@ static int cmd_install(int argc, char **argv)
     for (size_t i = 0; i < files.n; i++) {
         if (install_tar(files.v[i], profile, &t) != 0) { rc = 1; break; }
     }
+    if (rc == 0 && rebuild_profile(profile) != 0) rc = 1;
     if (rc != 0) txn_abort(&t);
     else txn_commit(&t);
     l2pm_unlock(lfd);
@@ -2695,6 +2723,7 @@ static int cmd_add(int argc, char **argv)
     struct txn t;
     txn_begin(&t, profile);
     int rc = add_recipe_rec(arg, NULL, profile, trust, no_deps, &stack, 0, &t);
+    if (rc == 0 && rebuild_profile(profile) != 0) rc = 1;
     if (rc != 0) txn_abort(&t);
     else txn_commit(&t);
     l2pm_unlock(lfd);
@@ -2773,6 +2802,11 @@ static int cmd_remove(int argc, char **argv)
         unlink(mp);
         free(db); free(mp);
         if (rc != 0) break;
+    }
+    if (rc == 0) {
+        char *dbdir = l2path("var/db/installed");
+        if (fsync_dir(dbdir) != 0) rc = 1;
+        free(dbdir);
     }
     if (rc == 0 && rebuild_profile(profile) != 0) rc = 1;
     if (rc != 0) {
@@ -3118,6 +3152,9 @@ static int cmd_rollback(int argc, char **argv)
     char *intent_done = l2path("var/rollback-intent");
     unlink(intent_done);
     free(intent_done);
+    char *vdir = l2path("var");
+    fsync_dir(vdir);
+    free(vdir);
     l2pm_unlock(lfd);
     printf("rolled back %s to generation %ld\n", profile, target_gen);
     return 0;
@@ -3222,6 +3259,9 @@ static int cmd_verify(int argc, char **argv)
                                      !strcmp(cur, rel);
                         if ((active || switch_profile_symlink(pdir, prof, rel) == 0) &&
                             unlink(ip) == 0) {
+                            char *vdir = l2path("var");
+                            fsync_dir(vdir);
+                            free(vdir);
                             printf("repaired: completed interrupted rollback of %s to generation %ld\n",
                                    prof, gen);
                             done = 1;
@@ -3234,6 +3274,7 @@ static int cmd_verify(int argc, char **argv)
             if (!done) {
                 fprintf(stderr, "l2pm: rollback recovery incomplete; retaining intent for retry\n");
                 free(ip); pl_free(&profiles); free(pdir);
+                l2pm_unlock(lfd);
                 return 1;
             }
         }
@@ -3265,8 +3306,8 @@ static int cmd_verify(int argc, char **argv)
                             dbstore && is_dir(dbstore) && dbver && valid_name(dbver);
                 free(dbnm); free(dbstore); free(dbver);
                 if (valid) continue;
-                if (db_write(g->name, g->version, g->hash, g->store, g->deps) == 0 &&
-                    manifest_write(g->name, g->store) == 0)
+                if (manifest_write(g->name, g->store) == 0 &&
+                    db_write(g->name, g->version, g->hash, g->store, g->deps) == 0)
                     printf("repaired: reconstructed database entry for %s from generation %ld\n",
                            g->name, gen);
                 else { printf("BROKEN %s: cannot reconstruct database entry\n", g->name); bad++; }
@@ -3359,21 +3400,46 @@ static int cmd_verify(int argc, char **argv)
     pl_free(&dblines);
 
     if (repair) {
-        /* Stale staging artifacts from crashed runs (dot-prefixed temps
-         * created by rebuild_profile / switch_profile_symlink). */
+        /* Stale staging artifacts from crashed runs (dot-prefixed temps in
+         * var/profiles, plus .tmp-<pid> files/dirs in var/db/installed, var,
+         * and store). */
         DIR *sd = opendir(pdir);
         if (sd) {
+            int swept = 0;
             struct dirent *e;
             while ((e = readdir(sd))) {
                 if (e->d_name[0] != '.') continue;
                 if (!strstr(e->d_name, "-tmp-") && !strstr(e->d_name, ".link-") &&
-                    !strstr(e->d_name, ".old-")) continue;
+                    !strstr(e->d_name, ".old-") && !strstr(e->d_name, ".tmp-")) continue;
                 char *full = fmt("%s/%s", pdir, e->d_name);
                 rm_rf(full);
                 printf("repaired: removed stale temporary artifact %s\n", e->d_name);
                 free(full);
+                swept = 1;
             }
             closedir(sd);
+            if (swept) fsync_dir(pdir);
+        }
+        const char *tmp_dirs[] = { "var/db/installed", "var", "store", NULL };
+        for (int ti = 0; tmp_dirs[ti]; ti++) {
+            char *tdir = l2path("%s", tmp_dirs[ti]);
+            DIR *td = opendir(tdir);
+            if (td) {
+                int swept = 0;
+                struct dirent *e;
+                while ((e = readdir(td))) {
+                    if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+                    if (!strstr(e->d_name, ".tmp-")) continue;
+                    char *full = fmt("%s/%s", tdir, e->d_name);
+                    rm_rf(full);
+                    printf("repaired: removed stale temporary artifact %s\n", e->d_name);
+                    free(full);
+                    swept = 1;
+                }
+                closedir(td);
+                if (swept) fsync_dir(tdir);
+            }
+            free(tdir);
         }
         /* Unreferenced store paths: report only, never delete (gc's job). */
         struct pathlist refs = {0};

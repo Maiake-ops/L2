@@ -148,6 +148,24 @@ class TransactionRollback(L2pmTxnBase):
         self.assertIn("installed oka 1.0", r.stdout)
         self.assertIn("installed okb 1.0", r.stdout)
         self.assertEqual(self.db_names(), ["oka", "okb"])
+        # M08: deferred single-gen rebuild produces 1 generation for multi-pkg install
+        self.assertEqual(self.gen_dirs(), ["default-1-link"])
+        self.l2pm("verify")
+
+    def test_failed_add_after_rollback_preserves_higher_gens(self):
+        # M08: start_max_gen ensures a failed transaction after rollback to
+        # gen 1 does NOT delete pre-existing gen 2.
+        self.write_recipe("p1")
+        self.write_recipe("p2")
+        self.write_recipe("bad", install="false")
+        self.l2pm("add", "p1")
+        self.l2pm("add", "p2")
+        self.l2pm("rollback", "1")
+        self.assertEqual(self.active_link(), "default-1-link")
+        self.assertEqual(self.gen_dirs(), ["default-1-link", "default-2-link"])
+        self.l2pm("add", "bad", ok=False)
+        self.assertEqual(self.active_link(), "default-1-link")
+        self.assertEqual(self.gen_dirs(), ["default-1-link", "default-2-link"])
         self.l2pm("verify")
 
     def test_install_single_failure_leaves_no_db_entry(self):
@@ -348,9 +366,17 @@ class TornStateRepair(L2pmTxnBase):
         (stale / "usr/f").write_text("x\n")
         lnk = p / ".default.link-99999"
         os.symlink("default-1-link", lnk)
+        # M08: stale .tmp-* artifacts in db/installed, var, and store are also swept
+        db_tmp = self.root / "l2/var/db/installed/.ta.tmp-99999"
+        db_tmp.write_text("stale\n")
+        store_tmp = self.root / "l2/store/deadbeef-ta-1.0.tmp-99999"
+        store_tmp.mkdir()
+        (store_tmp / "f").write_text("stale\n")
         self.l2pm("verify", "--repair")
         self.assertFalse(stale.exists())
         self.assertFalse(lnk.is_symlink())
+        self.assertFalse(db_tmp.exists())
+        self.assertFalse(store_tmp.exists())
         self.assertEqual(self.gen_dirs(), ["default-1-link"])
         self.l2pm("verify")
 
