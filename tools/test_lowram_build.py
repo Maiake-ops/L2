@@ -1,4 +1,5 @@
 """Regression checks for the VM image builder in private output directories."""
+import ast
 import gzip
 import os
 from pathlib import Path
@@ -11,6 +12,32 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class LowramBuild(unittest.TestCase):
+    def test_kernel_patch_mismatch_preserves_earlier_files(self):
+        patcher = ROOT / "tools/patch-kernel-ram.py"
+        # Use the first group's expected source text to make a minimal fixture.
+        first_patch = next(
+            node for node in ast.walk(ast.parse(patcher.read_text(encoding="utf-8")))
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id == "patch_file"
+        )
+        original = "\n".join(old for _, old, _ in ast.literal_eval(first_patch.args[1]))
+        with tempfile.TemporaryDirectory() as temp:
+            source = Path(temp)
+            first = source / "mm/page_alloc.c"
+            first.parent.mkdir()
+            first.write_text(original)
+            later = source / "drivers/nvme/host/pci.c"
+            later.parent.mkdir(parents=True)
+            later.write_text("source differs from expected patch input\n")
+
+            for _ in range(2):
+                result = subprocess.run(
+                    ["python3", patcher, source], capture_output=True, text=True, timeout=10,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("hunk 'nvme_max_hmb_small' expected 1 match, found 0", result.stderr)
+                self.assertEqual(first.read_text(), original)
+
     def test_kernel_configuration_failure_stops_build(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

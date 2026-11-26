@@ -19,24 +19,25 @@ from pathlib import Path
 import sys
 
 
-def patch_file(path: Path, replacements: list[tuple[str, str, str]]) -> None:
-    text = path.read_text(encoding="utf-8")
-    for label, old, new in replacements:
-        count = text.count(old)
-        if count != 1:
-            raise SystemExit(
-                f"patch-kernel-ram: {path}: hunk '{label}' expected 1 match, found {count}"
-            )
-        text = text.replace(old, new, 1)
-    path.write_text(text, encoding="utf-8")
-
-
 def main() -> int:
     if len(sys.argv) != 2:
         raise SystemExit(f"usage: {sys.argv[0]} LINUX_SRC_DIR")
     kdir = Path(sys.argv[1])
     if not (kdir / "mm/page_alloc.c").is_file():
         raise SystemExit(f"patch-kernel-ram: invalid kernel source dir: {kdir}")
+
+    pending: dict[Path, str] = {}
+
+    def patch_file(path: Path, replacements: list[tuple[str, str, str]]) -> None:
+        text = path.read_text(encoding="utf-8")
+        for label, old, new in replacements:
+            count = text.count(old)
+            if count != 1:
+                raise SystemExit(
+                    f"patch-kernel-ram: {path}: hunk '{label}' expected 1 match, found {count}"
+                )
+            text = text.replace(old, new, 1)
+        pending[path] = text
 
     patch_file(
         kdir / "mm/page_alloc.c",
@@ -600,6 +601,8 @@ def main() -> int:
         ],
     )
 
+    for path, text in pending.items():
+        path.write_text(text, encoding="utf-8")
     print(f"patch-kernel-ram: patched {kdir}")
     return 0
 
