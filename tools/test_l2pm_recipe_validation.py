@@ -60,6 +60,14 @@ class RecipeValidation(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn('sha256:', result.stdout)
 
+    def test_embedded_nul_in_recipe_rejected(self):
+        self.recipe.write_bytes(b'name=test\nversion=1\nbuild=true\x00evil\n')
+        result = subprocess.run([str(REPO / 'l2pm/l2pm'), 'build', str(self.recipe)],
+                                env=self.env, cwd=self.root, capture_output=True,
+                                text=True, timeout=20)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('NUL', result.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

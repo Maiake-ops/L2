@@ -398,6 +398,43 @@ install = mkdir -p "$DESTDIR" && echo local > "$DESTDIR/f"
         self.assertIn("installed dualpkg 1.0", r.stdout)
         self.assertEqual((self.store_entries()[0] / "f").read_text().strip(), "local")
 
+    # ---------------------------------------------------- M07 trust & fetch
+    @unittest.skipUnless(shutil.which("curl"), "curl not available")
+    def test_remote_recipe_esc_escaped_in_trust_gate(self):
+        raw = self.scratch / "raw-esc"
+        raw.mkdir()
+        # ANSI escape sequence trying to hide the install command
+        (raw / "escpkg.recipe").write_bytes(
+            f"name = escpkg\nversion = 1.0\nepoch = {EPOCH}\n"
+            f"install = \x1b[2K# hidden\n".encode()
+        )
+        r = self.l2pm("add", "escpkg", ok=False,
+                      extra_env={"L2PM_RECIPE_REPO": f"file://{raw}"})
+        self.assertNotIn("\x1b", r.stderr, "raw ESC leaked to terminal!")
+        self.assertIn("\\x1b", r.stderr)
+
+    @unittest.skipUnless(HAVE_GIT, "git not available")
+    def test_git_repo_option_and_ext_protocol_rejected(self):
+        canary = self.scratch / "git-pwned"
+        for bad_repo in (f"--upload-pack=touch {canary}",
+                         f"ext::sh -c touch% {canary}"):
+            self.write_recipe("badrepo", f"""name = badrepo
+version = 1.0
+epoch = {EPOCH}
+repo = {bad_repo}
+ref = {"a" * 40}
+install = true
+""")
+            r = self.l2pm("build", "badrepo", ok=False)
+            self.assertIn("unsafe git repo URL", r.stderr)
+            self.assertFalse(canary.exists(), f"repo injection ran: {bad_repo}")
+
+    def test_remote_recipe_repo_option_injection_rejected(self):
+        for bad_base in ("--config=/etc/passwd", "gopher://127.0.0.1/x"):
+            r = self.l2pm("add", "anypkg", ok=False,
+                          extra_env={"L2PM_RECIPE_REPO": bad_base})
+            self.assertIn("unsafe L2PM_RECIPE_REPO", r.stderr)
+
     def test_bare_name_not_shadowed_by_cwd_file(self):
         # an unrelated file named like the recipe in the CWD must not win
         (self.scratch / "shadowpkg").write_text("#!/bin/sh\n# not a recipe\n")

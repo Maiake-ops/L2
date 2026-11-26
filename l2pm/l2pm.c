@@ -1133,8 +1133,14 @@ static int parse_recipe(const char *path, struct recipe *r)
     ssize_t n;
     size_t line_number = 0;
     while ((n = getline(&line, &cap, f)) >= 0) {
-        (void)n;
         line_number++;
+        if (memchr(line, 0, (size_t)n) != NULL) {
+            fprintf(stderr, "l2pm: recipe %s:%zu: embedded NUL byte not permitted\n",
+                    path, line_number);
+            free(line);
+            fclose(f);
+            return -1;
+        }
         char *s = trim(line);
         if (!*s || *s == '#') continue;
         char *eq = strchr(s, '=');
@@ -1284,6 +1290,28 @@ static int verify_sha256(const char *file, const char *want)
     return 0;
 }
 
+static int valid_url_chars(const char *s)
+{
+    if (!s || !*s || s[0] == '-') return 0;
+    for (const char *p = s; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x21 || c == 0x7f) return 0;
+    }
+    return 1;
+}
+
+static int valid_git_url(const char *s)
+{
+    if (!valid_url_chars(s)) return 0;
+    if (!strncasecmp(s, "ext::", 5) || !strncasecmp(s, "fd::", 4)) return 0;
+    if (!strncmp(s, "https://", 8) || !strncmp(s, "http://", 7) ||
+        !strncmp(s, "git://", 6) || !strncmp(s, "ssh://", 6) ||
+        !strncmp(s, "git@", 4) || !strncmp(s, "file://", 7) ||
+        s[0] == '/' || (s[0] == '.' && s[1] == '/'))
+        return 1;
+    return 0;
+}
+
 static int fetch_source(const struct recipe *r, const char *cache, const char *srcdir)
 {
     if (!r->source[0]) { mkdir_p(srcdir, 0755); return 0; }
@@ -1297,17 +1325,47 @@ static int fetch_source(const struct recipe *r, const char *cache, const char *s
         else free(local);
     }
     if (!file && (!strncmp(r->source, "http://", 7) || !strncmp(r->source, "https://", 8))) {
-        const char *base = strrchr(r->source, '/');
-        base = base ? base + 1 : "source.tar";
+        if (!valid_url_chars(r->source)) {
+            fprintf(stderr, "l2pm: unsafe source URL: %s\n", r->source);
+            return -1;
+        }
+        const char *slash = strrchr(r->source, '/');
+        const char *raw_base = (slash && slash[1]) ? slash + 1 : "source.tar";
+        size_t blen = strcspn(raw_base, "?#");
+        char base[256];
+        if (blen == 0 || blen >= sizeof(base) || raw_base[0] == '.' || raw_base[0] == '-') {
+            snprintf(base, sizeof(base), "source.tar");
+        } else {
+            memcpy(base, raw_base, blen);
+            base[blen] = 0;
+        }
         file = fmt("%s/%s", cache, base);
         if (access(file, R_OK) != 0) {
+            char *part = fmt("%s.part-%ld", file, (long)getpid());
             char *q = shq(r->source);
-            char *qf = shq(file);
-            char *cmd = fmt("curl -fL --retry 3 --connect-timeout 20 -o %s %s || wget -O %s %s",
-                            qf, q, qf, q);
+            char *qp = shq(part);
+            char *cmd = fmt("curl -fL --proto =http,https --proto-redir =http,https "
+                            "--retry 3 --connect-timeout 20 -o %s -- %s || "
+                            "wget -O %s -- %s",
+                            qp, q, qp, q);
             int rc = run_shell(cmd, NULL, 0);
-            free(cmd); free(q); free(qf);
-            if (rc != 0) { free(file); return -1; }
+            free(cmd); free(q); free(qp);
+            if (rc != 0 || verify_sha256(part, r->sha256) != 0) {
+                unlink(part);
+                free(part);
+                free(file);
+                return -1;
+            }
+            int pfd = open(part, O_RDONLY | O_CLOEXEC);
+            if (pfd >= 0) { fsync(pfd); close(pfd); }
+            if (rename(part, file) != 0) {
+                unlink(part);
+                free(part);
+                free(file);
+                return -1;
+            }
+            fsync_dir(cache);
+            free(part);
         }
     }
     if (!file) {
@@ -1331,10 +1389,12 @@ static int fetch_source(const struct recipe *r, const char *cache, const char *s
             if (fl >= el && !strcmp(file + fl - el, exts[i])) { is_tar = 1; break; }
         }
         if (is_tar) {
-            char *q = shq(file), *d = shq(srcdir);
-            char *cmd = fmt("tar -xf %s -C %s", q, d);
+            char *safe_file = (file[0] == '-') ? fmt("./%s", file) : xstrdup(file);
+            char *safe_dir = (srcdir[0] == '-') ? fmt("./%s", srcdir) : xstrdup(srcdir);
+            char *q = shq(safe_file), *d = shq(safe_dir);
+            char *cmd = fmt("tar -C %s -xf %s", d, q);
             int rc = run_shell(cmd, NULL, 0);
-            free(cmd); free(q); free(d);
+            free(cmd); free(q); free(d); free(safe_file); free(safe_dir);
             if (rc != 0) { free(file); return -1; }
         } else {
             const char *bn = strrchr(file, '/');
@@ -1410,6 +1470,10 @@ static int fetch_repo(const struct recipe *r, const char *cache, const char *src
         fprintf(stderr, "l2pm: git is required for repo= sources (l2 deps install)\n");
         return -1;
     }
+    if (!valid_git_url(r->repo)) {
+        fprintf(stderr, "l2pm: unsafe git repo URL: %s\n", r->repo);
+        return -1;
+    }
     if (!valid_ref(r->ref)) {
         fprintf(stderr, "l2pm: bad git ref: %s\n", r->ref);
         return -1;
@@ -1424,7 +1488,7 @@ static int fetch_repo(const struct recipe *r, const char *cache, const char *src
     struct stat st;
     if (stat(gdir, &st) != 0) {
         char *qr = shq(r->repo), *qg = shq(gdir);
-        char *cmd = fmt("git clone --quiet %s %s", qr, qg);
+        char *cmd = fmt("git -c protocol.ext.allow=never clone --quiet -- %s %s", qr, qg);
         int rc = run_shell(cmd, NULL, 0);
         free(cmd); free(qr); free(qg);
         if (rc != 0) {
@@ -1434,11 +1498,11 @@ static int fetch_repo(const struct recipe *r, const char *cache, const char *src
         }
     } else {
         /* Best effort: a cached clone keeps working offline. */
-        if (run_shell("git fetch --quiet origin", gdir, 1) != 0)
+        if (run_shell("git -c protocol.ext.allow=never fetch --quiet origin", gdir, 1) != 0)
             fprintf(stderr, "l2pm: git fetch failed; using the cached clone (offline?)\n");
     }
     char *qref = shq(r->ref);
-    char *cmd = fmt("git checkout --quiet --detach %s", qref);
+    char *cmd = fmt("git checkout --quiet --detach %s --", qref);
     int rc = run_shell(cmd, gdir, 0);
     free(cmd); free(qref);
     if (rc != 0) {
@@ -2127,10 +2191,47 @@ static int recipe_trusted(const char *hash)
 static void recipe_trust_add(const char *hash, const char *path)
 {
     char *p = l2path("var/trusted-recipes");
-    FILE *f = fopen(p, "a");
-    if (f) { fprintf(f, "%s  %s\n", hash, path); fclose(f); }
-    else fprintf(stderr, "l2pm: warning: cannot record trusted recipe: %s\n", strerror(errno));
+    char *vdir = l2path("var");
+    char *line = fmt("%s  %s\n", hash, path);
+    int fd = open(p, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd >= 0) {
+        if (write_all(fd, line, strlen(line)) != 0 || fsync(fd) != 0)
+            fprintf(stderr, "l2pm: warning: failed to sync trusted recipe: %s\n", strerror(errno));
+        close(fd);
+        fsync_dir(vdir);
+    } else {
+        fprintf(stderr, "l2pm: warning: cannot record trusted recipe: %s\n", strerror(errno));
+    }
+    free(line);
+    free(vdir);
     free(p);
+}
+
+/* Print a remote recipe safely to stderr: escape NUL, ESC, CR, and any other
+ * control/non-printable byte as \xNN so a hostile recipe cannot hide commands
+ * via terminal escape sequences or embedded NUL truncation. */
+static void print_recipe_escaped(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    fprintf(stderr, "---- %s ----\n", path);
+    unsigned char buf[4096];
+    size_t total = 0;
+    for (;;) {
+        ssize_t r = read(fd, buf, sizeof(buf));
+        if (r < 0) { if (errno == EINTR) continue; break; }
+        if (r == 0) break;
+        for (ssize_t i = 0; i < r && total < READ_SMALL_MAX; i++, total++) {
+            unsigned char c = buf[i];
+            if ((c >= 0x20 && c <= 0x7e) || c == '\n' || c == '\t')
+                fputc(c, stderr);
+            else
+                fprintf(stderr, "\\x%02x", c);
+        }
+        if (total >= READ_SMALL_MAX) break;
+    }
+    close(fd);
+    fprintf(stderr, "\n---- end ----\n");
 }
 
 static int trust_gate(const char *path, int remote, int trust_flag)
@@ -2145,8 +2246,7 @@ static int trust_gate(const char *path, int remote, int trust_flag)
         return 0;
     }
     fprintf(stderr, "l2pm: recipe fetched from a remote repository; it will run shell commands:\n");
-    char *txt = read_small(path);
-    if (txt) { fprintf(stderr, "---- %s ----\n%s\n---- end ----\n", path, txt); free(txt); }
+    print_recipe_escaped(path);
     if (!isatty(0)) {
         fprintf(stderr, "l2pm: refusing to execute an untrusted remote recipe; "
                         "review it and re-run with --trust\n");
@@ -2190,6 +2290,11 @@ static char *recipe_repo_fetch(const char *name)
     free(cachedir);
 
     if (is_git_repo_url(base)) {
+        if (!valid_git_url(base)) {
+            fprintf(stderr, "l2pm: unsafe L2PM_RECIPE_REPO URL: %s\n", base);
+            free(dest);
+            return NULL;
+        }
         if (!git_available()) {
             fprintf(stderr, "l2pm: git is required for a git recipe repository (l2 deps install)\n");
             free(dest);
@@ -2199,7 +2304,7 @@ static char *recipe_repo_fetch(const char *name)
         struct stat st;
         if (stat(repo, &st) != 0) {
             char *qb = shq(base), *qr = shq(repo);
-            char *cmd = fmt("git clone --quiet %s %s", qb, qr);
+            char *cmd = fmt("git -c protocol.ext.allow=never clone --quiet -- %s %s", qb, qr);
             int rc = run_shell(cmd, NULL, 0);
             free(cmd); free(qb); free(qr);
             if (rc != 0) {
@@ -2207,7 +2312,7 @@ static char *recipe_repo_fetch(const char *name)
                 free(repo); free(dest);
                 return NULL;
             }
-        } else if (run_shell("git fetch --quiet origin", repo, 1) != 0) {
+        } else if (run_shell("git -c protocol.ext.allow=never fetch --quiet origin", repo, 1) != 0) {
             fprintf(stderr, "l2pm: recipe repo fetch failed; using the cached clone (offline?)\n");
         }
         const char *ref = getenv("L2PM_RECIPE_REPO_REF");
@@ -2218,7 +2323,7 @@ static char *recipe_repo_fetch(const char *name)
                 return NULL;
             }
             char *qref = shq(ref);
-            char *cmd = fmt("git checkout --quiet --detach %s", qref);
+            char *cmd = fmt("git checkout --quiet --detach %s --", qref);
             int rc = run_shell(cmd, repo, 0);
             free(cmd); free(qref);
             if (rc != 0) {
@@ -2231,18 +2336,12 @@ static char *recipe_repo_fetch(const char *name)
             /* Follow the remote default branch tip (fetch only moves the
              * remote-tracking refs, not the working tree).  Offline this
              * stays at the last fetched tip, which is what we want. */
-            if (run_shell("git checkout --quiet --detach origin/HEAD", repo, 1) != 0)
+            if (run_shell("git checkout --quiet --detach origin/HEAD --", repo, 1) != 0)
                 fprintf(stderr, "l2pm: warning: cannot update recipe repo tip; using the cached checkout\n");
         }
         char *src = fmt("%s/%s.recipe", repo, name);
         int have = access(src, R_OK) == 0;
-        if (have) {
-            char *qs = shq(src), *qd = shq(dest);
-            char *cp = fmt("cp %s %s", qs, qd);
-            int rc = run_shell(cp, NULL, 1);
-            free(cp); free(qs); free(qd);
-            have = rc == 0;
-        }
+        if (have) have = copy_tree(src, dest) == 0;
         free(src);
         free(repo);
         if (have) return dest;
@@ -2250,14 +2349,31 @@ static char *recipe_repo_fetch(const char *name)
         return NULL;
     }
 
-    /* raw base URL */
+    /* raw base URL: allow only http://, https://, or file:// */
+    if (!valid_url_chars(base) ||
+        (strncmp(base, "https://", 8) != 0 &&
+         strncmp(base, "http://", 7) != 0 &&
+         strncmp(base, "file://", 7) != 0)) {
+        fprintf(stderr, "l2pm: unsafe L2PM_RECIPE_REPO URL: %s\n", base);
+        free(dest);
+        return NULL;
+    }
+    const char *proto = !strncmp(base, "file://", 7) ? "=file" : "=http,https";
     char *url = fmt("%s/%s.recipe", base, name);
-    char *part = fmt("%s.part", dest);
+    char *part = fmt("%s.part-%ld", dest, (long)getpid());
     char *q = shq(url), *qp = shq(part);
-    char *cmd = fmt("curl -fsSL --connect-timeout 20 -o %s %s || wget -q -O %s %s", qp, q, qp, q);
+    char *cmd = fmt("curl -fsSL --proto %s --proto-redir =http,https --connect-timeout 20 -o %s -- %s || "
+                    "wget -q -O %s -- %s", proto, qp, q, qp, q);
     int rc = run_shell(cmd, NULL, 1);
     free(cmd); free(q); free(qp);
+    if (rc == 0) {
+        int pfd = open(part, O_RDONLY | O_CLOEXEC);
+        if (pfd >= 0) { fsync(pfd); close(pfd); }
+    }
     if (rc == 0 && rename(part, dest) == 0) {
+        char *cdir = l2path("cache/recipes");
+        fsync_dir(cdir);
+        free(cdir);
         free(part); free(url);
         return dest;
     }
