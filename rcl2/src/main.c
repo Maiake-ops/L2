@@ -75,7 +75,9 @@ struct ksysinfo {
 
 /* ------------------------------------------------------------------ data */
 
-static struct rcl_conf g_conf;                         /* ~8.5KB, static    */
+/* Hot supervision state & small globals first so they share the initial
+ * writable page; g_conf is placed last so unused service slots (svcs[4..15],
+ * ~6 KiB) stay unfaulted zero pages in PID 1's RSS. */
 static char       *g_svc_argv[RCL_MAX_SVCS][RCL_MAX_ARGS + 2];
 static char       *g_svc_env[RCL_MAX_ENV + 6];
 
@@ -92,6 +94,8 @@ static volatile unsigned char g_closing;               /* shutdown underway */
 /* log line buffer: only touched from the main loop, never from handlers */
 static char     g_line[256];
 static unsigned g_len;
+
+static struct rcl_conf g_conf;                         /* ~8.5KB, placed last */
 
 extern void rcl_sigreturn(void);
 void rcl_enter(unsigned long *sp);
@@ -548,6 +552,7 @@ static void conf_default(void)
     slog("no config - default shell service active");
 }
 
+__attribute__((noinline))
 static void conf_load(void)
 {
     char iobuf[CFG_RAW_CAP];
@@ -595,6 +600,7 @@ static int cmdline_ws(int c)
  * the last complete token: a flag cut mid-token must neither fire
  * spuriously nor pass silently (the dropped tail is logged).
  * Unreadable -> normal boot. */
+__attribute__((noinline))
 static unsigned cmdline_flags(void)
 {
     char iobuf[CMDLINE_CAP];
