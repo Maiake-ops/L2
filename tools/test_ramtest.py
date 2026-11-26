@@ -92,3 +92,15 @@ class Ramtest(unittest.TestCase):
                 return True
             self.guest.read_until.side_effect = reply
             self.assertEqual(ramtest.boot_medium(self.args), expected)
+
+
+class GuestCloseTest(unittest.TestCase):
+    def test_guest_close_closes_pipes(self):
+        g = object.__new__(ramtest.Guest)
+        g.p = Mock()
+        g.p.poll.return_value = 0
+        g.p.stdin = Mock()
+        g.p.stdout = Mock()
+        g.close()
+        g.p.stdin.close.assert_called_once()
+        g.p.stdout.close.assert_called_once()

@@ -26,22 +26,26 @@ test: check
 check:
 	bash -n l2
 	bash -n lib/desktop.sh
+	bash -n tools/l2-lowram
 	sh -n desktop/rootfs/etc/X11/xinit/xserverrc
 	sh -n desktop/rootfs/etc/X11/xinit/xinitrc
 	bash -n lib/l2ui.sh
 	sh -n lib/l2ui.sh
 	sh -n l2fetch
 	sh -n l2install
+	sh -n tools/mkimage.sh
 	sh -n overlay/bin/l2net
 	sh -n overlay/bin/openssl
+	sh -n overlay/bin/shutdown
 	sh -n overlay/etc/l2/udhcpc.script
 	sh -n overlay/etc/l2/serial-getty
-	python3 -m py_compile tools/patch-kernel-ram.py
+	python3 -m py_compile tools/patch-kernel-ram.py tools/ramtest.py tools/lowram_matrix.py tools/test-live-install.py tools/test-stability.py tools/verify-lowram.py
 	python3 tools/ramtest.py --selftest
 	python3 -m unittest discover -s tools -p 'test_ramtest.py'
 	python3 -m unittest discover -s tools -p 'test_lowram_matrix.py'
 	python3 -m unittest discover -s tools -p 'test_lowram_build.py'
 	python3 -m unittest discover -s tools -p 'test_stability_harness.py'
+	python3 -m unittest discover -s tools -p 'test_l2_security.py'
 	$(MAKE) -C rcl2 test
 	python3 -m unittest discover -s tools -p 'test_rcl2_lifecycle.py'
 	$(MAKE) -C l2pm
@@ -54,6 +58,7 @@ check:
 	python3 -m unittest discover -s tools -p 'test_l2gpt.py'
 	python3 -m unittest discover -s tools -p 'test_l2install.py'
 	python3 -m unittest discover -s tools -p 'test_l2net.py'
+	python3 -m unittest discover -s tools -p 'test_pack_pin.py'
 	$(MAKE) -C l2wifi
 	python3 -m unittest discover -s tools -p 'test_l2wifi.py'
 
@@ -68,5 +73,8 @@ stability:
 
 clean:
 	rm -rf build
+	$(MAKE) -C rcl2 clean
 	$(MAKE) -C l2pm clean
 	$(MAKE) -C l2wifi clean
+	rm -f l2gpt/l2gpt l2audio/l2audio
+	rm -rf tools/__pycache__

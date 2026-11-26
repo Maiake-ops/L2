@@ -109,11 +109,14 @@ def parse_meminfo(text):
 
 
 def used_kib(info):
-    """used = MemTotal - MemAvailable (fallback MemFree+Cached, like ramtest)."""
+    """used = MemTotal - MemAvailable (fallback MemFree+Buffers+Cached+SReclaimable-Shmem)."""
     if "MemTotal" not in info:
         raise ValueError("meminfo has no MemTotal")
-    avail = info.get("MemAvailable", info.get("MemFree", 0) + info.get("Cached", 0))
-    return info["MemTotal"] - avail
+    avail = info.get("MemAvailable")
+    if avail is None:
+        avail = (info.get("MemFree", 0) + info.get("Buffers", 0) + info.get("Cached", 0)
+                 + info.get("SReclaimable", 0) - info.get("Shmem", 0))
+    return info["MemTotal"] - min(info["MemTotal"], max(0, avail))
 
 
 def classify(log):
@@ -372,8 +375,34 @@ def run_one(a, size, mode):
             g.buf = b""
             r["spawn_ok"] = g.send("/bin/dash -c 'echo L2SPAWN''OK'") and \
                 g.read_until(b"L2SPAWNOK\r", 20)
+            if not r["spawn_ok"]:
+                text = bytes(g.all).decode(errors="replace")
+                r["signature"] = classify(text)
+                r["last_ts"] = last_timestamp(text)
+                r["tail"] = log_tail(text)
+                r["reason"] = "shell spawn probe failed"
+                return r
+            if not g.send("poweroff"):
+                r["reason"] = "could not send poweroff"
+                return r
+            try:
+                status = g.p.wait(timeout=min(a.timeout, 30.0))
+            except subprocess.TimeoutExpired:
+                text = bytes(g.all).decode(errors="replace")
+                r["signature"] = classify(text)
+                r["last_ts"] = last_timestamp(text)
+                r["tail"] = log_tail(text)
+                r["reason"] = "guest did not power off cleanly"
+                return r
+            r["qemu_exit"] = status
+            if status != 0:
+                text = bytes(g.all).decode(errors="replace")
+                r["signature"] = classify(text)
+                r["last_ts"] = last_timestamp(text)
+                r["tail"] = log_tail(text)
+                r["reason"] = f"QEMU exited with status {status} on poweroff"
+                return r
             r["status"] = "PASS"
-            g.send("poweroff")   # best effort; close() kills regardless
             return r
         finally:
             g.close()

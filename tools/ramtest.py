@@ -54,8 +54,8 @@ class Guest:
         self.buf = b""
 
     def read_until(self, token, timeout):
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             r, _, _ = select.select([self.p.stdout], [], [], 0.5)
             if r:
                 chunk = os.read(self.p.stdout.fileno(), 65536)
@@ -94,10 +94,20 @@ class Guest:
 
     def close(self):
         try:
-            self.p.kill()
+            if self.p.poll() is None:
+                self.p.kill()
         except Exception:
             pass
-        self.p.wait()
+        try:
+            self.p.wait(timeout=10)
+        except Exception:
+            pass
+        for fh in (self.p.stdin, self.p.stdout):
+            if fh is not None:
+                try:
+                    fh.close()
+                except OSError:
+                    pass
 
 
 def accel():

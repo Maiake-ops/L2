@@ -84,6 +84,8 @@ class MeminfoParsing(unittest.TestCase):
     def test_available_fallback(self):
         info = lm.parse_meminfo("MemTotal: 10000 kB\nMemFree: 1000 kB\nCached: 4000 kB\n")
         self.assertEqual(lm.used_kib(info), 5000)
+        info_shmem = {"MemTotal": 10000, "MemFree": 1000, "Cached": 4000, "Shmem": 2000}
+        self.assertEqual(lm.used_kib(info_shmem), 7000)
 
     def test_missing_total_raises(self):
         with self.assertRaises(ValueError):
@@ -263,6 +265,52 @@ class SummaryRendering(unittest.TestCase):
     def test_empty_results(self):
         md = lm.render_summary([], {})
         self.assertIn("PASS 0 / FAIL 0 / SKIPPED 0", md)
+
+
+class RunOneGates(unittest.TestCase):
+    def _run_with_guest(self, spawn_ok=True, poweroff_exit=0, poweroff_timeout=False):
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import MagicMock
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(
+                outdir=tmp, smp=2, iso="l2.iso", kernel=None, initrd=None,
+                cmdline="", ovmf=None, forensics=False, timeout=5.0, settle=0.0,
+            )
+            fake_guest = MagicMock()
+            fake_guest.all = bytearray(b"L2# ")
+            fake_guest.dead = False
+            fake_guest.read_until.side_effect = lambda tok, _t: True if tok == lm.PROMPT else spawn_ok
+            fake_guest.meminfo.return_value = {"MemTotal": 8192, "MemAvailable": 4096}
+            fake_guest.probe.return_value = (True, "7.3.3-l2\n")
+            fake_guest.send.return_value = True
+            if poweroff_timeout:
+                fake_guest.p.wait.side_effect = lm.subprocess.TimeoutExpired("qemu", 5)
+            else:
+                fake_guest.p.wait.return_value = poweroff_exit
+            with patch.object(lm, "Guest", return_value=fake_guest):
+                return lm.run_one(args, 16, "bios")
+
+    def test_spawn_failure_fails_run(self):
+        r = self._run_with_guest(spawn_ok=False)
+        self.assertEqual(r["status"], "FAIL")
+        self.assertIn("spawn", r["reason"])
+
+    def test_poweroff_timeout_fails_run(self):
+        r = self._run_with_guest(spawn_ok=True, poweroff_timeout=True)
+        self.assertEqual(r["status"], "FAIL")
+        self.assertIn("power off", r["reason"])
+
+    def test_poweroff_nonzero_fails_run(self):
+        r = self._run_with_guest(spawn_ok=True, poweroff_exit=1)
+        self.assertEqual(r["status"], "FAIL")
+        self.assertIn("status 1", r["reason"])
+
+    def test_clean_spawn_and_poweroff_passes(self):
+        r = self._run_with_guest(spawn_ok=True, poweroff_exit=0)
+        self.assertEqual(r["status"], "PASS")
+        self.assertEqual(r["qemu_exit"], 0)
 
 
 if __name__ == "__main__":
