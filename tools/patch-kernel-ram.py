@@ -15,20 +15,51 @@ Reduces early-boot reserved RAM and memory-scaling floors under CONFIG_BASE_SMAL
   7. Unpack initramfs synchronously before device_initcall and progressively free
      consumed external initrd pages during gzip decompression.
 """
+import os
 from pathlib import Path
 import sys
+import tempfile
 
 
-def main() -> int:
-    if len(sys.argv) != 2:
-        raise SystemExit(f"usage: {sys.argv[0]} LINUX_SRC_DIR")
-    kdir = Path(sys.argv[1])
+def atomic_write_text(path: Path, text: str) -> None:
+    """Write text to path atomically via sibling temp file + fsync + os.replace."""
+    mode = path.stat().st_mode & 0o7777
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp_path, mode)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    check_only = False
+    if args and args[0] == "--check":
+        check_only = True
+        args = args[1:]
+    if len(args) != 1 or args[0].startswith("-"):
+        raise SystemExit(f"usage: {sys.argv[0]} [--check] LINUX_SRC_DIR")
+    kdir = Path(args[0])
     if not (kdir / "mm/page_alloc.c").is_file():
         raise SystemExit(f"patch-kernel-ram: invalid kernel source dir: {kdir}")
 
     pending: dict[Path, str] = {}
 
     def patch_file(path: Path, replacements: list[tuple[str, str, str]]) -> None:
+        if not path.is_file():
+            raise SystemExit(f"patch-kernel-ram: missing source file: {path}")
         text = path.read_text(encoding="utf-8")
         for label, old, new in replacements:
             count = text.count(old)
@@ -57,10 +88,11 @@ def main() -> int:
                 "\treturn ret;",
                 "\tfor_each_populated_zone(zone)\n"
                 "\t\tzone_set_pageset_high_and_batch(zone, 0);\n"
+                "\tmutex_unlock(&pcp_batch_high_lock);\n"
+                "\tdrain_all_pages(NULL);\n"
+                "\treturn 0;\n"
                 "out:\n"
                 "\tmutex_unlock(&pcp_batch_high_lock);\n"
-                "\tif (!ret && percpu_pagelist_high_fraction != old_percpu_pagelist_high_fraction)\n"
-                "\t\tdrain_all_pages(NULL);\n"
                 "\treturn ret;",
             ),
             (
@@ -130,7 +162,7 @@ def main() -> int:
                 "\t\t\t\t      ac->alloc_flags|ALLOC_WMARK_HIGH|ALLOC_CPUSET, ac);\n"
                 "\tif (page)\n"
                 "\t\tgoto out;\n\n"
-                "\tif (IS_ENABLED(CONFIG_BASE_SMALL)) {\n"
+                "\tif (IS_ENABLED(CONFIG_BASE_SMALL) && (gfp_mask & __GFP_FS)) {\n"
                 "\t\trcu_barrier();\n"
                 "\t\tdrain_all_pages(NULL);\n"
                 "\t\tpage = get_page_from_freelist((gfp_mask | __GFP_HARDWALL) &\n"
@@ -595,14 +627,18 @@ def main() -> int:
                 "\t * Unconditionally reserve the entire first 1M, see comment in\n"
                 "\t * setup_arch().\n"
                 "\t */\n"
-                "\tif (!IS_ENABLED(CONFIG_BASE_SMALL))\n"
+                "\tif (!IS_ENABLED(CONFIG_BASE_SMALL) || memblock_phys_mem_size() >= SZ_64M)\n"
                 "\t\tmemblock_reserve(0, SZ_1M);",
             ),
         ],
     )
 
+    if check_only:
+        print(f"patch-kernel-ram: check ok: {kdir} ({len(pending)} files)")
+        return 0
+
     for path, text in pending.items():
-        path.write_text(text, encoding="utf-8")
+        atomic_write_text(path, text)
     print(f"patch-kernel-ram: patched {kdir}")
     return 0
 
