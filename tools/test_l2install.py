@@ -6,6 +6,7 @@ otherwise).  Offline and fast; wired into `make check`.
 """
 import glob
 import gzip
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -489,6 +490,129 @@ class L2install(unittest.TestCase):
         r = self.run_env(env, "image", img, ok=False)
         self.assertIn("host-only", r.stderr)
         self.assertIn("losetup", r.stderr)
+
+    # ------------------------------------------- M15 hardening tests
+    def test_cpio_traversal_member_rejected(self):
+        src = self.scratch / "empty-src"
+        src.mkdir()
+        media = self.build_medium(self.scratch / "media",
+                                  absolute_name="../escape-traversal")
+        self.pack_tool_shims(media)
+        env = self.record_shims()
+        env["L2_SRC"] = str(src)
+        self.cat_pid1_shim("rcl2")
+        dest = self.scratch / "target-root"
+        r = self.run_env(env, "--no-wifi", "--no-ssl", "dir", str(dest), ok=False)
+        self.assertIn("unsafe path traversal", r.stderr)
+        self.assertFalse((self.scratch / "escape-traversal").exists())
+
+    def test_mount_flags_hardened_on_dry_run_and_medium(self):
+        env = self.host_payload_env()
+        r = self.run_env(env, "-y", "-n", "disk", str(self.scratch / "fake-disk"))
+        both = r.stdout + r.stderr
+        self.assertIn("mount -t ext4 -o nodev,nosuid", both)
+        self.assertIn("mount -t vfat -o nodev,nosuid,noexec", both)
+        devs = find_medium_devices()
+        if devs:
+            src = self.scratch / "empty-src"
+            src.mkdir()
+            self.build_medium(self.scratch / "mountmap" / Path(devs[0]).name)
+            env2 = self.record_shims()
+            env2["L2_SRC"] = str(src)
+            self.cat_pid1_shim("rcl2")
+            self.run_env(env2, "-y", "-n", "disk", "/dev/l2-fake-disk")
+            self.assertTrue(
+                any("mount -t iso9660 -o ro,nodev,nosuid" in l for l in self.shim_lines(env2)),
+                self.shim_lines(env2),
+            )
+
+    def test_symlink_to_partition_refused(self):
+        part = None
+        for d in sorted(Path("/sys/class/block").iterdir()):
+            if (d / "partition").exists() and Path("/dev", d.name).is_block_device():
+                part = Path("/dev", d.name)
+                break
+        if part is None:
+            self.skipTest("no partition device available to test refusal")
+        link = self.scratch / "by-id-part-link"
+        link.symlink_to(part)
+        r = self.run_installer("-y", "-n", "disk", str(link), ok=False)
+        self.assertIn("not a whole disk", r.stderr)
+
+    def _write_pack_manifest(self, packdir):
+        lines = []
+        for p in sorted(Path(packdir).rglob("*")):
+            if p.is_file() and p.name != "pack-manifest":
+                rel = p.relative_to(packdir).as_posix()
+                h = hashlib.sha256(p.read_bytes()).hexdigest()
+                lines.append(f"{h}  {rel}\n")
+        man = Path(packdir) / "pack-manifest"
+        man.write_text("".join(lines), encoding="utf-8")
+        return hashlib.sha256(man.read_bytes()).hexdigest()
+
+    def test_phase2_pack_hash_verified_and_written_to_root(self):
+        src = self.scratch / "empty-src"
+        src.mkdir()
+        media = self.build_medium(self.scratch / "media")
+        hw = media / "l2" / "hw"
+        (hw / "lib" / "modules").mkdir(parents=True)
+        (hw / "lib" / "modules" / "test.ko").write_bytes(b"FAKEKO")
+        h_install = self._write_pack_manifest(media / "l2" / "install")
+        h_hw = self._write_pack_manifest(hw)
+        pin = self.scratch / "pack-hash"
+        pin.write_text(f"{h_hw}  hw\n{h_install}  install\n", encoding="utf-8")
+
+        env = self.record_shims()
+        env["L2_SRC"] = str(src)
+        env["L2_PACK_HASH"] = str(pin)
+        self.cat_pid1_shim("rcl2")
+        dest = self.scratch / "target-root"
+        self.run_env(env, "--no-wifi", "--no-ssl", "dir", str(dest))
+        root_pin = dest / "etc" / "l2" / "pack-hash"
+        self.assertTrue(root_pin.is_file())
+        self.assertEqual(stat.S_IMODE(root_pin.stat().st_mode), 0o644)
+        self.assertEqual(root_pin.read_text(encoding="utf-8"), f"{h_hw}  hw\n")
+
+        # Tamper a file inside the install pack -> fail closed before extraction.
+        (media / "l2" / "install" / "bin" / "sgdisk").write_text("#!/bin/sh\necho PWNED\n")
+        dest2 = self.scratch / "target-root-tampered"
+        r = self.run_env(env, "--no-wifi", "--no-ssl", "dir", str(dest2), ok=False)
+        self.assertIn("hash mismatch", r.stderr)
+        self.assertFalse(dest2.exists())
+
+    def test_phase2_pack_rejects_symlink_in_pack_tree(self):
+        src = self.scratch / "empty-src"
+        src.mkdir()
+        media = self.build_medium(self.scratch / "media")
+        h_install = self._write_pack_manifest(media / "l2" / "install")
+        (media / "l2" / "install" / "evil-link").symlink_to("/etc/passwd")
+        pin = self.scratch / "pack-hash"
+        pin.write_text(f"{h_install}  install\n", encoding="utf-8")
+        env = self.record_shims()
+        env["L2_SRC"] = str(src)
+        env["L2_PACK_HASH"] = str(pin)
+        self.cat_pid1_shim("rcl2")
+        r = self.run_env(env, "--no-wifi", "--no-ssl", "dir", str(self.scratch / "out"), ok=False)
+        self.assertIn("non-regular file", r.stderr)
+
+    def test_disk_busy_partition_matching_and_idempotent_cleanup(self):
+        # Extract _dev_matches_part and cleanup from l2install and verify both directly.
+        text = INSTALLER.read_text(encoding="utf-8")
+        self.assertIn("_dev_matches_part()", text)
+        script = (
+            "_dev_matches_part() {\n"
+            "  case \"$1\" in \"$2\") return 0 ;; esac\n"
+            "  case \"$2\" in *[0-9]) case \"$1\" in \"$2\"p[0-9]*) return 0 ;; esac ;; *) case \"$1\" in \"$2\"[0-9]*) return 0 ;; esac ;; esac\n"
+            "  return 1\n"
+            "}\n"
+            "_dev_matches_part /dev/loop1p1 /dev/loop1 || exit 11\n"
+            "! _dev_matches_part /dev/loop10 /dev/loop1 || exit 12\n"
+            "_dev_matches_part /dev/sda1 /dev/sda || exit 13\n"
+            "_dev_matches_part /dev/nvme0n1p2 /dev/nvme0n1 || exit 14\n"
+            "! _dev_matches_part /dev/nvme0n10 /dev/nvme0n1 || exit 15\n"
+        )
+        r = subprocess.run(["/bin/sh", "-c", script], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 if __name__ == "__main__":

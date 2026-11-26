@@ -137,11 +137,96 @@ find_medium() {
               /dev/vd[a-z] /dev/vd[a-z][0-9] /dev/nvme[0-9]n[0-9] /dev/nvme[0-9]n[0-9]p[0-9] \
               /dev/mmcblk[0-9] /dev/mmcblk[0-9]p[0-9]; do
         [ -b "$_d" ] || continue
-        mount -t iso9660 -o ro "$_d" "$MEDIUM" 2>/dev/null || continue
+        mount -t iso9660 -o ro,nodev,nosuid "$_d" "$MEDIUM" 2>/dev/null || continue
         [ -f "$MEDIUM/l2/L2-LIVE" ] && { MNTED_MEDIUM=1; return 0; }
         umount "$MEDIUM" 2>/dev/null
     done
     return 1
+}
+
+# Phase-2 pack integrity verifier (docs/armageddon/p2-pack-pin-contract.md):
+# verifies pack-manifest against the pin file, validates manifest syntax (A2),
+# rejects non-regular files/symlinks in the pack tree, and checks every file.
+verify_pack() {
+    _vp_name=$1; _vp_dir=$2; _vp_pin=$3
+    [ -r "$_vp_pin" ] || die "pack pin missing: $_vp_pin (refusing unverified $_vp_name pack)"
+    _vp_want=""
+    while IFS= read -r _vp_line; do
+        case "$_vp_line" in
+            *"  $_vp_name")
+                _vp_h=${_vp_line%%  *}
+                if [ "$_vp_h  $_vp_name" = "$_vp_line" ]; then
+                    _vp_want=$_vp_h; break
+                fi
+                ;;
+        esac
+    done < "$_vp_pin"
+    [ -n "$_vp_want" ] || die "no pin entry for pack '$_vp_name' in $_vp_pin"
+    case "$_vp_want" in
+        *[!0-9a-f]*) die "malformed pin hash for '$_vp_name' in $_vp_pin" ;;
+    esac
+    [ "${#_vp_want}" -eq 64 ] || die "malformed pin hash length for '$_vp_name' in $_vp_pin"
+
+    _vp_man="$_vp_dir/pack-manifest"
+    [ -f "$_vp_man" ] && [ ! -L "$_vp_man" ] || die "missing pack-manifest in $_vp_dir"
+    _vp_got=$(sha256sum < "$_vp_man" | cut -d' ' -f1)
+    [ "$_vp_got" = "$_vp_want" ] || die "pack-manifest hash mismatch for '$_vp_name'"
+
+    # A2: pack tree must contain only regular files and directories (no symlinks/devices/FIFOs).
+    _vp_badtype=$(find "$_vp_dir" ! -type f ! -type d 2>/dev/null | head -n 1)
+    [ -z "$_vp_badtype" ] || die "non-regular file in pack '$_vp_name': $_vp_badtype"
+
+    _vp_cr=$(printf '\r')
+    _vp_seen=$(mktemp "${TMPDIR:-/tmp}/l2pack.XXXXXX") || die "mktemp failed"
+    _vp_count=0
+    while IFS= read -r _vp_line || [ -n "$_vp_line" ]; do
+        case "$_vp_line" in *"$_vp_cr"*) rm -f "$_vp_seen"; die "CRLF in $_vp_man" ;; esac
+        _vp_h=${_vp_line%%  *}
+        _vp_p=${_vp_line#*  }
+        if [ "$_vp_h  $_vp_p" != "$_vp_line" ] || [ "${#_vp_h}" -ne 64 ]; then
+            rm -f "$_vp_seen"; die "malformed line in $_vp_man"
+        fi
+        case "$_vp_h" in *[!0-9a-f]*) rm -f "$_vp_seen"; die "non-hex hash in $_vp_man" ;; esac
+        case "$_vp_p" in
+            ''|/*|..|../*|*/../*|*/..|pack-manifest)
+                rm -f "$_vp_seen"; die "unsafe path in $_vp_man: $_vp_p" ;;
+        esac
+        if grep -Fqx -- "$_vp_p" "$_vp_seen" 2>/dev/null; then
+            rm -f "$_vp_seen"; die "duplicate path in $_vp_man: $_vp_p"
+        fi
+        printf '%s\n' "$_vp_p" >> "$_vp_seen"
+        _vp_f="$_vp_dir/$_vp_p"
+        [ -f "$_vp_f" ] && [ ! -L "$_vp_f" ] || { rm -f "$_vp_seen"; die "missing file in pack '$_vp_name': $_vp_p"; }
+        _vp_fh=$(sha256sum < "$_vp_f" | cut -d' ' -f1)
+        [ "$_vp_fh" = "$_vp_h" ] || { rm -f "$_vp_seen"; die "hash mismatch in pack '$_vp_name': $_vp_p"; }
+        _vp_count=$((_vp_count + 1))
+    done < "$_vp_man"
+    rm -f "$_vp_seen"
+
+    _vp_actual=$(find "$_vp_dir" -type f ! -name pack-manifest 2>/dev/null | wc -l)
+    [ "$_vp_actual" -eq "$_vp_count" ] || die "unlisted file in pack '$_vp_name' (manifest=$_vp_count, actual=$_vp_actual)"
+}
+
+pack_pin_file() { printf '%s' "${L2_PACK_HASH:-/etc/l2/pack-hash}"; }
+
+write_root_pack_hash() {
+    _wr_dest=$1; _wr_tmp="$_wr_dest/etc/l2/pack-hash.tmp"
+    : > "$_wr_tmp"
+    if have sha256sum; then
+        for _wr_pair in "wifi:$(wifi_dir)" "hw:$(hw_dir)" "ssl:$(ssl_dir)"; do
+            _wr_name=${_wr_pair%%:*}
+            _wr_dir=${_wr_pair#*:}
+            if [ "$_wr_name" = wifi ] && [ "$WITH_WIFI" != 1 ]; then continue; fi
+            if [ "$_wr_name" = ssl ] && [ "$WITH_SSL" != 1 ]; then continue; fi
+            if [ -f "$_wr_dir/pack-manifest" ] && [ ! -L "$_wr_dir/pack-manifest" ]; then
+                _wr_h=$(sha256sum < "$_wr_dir/pack-manifest" | cut -d' ' -f1)
+                printf '%s  %s\n' "$_wr_h" "$_wr_name" >> "$_wr_tmp"
+            fi
+        done
+    fi
+    LC_ALL=C sort -k2,2 -o "$_wr_tmp" "$_wr_tmp"
+    chmod 0644 "$_wr_tmp"
+    mv -f "$_wr_tmp" "$_wr_dest/etc/l2/pack-hash"
 }
 
 setup_live() {
@@ -160,6 +245,10 @@ setup_live() {
     LIVE=1
     _pack=$MEDIUM/l2/install
     [ -x "$_pack/bin/sgdisk" ] || die "live medium has no install tools pack (rebuild: l2 build installpack && l2 iso)"
+    _pin=$(pack_pin_file)
+    if [ -e "$_pin" ]; then
+        verify_pack install "$_pack" "$_pin"
+    fi
     PATH="$_pack/bin:$PATH"; export PATH
     # stage a build/out-shaped tree of symlinks into the medium + pack
     PAYLOAD=$(mktemp -d "${TMPDIR:-/tmp}/l2install.XXXXXX")
@@ -173,6 +262,13 @@ setup_live() {
     # Verify the gzip stream first: in a POSIX sh pipeline only cpio's exit
     # status is visible, so a corrupt medium could otherwise slip through.
     gzip -t "$MEDIUM/boot/initramfs" || die "corrupt initramfs on the boot medium"
+    # Pre-scan cpio member names to reject '..' path traversal before extraction.
+    _bad_cpio=$(gzip -dc "$MEDIUM/boot/initramfs" | cpio -t 2>/dev/null | while IFS= read -r _m; do
+        case "$_m" in
+            ..|../*|*/../*|*/..) printf '%s\n' "$_m"; break ;;
+        esac
+    done)
+    [ -z "$_bad_cpio" ] || die "unsafe path traversal in medium initramfs: $_bad_cpio"
     # F3 defense in depth: strip absolute member paths explicitly where cpio
     # supports it (GNU).  The live guest's busybox cpio lacks the long option
     # but strips leading '/' by default - probe so that flow keeps working.
@@ -214,27 +310,40 @@ size_of() {  # device -> bytes
     echo 0
 }
 
-disk_busy() {  # device in use: mounted, active swap, or held by dm/md?
+_dev_matches_part() {  # candidate, whole-disk
+    case "$1" in "$2") return 0 ;; esac
+    case "$2" in
+        *[0-9]) case "$1" in "$2"p[0-9]*) return 0 ;; esac ;;
+        *)      case "$1" in "$2"[0-9]*)  return 0 ;; esac ;;
+    esac
+    return 1
+}
+
+disk_busy() {  # device in use: mounted, active swap, or held by dm/md (disk or partitions)?
     _d=$(readlink -f "$1" 2>/dev/null) || _d=$1
     [ -n "$_d" ] || _d=$1
-    # held by device-mapper / md (LVM, RAID, crypt)?
-    if [ -d "/sys/class/block/${_d##*/}/holders" ]; then
-        for _h in "/sys/class/block/${_d##*/}/holders"/*; do
+    _base=${_d##*/}
+    # held by device-mapper / md (LVM, RAID, crypt) on the disk OR any partition?
+    if [ -d "/sys/class/block/$_base/holders" ]; then
+        for _h in "/sys/class/block/$_base/holders"/*; do
             [ -e "$_h" ] && return 0
         done
     fi
+    for _h in "/sys/class/block/$_base"/"$_base"*/holders/*; do
+        [ -e "$_h" ] && return 0
+    done
     # Mounted?  Resolve mount sources too: they may be /dev/mapper/...,
     # /dev/disk/by-uuid/... or other aliases of the same device.  Match the
     # disk itself and its partitions (sda1, nvme0n1p1, ...).
     while read -r _src _rest; do
         _s=$(readlink -f "$_src" 2>/dev/null) || _s=$_src
-        case "$_s" in "$_d"|"$_d"[0-9]*|"$_d"p[0-9]*) return 0 ;; esac
+        _dev_matches_part "$_s" "$_d" && return 0
     done < /proc/mounts
     # Active swap would be destroyed just as thoroughly as a mount.
     if [ -r /proc/swaps ]; then
         while read -r _src _rest; do
             _s=$(readlink -f "$_src" 2>/dev/null) || _s=$_src
-            case "$_s" in "$_d"|"$_d"[0-9]*|"$_d"p[0-9]*) return 0 ;; esac
+            _dev_matches_part "$_s" "$_d" && return 0
         done < /proc/swaps
     fi
     return 1
@@ -300,11 +409,13 @@ cleanup() {
     # with MNT env overrides an early failure must not umount a stranger's
     # mount.  F14: a medium we mounted is released on the host path; the
     # live system keeps it mounted - packs run from it.
-    [ "$MNTED_ESP" = 1 ] && umount "$MNT/boot/efi" 2>/dev/null
-    [ "$MNTED_ROOT" = 1 ] && umount "$MNT" 2>/dev/null
-    [ "$MNTED_MEDIUM" = 1 ] && [ "$LIVE" != 1 ] && umount "$MEDIUM" 2>/dev/null
-    [ -n "$LOOPDEV" ] && losetup -d "$LOOPDEV" 2>/dev/null
-    [ -n "$PAYLOAD" ] && rm -rf "$PAYLOAD" 2>/dev/null
+    # Idempotent: clear each resource flag before releasing so repeated calls
+    # (e.g. explicit cleanup + EXIT trap) never double-umount or double-detach.
+    if [ "$MNTED_ESP" = 1 ]; then MNTED_ESP=0; umount "$MNT/boot/efi" 2>/dev/null; fi
+    if [ "$MNTED_ROOT" = 1 ]; then MNTED_ROOT=0; umount "$MNT" 2>/dev/null; fi
+    if [ "$MNTED_MEDIUM" = 1 ] && [ "$LIVE" != 1 ]; then MNTED_MEDIUM=0; umount "$MEDIUM" 2>/dev/null; fi
+    if [ -n "$LOOPDEV" ]; then _ld=$LOOPDEV; LOOPDEV=""; losetup -d "$_ld" 2>/dev/null; fi
+    if [ -n "$PAYLOAD" ]; then _pl=$PAYLOAD; PAYLOAD=""; rm -rf "$_pl" 2>/dev/null; fi
     return 0
 }
 
@@ -322,6 +433,8 @@ partuuid_of() {
 
 preflight() {  # device
     _dev=$1
+    _cdev=$(readlink -f "$_dev" 2>/dev/null || true)
+    [ -n "$_cdev" ] && _dev=$_cdev
     [ "$(uname -m)" = x86_64 ] || die "disk install needs x86_64 (rcl2 and the L2 kernel are x86_64)"
     [ "$DRY" = 1 ] || [ "$(id -u)" -eq 0 ] || die "run as root: sudo $0 disk $_dev"
     for _t in sgdisk mkfs.ext4 mkfs.fat blkid mount umount; do
@@ -376,16 +489,22 @@ copy_payload_to() {
         done
         run cp -a "$(desktop_dir)/." "$_dest/"
     fi
+    _pin=$(pack_pin_file)
     if [ "$WITH_WIFI" = 1 ] && [ -d "$(wifi_dir)" ]; then
+        [ "$LIVE" = 1 ] && [ -e "$_pin" ] && verify_pack wifi "$(wifi_dir)" "$_pin"
         run cp -a "$(wifi_dir)/." "$_dest/"
     elif [ -d "$(hw_dir)" ]; then
         # on-demand hardware drivers (the wifi pack already supersedes these);
         # also the fallback when no wifi pack is available (e.g. the core ISO)
+        [ "$LIVE" = 1 ] && [ -e "$_pin" ] && verify_pack hw "$(hw_dir)" "$_pin"
         run cp -a "$(hw_dir)/." "$_dest/"
     elif [ "$WITH_WIFI" = 1 ]; then
         warn "no wifi pack in $(wifi_dir) (l2 build wifipack); installing without wifi"
     fi
-    if [ "$WITH_SSL" = 1 ] && [ -d "$(ssl_dir)" ]; then run cp -a "$(ssl_dir)/." "$_dest/"; fi
+    if [ "$WITH_SSL" = 1 ] && [ -d "$(ssl_dir)" ]; then
+        [ "$LIVE" = 1 ] && [ -e "$_pin" ] && verify_pack ssl "$(ssl_dir)" "$_pin"
+        run cp -a "$(ssl_dir)/." "$_dest/"
+    fi
     run mkdir -p "$_dest/boot" "$_dest/etc/l2" "$_dest/dev" "$_dest/run" "$_dest/tmp" "$_dest/proc" "$_dest/sys"
     run install -m 0644 "$_out/vmlinuz-l2" "$_dest/boot/vmlinuz"
     run install -m 0644 "$_out/initramfs-l2" "$_dest/boot/initramfs"
@@ -398,6 +517,7 @@ copy_payload_to() {
     fi
     if [ "$DRY" != 1 ]; then
         : > "$_dest/etc/l2/installed"
+        write_root_pack_hash "$_dest"
         [ -s "$_dest/etc/l2/version" ] || printf 'L2 %s\n' "$APP_VERSION" > "$_dest/etc/l2/version"
         printf '%s\n' "$HOSTNAME_NEW" > "$_dest/etc/hostname"
         printf '127.0.0.1 localhost %s\n::1 localhost\n' "$HOSTNAME_NEW" > "$_dest/etc/hosts"
@@ -429,6 +549,8 @@ verify_install() {  # root mount, esp mount, esp dev, root dev
 install_disk() {
     _dev=${1:-}
     [ -n "$_dev" ] || { _dev=$(pick_disk) || die "no disk selected"; [ "$_dev" = cancel ] && die "cancelled"; }
+    _cdev=$(readlink -f "$_dev" 2>/dev/null || true)
+    [ -n "$_cdev" ] && _dev=$_cdev
     STEP_T=7; [ "$VERIFY" = 1 ] && STEP_T=8
     # Trap before setup_live: it stages a PAYLOAD temp tree that must be
     # cleaned up even when a later step dies.
@@ -460,10 +582,10 @@ install_disk() {
 
     stage "mount"
     run mkdir -p "$MNT"
-    run mount "$_root" "$MNT"
+    run mount -t ext4 -o nodev,nosuid "$_root" "$MNT"
     [ "$DRY" = 1 ] || MNTED_ROOT=1
     run mkdir -p "$MNT/boot/efi"
-    run mount "$_esp" "$MNT/boot/efi"
+    run mount -t vfat -o nodev,nosuid,noexec "$_esp" "$MNT/boot/efi"
     [ "$DRY" = 1 ] || MNTED_ESP=1
 
     stage "copy system ($(if [ "$WITH_WIFI" = 1 ]; then echo 'with wifi pack'; else echo 'no wifi'; fi))"
