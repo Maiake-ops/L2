@@ -3,6 +3,7 @@ import gzip
 import os
 from pathlib import Path
 import subprocess
+import tarfile
 import tempfile
 import unittest
 
@@ -10,6 +11,48 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class LowramBuild(unittest.TestCase):
+    def test_kernel_configuration_failure_stops_build(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "linux-fixture"
+            (source / "scripts/kconfig").mkdir(parents=True)
+            (source / "arch/x86/boot").mkdir(parents=True)
+            (source / "arch/x86/boot/bzImage").write_bytes(bytes(768))
+            (source / ".config").write_text("CONFIG_TEST=y\n")
+            (source / "Makefile").write_text(
+                'tinyconfig olddefconfig:\n\t@test "$@" != "$$FAIL_STAGE"\n'
+                'bzImage:\n\t@:\n'
+                'kernelrelease:\n\t@echo fixture\n'
+            )
+            for name, command in {
+                "kconfig/merge_config.sh": "exit 0",
+                "config": 'test "$2" != "$FAIL_STAGE"',
+            }.items():
+                script = source / "scripts" / name
+                script.write_text(f"#!/bin/sh\n{command}\n")
+                script.chmod(0o755)
+            (root / "tools").mkdir()
+            (root / "tools/patch-kernel-ram.py").touch()
+            (root / "config").mkdir()
+            (root / "config/kernel.lowram").write_text("CONFIG_TEST=y\n")
+            (root / "build/cache").mkdir(parents=True)
+            with tarfile.open(root / "build/cache/linux-fixture.tar.xz", "w:xz") as tar:
+                tar.add(source, arcname=source.name)
+
+            for stage in ("tinyconfig", "olddefconfig", "LOCALVERSION", "LOCALVERSION_AUTO", "MODULES"):
+                with self.subTest(stage=stage):
+                    build = root / stage
+                    result = subprocess.run(
+                        [ROOT / "tools/l2-lowram", "build"],
+                        env=dict(os.environ, L2_ROOT=temp, L2_BUILD_DIR=str(build),
+                                 L2_MAIN_BUILD_DIR=str(root / "build"), KERNEL_VERSION="fixture",
+                                 FAIL_STAGE=stage),
+                        capture_output=True, text=True, timeout=10,
+                    )
+                    self.assertIn("kernel configure failed", result.stderr)
+                    self.assertEqual(result.returncode, 1)
+                    self.assertFalse((build / "out/vmlinuz-l2-lowram").exists())
+
     @unittest.skipUnless((ROOT / "build/out/limine/bin/limine").is_file() and
                          (ROOT / "build-lowram/out/initramfs-l2-lowram").is_file(),
                          "needs local Limine and low-RAM artifacts")

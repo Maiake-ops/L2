@@ -170,13 +170,13 @@ build_kernel() {
     log=$LOGS/kernel-lowram.log
     say "configuring linux $ver (tinyconfig + kernel.lowram)"
     if ! (
-        cd "$dir"
-        make tinyconfig
-        scripts/kconfig/merge_config.sh -m .config "$nf" >/dev/null 2>&1 \
-            || cat "$nf" >> .config
-        make olddefconfig
-        scripts/config --set-str LOCALVERSION "-l2-lowram"
-        scripts/config --disable LOCALVERSION_AUTO
+        cd "$dir" &&
+        make tinyconfig &&
+        { scripts/kconfig/merge_config.sh -m .config "$nf" >/dev/null 2>&1 \
+            || cat "$nf" >> .config; } &&
+        make olddefconfig &&
+        scripts/config --set-str LOCALVERSION "-l2-lowram" &&
+        scripts/config --disable LOCALVERSION_AUTO &&
         scripts/config --disable MODULES
     ) >"$log" 2>&1; then
         rm -f "$nf"; tail -n 40 "$log" >&2; die "kernel configure failed (log: $log)"
