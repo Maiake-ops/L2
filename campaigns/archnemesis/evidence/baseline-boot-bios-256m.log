@@ -1,0 +1,4 @@
+  PASS BIOS: booted to the L2# shell  (build/out/l2.iso)
+    idle RAM: 5524 KiB used of 250516 KiB (budget 10240 KiB)  OK
+    settled PID 1 RSS: 40 KiB
+    7.3.3-l2
