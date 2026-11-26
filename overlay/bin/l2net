@@ -24,8 +24,101 @@ WPA=/bin/wpa_supplicant
 MEDIUM=${L2_MEDIUM:-/media/l2}
 MODDIR=${L2_MODDIR:-/lib/modules}
 FWPATH=${L2_FW_PATH:-/sys/module/firmware_class/parameters/path}
+PINFILE=${L2_PACK_HASH:-/etc/l2/pack-hash}
+VERCACHE=${L2_PACK_CACHE:-/run/l2-pack-verified}
 
 log() { echo "l2net: $*"; }
+
+# Phase-2 co-signed pack integrity verifier (docs/armageddon/p2-pack-pin-contract.md):
+# - Requires /etc/l2/pack-hash pin entry for <name>.
+# - Requires pack-manifest regular file whose sha256 matches the pin.
+# - A2: Rejects any non-regular file (symlink/FIFO/device) in pack tree,
+#   CRLF, malformed hashes, absolute/'..' paths, duplicate relpaths, or
+#   extra unmanifested files.
+# - A1: Verifies every file in the pack before any module/firmware/binary use.
+verify_pack() {  # pack_dir pack_name
+    _pdir=$1
+    _pname=$2
+    [ -d "$_pdir" ] || { log "pack $_pname missing: $_pdir"; return 1; }
+    [ -r "$PINFILE" ] || { log "pack $_pname refused: pin file missing ($PINFILE)"; return 1; }
+    _want=$(awk -v p="$_pname" '
+        /\r/ { bad = 1; exit }
+        /^[0-9a-f]{64}  [a-z]+$/ {
+            if ($2 == p) {
+                if (found) { bad = 1; exit }
+                found = 1; h = $1
+            }
+            next
+        }
+        /^[[:space:]]*$/ { next }
+        { bad = 1; exit }
+        END { if (!bad && found) print h }
+    ' "$PINFILE" 2>/dev/null)
+    if [ -z "$_want" ]; then
+        log "pack $_pname refused: no valid pin entry in $PINFILE"
+        return 1
+    fi
+    _mf="$_pdir/pack-manifest"
+    if [ ! -f "$_mf" ] || [ -L "$_mf" ]; then
+        log "pack $_pname refused: pack-manifest missing or not a regular file"
+        return 1
+    fi
+    _got=$(sha256sum "$_mf" 2>/dev/null | cut -d' ' -f1)
+    if [ "$_got" != "$_want" ]; then
+        log "pack $_pname refused: manifest sha256 mismatch"
+        return 1
+    fi
+    if [ -f "$VERCACHE/$_pname" ] && [ ! -L "$VERCACHE/$_pname" ]; then
+        _cached=$(cat "$VERCACHE/$_pname" 2>/dev/null)
+        if [ "$_cached" = "$_want" ]; then
+            return 0
+        fi
+    fi
+    # A2 extension: reject symlinks, FIFOs, devices, sockets anywhere in pack tree
+    if [ -n "$(find "$_pdir" ! -type d ! -type f -print 2>/dev/null)" ]; then
+        log "pack $_pname refused: non-regular file in pack tree"
+        return 1
+    fi
+    # A2 parse hardening: strict format, no CRLF, no absolute/'..'/'//' paths, no duplicates
+    _mcount=$(awk '
+        BEGIN { ok = 1; n = 0 }
+        /\r/ { ok = 0; exit }
+        {
+            if ($0 !~ /^[0-9a-f]{64}  .+$/) { ok = 0; exit }
+            rel = substr($0, 67)
+            if (rel == "" || rel == "." || rel == ".." || rel == "pack-manifest") { ok = 0; exit }
+            if (substr(rel, 1, 1) == "/" || index(rel, "//") > 0) { ok = 0; exit }
+            if (substr(rel, 1, 2) == "./" || substr(rel, 1, 3) == "../") { ok = 0; exit }
+            if (index(rel, "/../") > 0 || index(rel, "/./") > 0) { ok = 0; exit }
+            if (length(rel) >= 3 && substr(rel, length(rel) - 2) == "/..") { ok = 0; exit }
+            if (length(rel) >= 2 && substr(rel, length(rel) - 1) == "/.") { ok = 0; exit }
+            if (rel in seen) { ok = 0; exit }
+            seen[rel] = 1
+            n++
+        }
+        END { if (ok && n > 0) print n }
+    ' "$_mf" 2>/dev/null)
+    if [ -z "$_mcount" ]; then
+        log "pack $_pname refused: malformed pack-manifest"
+        return 1
+    fi
+    # Ensure no extra unmanifested files exist in the pack tree
+    _fcount=$(find "$_pdir" -type f ! -path "$_mf" -print 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$_fcount" != "$_mcount" ]; then
+        log "pack $_pname refused: file count mismatch (manifest=$_mcount tree=$_fcount)"
+        return 1
+    fi
+    # A1: verify every file hash in the pack before any activation
+    if ! (cd "$_pdir" && sha256sum -c pack-manifest >/dev/null 2>&1); then
+        log "pack $_pname refused: file hash verification failed"
+        return 1
+    fi
+    mkdir -p "$VERCACHE" 2>/dev/null && chmod 0700 "$VERCACHE" 2>/dev/null || true
+    if [ -d "$VERCACHE" ] && [ ! -L "$VERCACHE" ]; then
+        printf '%s\n' "$_want" > "$VERCACHE/$_pname" 2>/dev/null || true
+    fi
+    return 0
+}
 
 have_wifi_hw() {
     for d in /sys/class/net/*; do
@@ -51,9 +144,18 @@ find_pack() {
     # Step 2 (manifest hash vs the /etc/l2/pack-hash pin, see
     # docs/armageddon/p2-pack-pin-contract.md) slots in before use_pack.
     if [ -f "$MEDIUM/l2/L2-LIVE" ]; then
-        [ "$_pref" = hw ] && [ -d "$MEDIUM/l2/hw" ] && { use_pack "$MEDIUM/l2/hw"; return 0; }
-        [ -d "$MEDIUM/l2/wifi" ] && { use_pack "$MEDIUM/l2/wifi"; return 0; }
-        [ -d "$MEDIUM/l2/hw" ] && { use_pack "$MEDIUM/l2/hw"; return 0; }
+        if [ "$_pref" = hw ] && [ -d "$MEDIUM/l2/hw" ]; then
+            use_pack "$MEDIUM/l2/hw" hw && return 0
+            return 1
+        fi
+        if [ -d "$MEDIUM/l2/wifi" ]; then
+            use_pack "$MEDIUM/l2/wifi" wifi && return 0
+            return 1
+        fi
+        if [ -d "$MEDIUM/l2/hw" ]; then
+            use_pack "$MEDIUM/l2/hw" hw && return 0
+            return 1
+        fi
         [ -d "$MEDIUM/l2/desktop" ] && return 0
     fi
     # No block device at all (initramfs-only boot, no medium): nothing to find,
@@ -72,9 +174,18 @@ find_pack() {
             [ -b "$d" ] || continue
             mount -t iso9660 -o ro,nodev,nosuid "$d" "$MEDIUM" 2>/dev/null || continue
             if [ -f "$MEDIUM/l2/L2-LIVE" ]; then
-                if [ "$_pref" = hw ] && [ -d "$MEDIUM/l2/hw" ]; then use_pack "$MEDIUM/l2/hw"; return 0; fi
-                if [ -d "$MEDIUM/l2/wifi" ]; then use_pack "$MEDIUM/l2/wifi"; return 0; fi
-                if [ -d "$MEDIUM/l2/hw" ]; then use_pack "$MEDIUM/l2/hw"; return 0; fi
+                if [ "$_pref" = hw ] && [ -d "$MEDIUM/l2/hw" ]; then
+                    use_pack "$MEDIUM/l2/hw" hw && return 0
+                    umount "$MEDIUM" 2>/dev/null; continue
+                fi
+                if [ -d "$MEDIUM/l2/wifi" ]; then
+                    use_pack "$MEDIUM/l2/wifi" wifi && return 0
+                    umount "$MEDIUM" 2>/dev/null; continue
+                fi
+                if [ -d "$MEDIUM/l2/hw" ]; then
+                    use_pack "$MEDIUM/l2/hw" hw && return 0
+                    umount "$MEDIUM" 2>/dev/null; continue
+                fi
                 if [ -d "$MEDIUM/l2/desktop" ]; then return 0; fi
                 # An L2 live medium without a pack will not grow one: stop
                 # searching instead of retrying for ~10s on every core-ISO boot.
@@ -89,12 +200,16 @@ find_pack() {
 }
 
 use_pack() {
-    PACK=$1
+    _up_dir=$1
+    _up_name=${2:-${1##*/}}
+    verify_pack "$_up_dir" "$_up_name" || return 1
+    PACK=$_up_dir
     mkdir -p "$MODDIR"
     ln -sfn "$PACK/lib/modules/$KREL" "$MODDIR/$KREL"
     [ -w "$FWPATH" ] &&
         echo "$PACK/lib/firmware" > "$FWPATH"
     [ -x "$PACK/bin/wpa_supplicant" ] && WPA=$PACK/bin/wpa_supplicant
+    return 0
 }
 
 # Load only modules whose alias matches a device that exists.
@@ -306,6 +421,7 @@ case "${1:-status}" in
     dhcp)        dhcp "${2:?usage: l2net dhcp IFACE}" ;;
     wifi-start)  wifi_start "${2:-}" ;;
     wifi-stop)   wifi_stop "${2:-}" ;;
-    modules)     find_pack; load_modules ;;
-    *) echo "usage: l2net boot|status|dhcp IFACE|wifi-start [IF]|wifi-stop [IF]|modules" >&2; exit 2 ;;
+    modules)     if find_pack; then load_modules; fi ;;
+    verify-pack) verify_pack "${2:?usage: l2net verify-pack DIR NAME}" "${3:?usage: l2net verify-pack DIR NAME}" ;;
+    *) echo "usage: l2net boot|status|dhcp IFACE|wifi-start [IF]|wifi-stop [IF]|modules|verify-pack DIR NAME" >&2; exit 2 ;;
 esac

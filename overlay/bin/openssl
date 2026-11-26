@@ -7,7 +7,23 @@
 # with the real binary.   Env: L2_PACK_DEV=/dev/xxx to force the device.
 M=${L2_MEDIA:-/media/l2}
 P=$M/l2/ssl
-if [ ! -x "$P/bin/openssl" ]; then
+PINFILE=${L2_PACK_HASH:-/etc/l2/pack-hash}
+VERCACHE=${L2_PACK_CACHE:-/run/l2-pack-verified}
+L2NET_BIN=${L2_L2NET:-/bin/l2net}
+
+verify_ssl_pack() {
+    [ -f "$M/l2/L2-LIVE" ] || return 1
+    [ -x "$P/bin/openssl" ] || return 1
+    if [ -r "$L2NET_BIN" ]; then
+        _sh=${L2_SHELL:-/bin/dash}
+        [ -x "$_sh" ] || _sh=/bin/sh
+        L2_PACK_HASH="$PINFILE" L2_PACK_CACHE="$VERCACHE" "$_sh" "$L2NET_BIN" verify-pack "$P" ssl >/dev/null 2>&1
+        return $?
+    fi
+    return 1
+}
+
+if ! verify_ssl_pack; then
     _any=0
     for d in ${L2_PACK_DEV:-} /dev/sr[0-9] /dev/sd[a-z] /dev/vd[a-z] /dev/nvme[0-9]n[0-9] /dev/mmcblk[0-9]; do
         [ -b "$d" ] && { _any=1; break; }
@@ -15,23 +31,23 @@ if [ ! -x "$P/bin/openssl" ]; then
     if [ "$_any" = 1 ]; then
         mkdir -p "$M" 2>/dev/null
         n=0
-        while [ "$n" -lt 3 ] && [ ! -x "$P/bin/openssl" ]; do
+        while [ "$n" -lt 3 ] && ! verify_ssl_pack; do
             for d in ${L2_PACK_DEV:-} /dev/sr0 /dev/sr1 /dev/sd[a-z] /dev/sd[a-z][0-9] \
                      /dev/vd[a-z] /dev/vd[a-z][0-9] /dev/nvme[0-9]n[0-9] /dev/nvme[0-9]n[0-9]p[0-9] \
                      /dev/mmcblk[0-9] /dev/mmcblk[0-9]p[0-9]; do
                 [ -b "$d" ] || continue
-                mount -t iso9660 -o ro "$d" "$M" 2>/dev/null || continue
-                [ -x "$P/bin/openssl" ] && break
-                # L2 live medium without an ssl pack: stop retrying.
-                if [ -f "$M/l2/L2-LIVE" ]; then umount "$M" 2>/dev/null; n=3; break; fi
+                mount -t iso9660 -o ro,nodev,nosuid "$d" "$M" 2>/dev/null || continue
+                if verify_ssl_pack; then break; fi
+                # L2 live medium without a valid ssl pack: stop retrying.
+                if [ -f "$M/l2/L2-LIVE" ] && [ ! -d "$P" ]; then umount "$M" 2>/dev/null; n=3; break; fi
                 umount "$M" 2>/dev/null
             done
-            [ -x "$P/bin/openssl" ] || { n=$((n + 1)); [ "$n" -lt 3 ] && sleep 1; }
+            verify_ssl_pack || { n=$((n + 1)); [ "$n" -lt 3 ] && sleep 1; }
         done
     fi
 fi
-if [ ! -x "$P/bin/openssl" ]; then
-    echo "openssl: not found on the boot medium (ISO built without the ssl pack?)." >&2
+if ! verify_ssl_pack; then
+    echo "openssl: verified ssl pack not found on the boot medium (missing or failed pack-hash pin)." >&2
     echo "         rebuild with: l2 build openssl && l2 iso   (see L2_SSL in l2 --help)" >&2
     exit 127
 fi

@@ -106,12 +106,32 @@ static void ensure_modules_dir(void) {
     struct utsname u;
     if (uname(&u) != 0) return;
 
-    char modpath[256], wifimod[256], cur[256];
-    snprintf(modpath, sizeof(modpath), "/lib/modules/%s", u.release);
-    snprintf(wifimod, sizeof(wifimod), "/media/l2/l2/wifi/lib/modules/%s", u.release);
+    const char *medium = getenv("L2_MEDIUM");
+    if (!medium || !medium[0]) medium = "/media/l2";
+    const char *modroot = getenv("L2_MODDIR");
+    if (!modroot || !modroot[0]) modroot = "/lib/modules";
+    const char *l2net = getenv("L2_L2NET");
+    if (!l2net || !l2net[0]) l2net = "/bin/l2net";
+
+    char modpath[512], marker[512], wifipack[512], wifimod[512], cur[512];
+    snprintf(modpath, sizeof(modpath), "%s/%s", modroot, u.release);
+    snprintf(marker, sizeof(marker), "%s/l2/L2-LIVE", medium);
+    snprintf(wifipack, sizeof(wifipack), "%s/l2/wifi", medium);
+    snprintf(wifimod, sizeof(wifimod), "%s/lib/modules/%s", wifipack, u.release);
 
     struct stat st;
+    if (lstat(modpath, &st) == 0 && !S_ISLNK(st.st_mode)) {
+        return; /* Real installed directory already exists */
+    }
+    if (access(marker, F_OK) != 0) return;
     if (access(wifimod, R_OK | X_OK) != 0) return;
+
+    /* Phase-2 pack integrity pin: verify l2/wifi before exposing modules. */
+    char *verify_args[] = {(char *)l2net, "verify-pack", wifipack, "wifi", NULL};
+    if (run_quiet(verify_args) != 0) {
+        fprintf(stderr, "l2audio: wifi pack failed Phase-2 integrity verification\n");
+        return;
+    }
 
     /* Keep modules pointing at l2/wifi without forcing Wi-Fi driver probe. */
     if (lstat(modpath, &st) == 0) {
@@ -119,11 +139,11 @@ static void ensure_modules_dir(void) {
             ssize_t len = readlink(modpath, cur, sizeof(cur) - 1);
             if (len > 0) {
                 cur[len] = '\0';
-                if (strstr(cur, "/l2/wifi/") != NULL) return;
+                if (strcmp(cur, wifimod) == 0) return;
             }
             unlink(modpath);
         } else {
-            return; /* Real installed directory already exists */
+            return;
         }
     }
     (void)!symlink(wifimod, modpath);

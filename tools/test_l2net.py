@@ -11,6 +11,7 @@ W6 P1 (ARMAGEDDON II); wired into `make check` by the lead.
 """
 import fnmatch
 import glob
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -77,12 +78,16 @@ class L2net(unittest.TestCase):
         # no-op sleep: find_pack's bounded 10x retry loop stays fast offline
         self._shim("sleep",
                    "printf 'sleep %s\\n' \"$*\" >> \"$L2TEST_SHIMLOG\"\n")
+        self.pinfile = self.scratch / "pack-hash"
+        self.vercache = self.scratch / "vercache"
         self.env = dict(os.environ,
                         TMPDIR=str(self.scratch),
                         PATH=f"{self.shimbin}:{os.environ['PATH']}",
                         L2_MEDIUM=str(self.media),
                         L2_MODDIR=str(self.mods),
                         L2_FW_PATH=str(self.fwpath),
+                        L2_PACK_HASH=str(self.pinfile),
+                        L2_PACK_CACHE=str(self.vercache),
                         L2TEST_SHIMLOG=str(self.log),
                         L2TEST_MOUNTMAP=str(self.mountmap),
                         L2TEST_SANDBOX=str(self.scratch))
@@ -105,7 +110,7 @@ class L2net(unittest.TestCase):
     def lines(self):
         return self.log.read_text().splitlines() if self.log.exists() else []
 
-    def make_pack(self, root, kind, marker=False, tag="GENUINE"):
+    def make_pack(self, root, kind, marker=False, tag="GENUINE", pin=None):
         """root/l2/<kind> pack tree; marker adds root/l2/L2-LIVE.  The tag
         file inside lib/modules/$KREL tells genuine and attacker apart."""
         root = Path(root)
@@ -121,6 +126,28 @@ class L2net(unittest.TestCase):
         wpa.chmod(0o755)
         if marker:
             (root / "l2" / "L2-LIVE").write_text("")
+        if pin is None:
+            pin = marker
+        if pin:
+            lines = []
+            for p in sorted(pack.rglob("*")):
+                if p.is_file() and p.name != "pack-manifest":
+                    rel = p.relative_to(pack).as_posix()
+                    h = hashlib.sha256(p.read_bytes()).hexdigest()
+                    lines.append(f"{h}  {rel}\n")
+            mf = pack / "pack-manifest"
+            mf.write_text("".join(lines))
+            mf_hash = hashlib.sha256(mf.read_bytes()).hexdigest()
+            existing = {}
+            if self.pinfile.exists():
+                for line in self.pinfile.read_text().splitlines():
+                    parts = line.split("  ", 1)
+                    if len(parts) == 2:
+                        existing[parts[1]] = parts[0]
+            existing[kind] = mf_hash
+            self.pinfile.write_text(
+                "".join(f"{existing[k]}  {k}\n" for k in sorted(existing))
+            )
         return pack
 
     def installed_system(self):

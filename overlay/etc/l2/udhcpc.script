@@ -1,43 +1,96 @@
 #!/bin/dash
 # udhcpc event handler (BusyBox).  Uses `ip`, no ifconfig/route needed.
+RESOLV_CONF=${L2_RESOLV_CONF:-/etc/resolv.conf}
+
+valid_iface() {
+    case "$1" in
+        ''|-*|*[!A-Za-z0-9_.:-]*) return 1 ;;
+    esac
+    return 0
+}
+
+valid_ipv4() {
+    _oifs=$IFS
+    IFS=.
+    set -f
+    # shellcheck disable=SC2086
+    set -- $1
+    set +f
+    IFS=$_oifs
+    [ $# -eq 4 ] || return 1
+    for _o in "$@"; do
+        case "$_o" in
+            ''|*[!0-9]*) return 1 ;;
+        esac
+        [ "$_o" -ge 0 ] && [ "$_o" -le 255 ] || return 1
+    done
+    return 0
+}
+
+valid_mask() {
+    case "$1" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ "$1" -ge 1 ] && [ "$1" -le 32 ]
+}
+
+valid_iface "${interface:-}" || exit 1
+
 case "$1" in
     deconfig)
         ip addr flush dev "$interface" 2>/dev/null
         ip link set "$interface" up 2>/dev/null
         ;;
     bound|renew)
+        valid_ipv4 "${ip:-}" || exit 1
+        _mask=${mask:-24}
+        valid_mask "$_mask" || _mask=24
         ip addr flush dev "$interface" 2>/dev/null
-        ip addr add "$ip/${mask:-24}" ${broadcast:+broadcast "$broadcast"} dev "$interface"
+        if [ -n "${broadcast:-}" ] && valid_ipv4 "$broadcast"; then
+            ip addr add "$ip/$_mask" broadcast "$broadcast" dev "$interface"
+        else
+            ip addr add "$ip/$_mask" dev "$interface"
+        fi
         if [ -n "${router:-}" ]; then
+            set -f
             for r in $router; do
-                case "$r" in
-                    ''|*[!0-9.]*) continue ;;
-                esac
+                valid_ipv4 "$r" || continue
                 ip route replace default via "$r" dev "$interface"
                 break
             done
+            set +f
         fi
         if [ -n "${dns:-}" ]; then
             # $domain comes straight from the DHCP packet (untrusted): keep
             # only DNS-name characters so it cannot inject extra lines.
             _dom=
             case "${domain:-}" in
-                *[!A-Za-z0-9.-]*) ;;
-                ?*) _dom=$domain ;;
+                ''|-*|.*|..*|*..*|*[!A-Za-z0-9.-]*) ;;
+                *)
+                    [ "${#domain}" -le 253 ] && _dom=$domain
+                    ;;
             esac
-            # atomic replace: concurrent interfaces must not interleave writes
-            _tmp=$(mktemp /etc/resolv.conf.XXXXXX 2>/dev/null) || _tmp="/etc/resolv.conf.tmp.$$"
+            _rdir=$(dirname "$RESOLV_CONF")
+            _tmp=$(mktemp "$_rdir/.resolv.conf.XXXXXX" 2>/dev/null) || exit 1
+            _have_ns=0
             {
-                [ -n "$_dom" ] && echo "search $_dom"
+                [ -n "$_dom" ] && printf 'search %s\n' "$_dom"
+                set -f
                 for d in $dns; do
                     case "$d" in
-                        ''|*[!0-9A-Fa-f.:]*) continue ;;
+                        ''|-*|*[!0-9A-Fa-f.:]*) continue ;;
                     esac
-                    echo "nameserver $d"
+                    printf 'nameserver %s\n' "$d"
+                    _have_ns=1
                 done
+                set +f
             } > "$_tmp"
-            chmod 0644 "$_tmp" 2>/dev/null || true
-            mv -f "$_tmp" /etc/resolv.conf
+            if grep -q '^nameserver ' "$_tmp" 2>/dev/null; then
+                chmod 0644 "$_tmp" 2>/dev/null || true
+                mv -f "$_tmp" "$RESOLV_CONF"
+            else
+                rm -f "$_tmp"
+            fi
         fi
         ;;
 esac
