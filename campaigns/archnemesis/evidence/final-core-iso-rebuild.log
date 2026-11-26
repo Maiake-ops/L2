@@ -1,0 +1,17 @@
+  ● install pack: 816 KiB on the medium, 0 KiB resident (sgdisk mke2fs mkfs.fat limine)
+
+▶ Core ISO (kernel + initramfs + hw/install packs, no wifi pack)
+
+▶ Creating gzip initramfs
+  ● initramfs: /home/maiake/OpenBot/Agents/agent-ed44d231-41cf-416e-b3d7-8ce3907ab027/archnemesis/build/iso.core/boot/initramfs (435420 bytes)
+  ◌ Creating l2.iso ...
+  ✓ Creating l2.iso 0s 8.2 MiB of 10 MiB
+  ███████████████████████░░░░░  8.2 MiB / 10 MiB
+
+▶ Wi-Fi ISO (same RAM footprint; modules + firmware stay on the medium)
+
+▶ Creating gzip initramfs
+  ● initramfs: /home/maiake/OpenBot/Agents/agent-ed44d231-41cf-416e-b3d7-8ce3907ab027/archnemesis/build/iso.wifi/boot/initramfs (435529 bytes)
+  ◌ Creating l2-wifi.iso ...
+  ✓ Creating l2-wifi.iso 0s 49.1 MiB of 96 MiB
+  ██████████████░░░░░░░░░░░░░░  49.1 MiB / 96 MiB

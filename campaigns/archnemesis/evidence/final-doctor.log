@@ -1,0 +1,50 @@
+
+ ██╗     ██████╗   L2  ·  tiny Linux builder
+ ██║     ╚════██╗  v0.4.0   musl · rcl2 · l2pm · limine
+ ██║      █████╔╝  host    nixos · x86_64 · -j8
+ ██║     ██╔═══╝   kernel  7.3.3   ·   ISO gate 10 MiB
+ ███████╗███████╗  
+ ╚══════╝╚══════╝  arrows move   enter selects   ctrl-c quits
+
+  distro       nixos
+  arch         x86_64
+  host kernel  7.2.13-xanmod1
+  gum          gum version 2.0.2
+  jobs         8
+
+
+  ✓ curl                ✓ git                 ✓ tar               
+  ✓ gzip                ✓ xz                  ✓ bzip2             
+  ✓ cpio                ✓ make                ✓ cc                
+  ✓ clang               ✓ rustc               ✓ ld.lld            
+  ✓ llvm-objcopy        ✓ bc                  ✓ bison             
+  ✓ flex                ✓ nasm                ✓ xorriso           
+  ✓ mtools              ✓ sgdisk              ✓ parted            
+  ✓ mkfs.ext4           ✓ mkfs.fat            ✓ sha256sum         
+  ✓ strip               ✓ depmod              ✓ python3           
+  ✓ perl                ✓ qemu-system-x86_64
+
+  COMPONENT        STATE        SIZE           NEXT
+  musl             built        2.5 MiB        
+  kernel           built        2.6 MiB        
+  busybox          built        365.9 KiB      
+  dash             built        141.7 KiB      
+  rcl2             built        16.5 KiB       
+  l2pm             built        102.1 KiB      
+  l2wifi           built        61.9 KiB       
+  wpa              built        3.0 MiB        
+  openssl          built        3.0 MiB        
+  limine           built        86.6 KiB       
+  initramfs        built        425.0 KiB      
+  iso              built        8.2 MiB        
+  desktop          built        72.8 MiB       
+  l2wm             built        58.9 KiB       
+  firmware         built        31324 KiB      
+
+  ISO budget ████████████████████████░░░░░░  8.2 MiB / 10 MiB
+
+  ✓ real-hardware essentials present (NVMe, AHCI, USB, HID, PS/2, EFI fb, ACPI poweroff, wifi core)
+
+  sha256: ok
+  reproducible tar: ok
+  rss: 172 KiB (budget 10240)

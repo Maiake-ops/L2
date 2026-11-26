@@ -1,0 +1,4 @@
+  PASS UEFI: booted to the L2# shell  (/home/maiake/OpenBot/Agents/agent-ed44d231-41cf-416e-b3d7-8ce3907ab027/archnemesis/build-lowram/out/l2-lowram.iso)
+    idle RAM: 4024 KiB used of 246980 KiB (budget 10240 KiB)  OK
+    settled PID 1 RSS: 40 KiB
+    7.3.3-l2-lowram

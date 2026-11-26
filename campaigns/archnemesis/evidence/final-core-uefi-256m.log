@@ -1,0 +1,4 @@
+  PASS UEFI: booted to the L2# shell  (build/out/l2.iso)
+    idle RAM: 5624 KiB used of 244060 KiB (budget 10240 KiB)  OK
+    settled PID 1 RSS: 36 KiB
+    7.3.3-l2
