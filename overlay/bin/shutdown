@@ -1,11 +1,18 @@
 #!/bin/sh
 # poweroff / reboot / halt for L2 (symlinked to this script).
 #
-# Use rcl2's direct power commands: they sync the filesystems and issue the
-# reboot syscall, which works from any context.  (Delivering a signal to PID 1
-# proved unreliable on an installed ext4 root, so the signal path is not used.)
+# Signal PID 1 (rcl2) for a clean service-stopping shutdown; fall back to
+# rcl2's direct power command only if -f is passed or signaling PID 1 fails.
+force=0
+[ "${1:-}" = "-f" ] && force=1
+
 case ${0##*/} in
-    reboot) exec /bin/rcl2 reboot ;;
-    halt)   exec /bin/rcl2 halt ;;
-    *)      exec /bin/rcl2 poweroff ;;
+    reboot) cmd=reboot;   sig=USR2 ;;
+    halt)   cmd=halt;     sig=QUIT ;;
+    *)      cmd=poweroff; sig=USR1 ;;
 esac
+
+if [ "$force" = 0 ] && kill -"$sig" 1 2>/dev/null; then
+    exit 0
+fi
+exec /bin/rcl2 "$cmd"

@@ -452,12 +452,29 @@ static void sig_any(int s)
     (void)r;   /* EAGAIN (pipe full) is fine: the bit is set anyway */
 }
 
+static int move_above_stdio(int fd)
+{
+    if (fd < 0 || fd > 2) return fd;
+    int nfd = (int)r_sys3(SYS_fcntl, (long)fd, F_DUPFD_CLOEXEC, 3L);
+    r_sys1(SYS_close, (long)fd);
+    return nfd;
+}
+
 static void signals_setup(void)
 {
     int fds[2] = { -1, -1 };
     /* Drain must stop at EAGAIN, and handlers must never block on a full pipe. */
     if (r_sys2(SYS_pipe2, (long)fds, (long)(O_CLOEXEC | O_NONBLOCK)) != 0)
         fds[0] = fds[1] = -1;
+    /* Keep self-pipe above FDs 0/1/2 so console_open() dup2 cannot clobber it
+     * when PID 1 starts with stdio closed (e.g. before devtmpfs /dev/console). */
+    fds[0] = move_above_stdio(fds[0]);
+    fds[1] = move_above_stdio(fds[1]);
+    if (fds[0] < 0 || fds[1] < 0) {
+        if (fds[0] >= 0) r_sys1(SYS_close, (long)fds[0]);
+        if (fds[1] >= 0) r_sys1(SYS_close, (long)fds[1]);
+        fds[0] = fds[1] = -1;
+    }
     g_sig_rd = fds[0];
     g_sig_wr = fds[1];
 
@@ -902,8 +919,13 @@ static void reboot_now(unsigned cmd)
     r_sys0(SYS_sync);
     sleep_ms(100);
     r_sys0(SYS_sync);
-    r_sys5(SYS_mount, 0L, (long)"/", 0L, (long)(MS_REMOUNT | MS_RDONLY), 0L);
+    long rm = r_sys5(SYS_mount, 0L, (long)"/", 0L, (long)(MS_REMOUNT | MS_RDONLY), 0L);
+    if (rm != 0)
+        slogerr("remount / ro failed ", -rm);
+    r_sys0(SYS_sync);
     long r = r_sys4(SYS_reboot, (long)REBOOT_MAGIC1, (long)REBOOT_MAGIC2, (long)cmd, 0);
+    if (r != 0 && cmd == RB_POWER_OFF)
+        r = r_sys4(SYS_reboot, (long)REBOOT_MAGIC1, (long)REBOOT_MAGIC2, (long)RB_HALT, 0);
     if (r != 0) {
         g_len = 0; putstr("rcl2: reboot syscall failed (errno "); putnum(-r); putstr(")");
         line_out();
@@ -922,6 +944,18 @@ static void power_direct(const char *cmd)
 }
 
 /* ------------------------------------------------------------ shutdown */
+
+static void umount_virtuals(void)
+{
+    static const char *const dirs[] = {
+        "/tmp", "/run", "/dev/shm", "/dev/pts", "/sys", "/proc",
+    };
+    for (unsigned i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+        long r = r_sys2(SYS_umount2, (long)dirs[i], 0);
+        if (r == -EBUSY)
+            r_sys2(SYS_umount2, (long)dirs[i], MNT_DETACH);
+    }
+}
 
 __attribute__((noreturn))
 static void shutdown_run(const char *why, unsigned cmd)
@@ -944,22 +978,34 @@ static void shutdown_run(const char *why, unsigned cmd)
     while (now_ms() < until) {
         int zz = 0;
         long w;
-        while ((w = r_sys4(SYS_wait4, -1L, (long)&zz, WNOHANG, 0)) > 0) zz = 0;
+        for (;;) {
+            w = r_sys4(SYS_wait4, -1L, (long)&zz, WNOHANG, 0);
+            if (w == -EINTR) continue;
+            if (w <= 0) break;
+            zz = 0;
+        }
         if (w == -ECHILD) break;
         sleep_ms(100);
     }
 
     r_sys0(SYS_sync);
     sleep_ms(100);
+    umount_virtuals();
     r_sys0(SYS_sync);
     /* remount root read-only, best effort */
-    r_sys5(SYS_mount, 0L, (long)"/", 0L, (long)(MS_REMOUNT | MS_RDONLY), 0L);
+    long rm = r_sys5(SYS_mount, 0L, (long)"/", 0L, (long)(MS_REMOUNT | MS_RDONLY), 0L);
+    if (rm != 0)
+        slogerr("remount / ro failed ", -rm);
+    r_sys0(SYS_sync);
 
     long r = r_sys4(SYS_reboot, (long)REBOOT_MAGIC1, (long)REBOOT_MAGIC2, (long)cmd, 0);
     if (r != 0) {
-        slog1("reboot syscall failed (", why);
-        /* power management absent: degrade to halt, then idle forever */
-        r_sys4(SYS_reboot, (long)REBOOT_MAGIC1, (long)REBOOT_MAGIC2, (long)RB_HALT, 0);
+        g_len = 0; putstr("rcl2: reboot syscall failed ("); putstr(why);
+        putstr(", errno "); putnum(-r); putstr(")"); line_out();
+        if (cmd == RB_POWER_OFF) {
+            /* power management absent: degrade to halt, then idle forever */
+            r_sys4(SYS_reboot, (long)REBOOT_MAGIC1, (long)REBOOT_MAGIC2, (long)RB_HALT, 0);
+        }
         for (;;) sleep_ms(3600000L);
     }
     for (;;) sleep_ms(3600000L);

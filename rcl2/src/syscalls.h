@@ -21,6 +21,7 @@
 #define SYS_exit         60L
 #define SYS_wait4        61L
 #define SYS_kill         62L
+#define SYS_fcntl        72L
 #define SYS_chdir        80L
 #define SYS_mkdir        83L
 #define SYS_symlink      88L
@@ -78,6 +79,7 @@ static inline long r_sys6(long nr, long a, long b, long c, long d, long e, long 
 #define O_RDWR   2
 #define O_CLOEXEC 0x80000
 #define O_NONBLOCK 0x800
+#define F_DUPFD_CLOEXEC 1030
 
 /* mount(2) flags */
 #define MS_RDONLY    1UL

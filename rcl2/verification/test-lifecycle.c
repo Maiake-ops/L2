@@ -35,9 +35,24 @@ static int interrupt_wait;
 static int eintr_budget;
 static struct { long pid; int sig; } kill_log[32];
 static int kill_n;
-static unsigned reboot_cmd;
+static unsigned reboot_cmds[4];
+static int reboot_n;
+static long reboot_fail_first;
 static int reboot_done;
 static unsigned long mount_flags;
+static long mount_rc;
+static int umount_n;
+static int umount_detach_n;
+static int sync_n;
+static int sync_after_remount;
+static int remount_seen;
+static int kill_wait_eintr;
+static int next_fcntl_fd;
+static int fake_pipe_fds[2];
+static int closed_fds[16];
+static int closed_n;
+static int dup2_targets[16];
+static int dup2_n;
 static char log_buf[8192];
 static unsigned log_len;
 
@@ -87,12 +102,27 @@ static void reset(void)
     eintr_budget = 1000;
     kill_n = 0;
     reboot_done = 0;
-    reboot_cmd = 0;
+    reboot_n = 0;
+    reboot_fail_first = 0;
     mount_flags = 0;
+    mount_rc = 0;
+    umount_n = 0;
+    umount_detach_n = 0;
+    sync_n = 0;
+    sync_after_remount = 0;
+    remount_seen = 0;
+    kill_wait_eintr = 0;
+    next_fcntl_fd = 3;
+    fake_pipe_fds[0] = 0;
+    fake_pipe_fds[1] = 1;
+    closed_n = 0;
+    dup2_n = 0;
     log_len = 0;
     clock_ms = 1000;
     g_closing = 0;
     g_flags = 0;
+    g_sig_rd = -1;
+    g_sig_wr = -1;
 }
 
 static void name_svc(unsigned i, const char *name)
@@ -113,9 +143,15 @@ static long fake_syscall(long nr, long a, long b, long c, long d, long e, long f
     }
     case SYS_nanosleep: {
         if (reboot_done) {
-            /* shutdown_run idles after a successful reboot: final audit */
-            CHECK(reboot_cmd == RB_POWER_OFF);
+            /* shutdown_run idles after reboot: final audit */
+            CHECK(reboot_n == 2);
+            CHECK(reboot_cmds[0] == RB_POWER_OFF);
+            CHECK(reboot_cmds[1] == RB_HALT);
             CHECK(mount_flags == (MS_REMOUNT | MS_RDONLY));
+            CHECK(umount_n >= 6);
+            CHECK(umount_detach_n >= 1);
+            CHECK(sync_after_remount >= 1);
+            CHECK(log_contains("remount / ro failed 16"));
             int t1 = kill_index(301, SIGTERM), t2 = kill_index(302, SIGTERM);
             int ta = kill_index(-1, SIGTERM), tk = kill_index(-1, SIGKILL);
             CHECK(t1 >= 0 && t2 >= 0 && ta > t1 && ta > t2 && tk > ta);
@@ -137,6 +173,10 @@ static long fake_syscall(long nr, long a, long b, long c, long d, long e, long f
         return fork_queue[fork_i++];
     case SYS_wait4: {
         if (c & WNOHANG) {
+            if (kill_wait_eintr > 0) {
+                kill_wait_eintr--;
+                return -EINTR;
+            }
             if (exit_i < exit_n) {
                 long pid = pop_exit();
                 *(int *)b = exit_queue[exit_i - 1].st;
@@ -166,12 +206,43 @@ static long fake_syscall(long nr, long a, long b, long c, long d, long e, long f
         }
         return 0;
     case SYS_reboot:
-        reboot_cmd = (unsigned)c;
+        CHECK(reboot_n < 4);
+        reboot_cmds[reboot_n++] = (unsigned)c;
+        if (reboot_n == 1 && reboot_fail_first != 0)
+            return reboot_fail_first;
         reboot_done = 1;
         return 0;
-    case SYS_sync: return 0;
+    case SYS_sync:
+        sync_n++;
+        if (remount_seen) sync_after_remount++;
+        return 0;
+    case SYS_umount2:
+        umount_n++;
+        if (b == 0 && umount_n == 1) return -EBUSY;
+        if (b == MNT_DETACH) umount_detach_n++;
+        return 0;
     case SYS_mount:
         mount_flags = (unsigned long)d;
+        remount_seen = 1;
+        return mount_rc;
+    case SYS_pipe2: {
+        int *fds = (int *)a;
+        fds[0] = fake_pipe_fds[0];
+        fds[1] = fake_pipe_fds[1];
+        return 0;
+    }
+    case SYS_fcntl:
+        CHECK(b == F_DUPFD_CLOEXEC && c == 3L);
+        return next_fcntl_fd++;
+    case SYS_open:
+        return 0;
+    case SYS_dup2:
+        if (dup2_n < 16) dup2_targets[dup2_n++] = (int)b;
+        return b;
+    case SYS_close:
+        if (closed_n < 16) closed_fds[closed_n++] = (int)a;
+        return 0;
+    case SYS_rt_sigaction:
         return 0;
     case SYS_write: {
         unsigned n = (unsigned)c;
@@ -250,9 +321,25 @@ static void test_once_wait(void)
     CHECK(log_contains("w done (exit 5)"));
 }
 
-/* shutdown: TERM each service, TERM sweep, grace, KILL sweep, ro remount,
- * reboot; respawn stays suppressed throughout. Final audit runs in the
- * fake nanosleep once reboot_done is set (shutdown_run never returns). */
+/* self-pipe must be moved above FDs 0/1/2 so console_open() never clobbers it */
+static void test_selfpipe_no_stdio_clobber(void)
+{
+    reset();
+    fake_pipe_fds[0] = 0;
+    fake_pipe_fds[1] = 1;
+    signals_setup();
+    CHECK(g_sig_rd == 3 && g_sig_wr == 4);
+    CHECK(closed_n == 2 && closed_fds[0] == 0 && closed_fds[1] == 1);
+
+    console_open();
+    CHECK(g_sig_rd == 3 && g_sig_wr == 4);
+    for (int i = 0; i < dup2_n; i++)
+        CHECK(dup2_targets[i] != g_sig_rd && dup2_targets[i] != g_sig_wr);
+}
+
+/* shutdown: TERM each service, TERM sweep, grace, KILL sweep (surviving EINTR),
+ * umount2, ro remount (logged on failure) + post-remount sync, RB_POWER_OFF ->
+ * RB_HALT degradation; respawn stays suppressed throughout. */
 static void test_shutdown_escalation(void)
 {
     reset();
@@ -263,6 +350,9 @@ static void test_shutdown_escalation(void)
     }
     fork_queue[0] = 301; fork_queue[1] = 302; fork_n = 2;
     svc_spawn(0); svc_spawn(1);
+    kill_wait_eintr = 2;
+    mount_rc = -EBUSY;
+    reboot_fail_first = -EINVAL;
     /* services ignore TERM: nothing exits until the KILL sweep */
     shutdown_run("poweroff request", RB_POWER_OFF);
     finish(3);                             /* unreachable: fake finishes first */
@@ -271,6 +361,7 @@ static void test_shutdown_escalation(void)
 void rcl_enter(unsigned long *sp)
 {
     (void)sp;
+    test_selfpipe_no_stdio_clobber();
     test_burst_reaping();
     test_once_wait();
     test_shutdown_escalation();

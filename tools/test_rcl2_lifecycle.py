@@ -444,6 +444,98 @@ class Pid1Lifecycle(unittest.TestCase):
         self.assertNotIn("PANIC", text)
         self.assertNotIn("root was read-only", text)
 
+    def test_closed_stdio_selfpipe_and_graceful_shutdown(self):
+        # M01: boot PID 1 with FDs 0/1/2 closed and a writable /dev/console.
+        # console_open() must not clobber the self-pipe; SIGUSR1 must cleanly
+        # trigger shutdown and reap children.
+        console = self.root / "dev" / "console"
+        console.write_bytes(b"")
+        (self.root / "etc" / "rcl2.conf").write_text(
+            "hostname NS\nklog 0\n"
+            "service r respawn /bin/helper sleep 60000\n"
+        )
+        self.proc = subprocess.Popen(
+            ["sh", "-c",
+             "exec 0<&- 1>&- 2>&- unshare --user --map-root-user --pid "
+             "--mount --uts --fork chroot \"$1\" /bin/rcl2",
+             "sh", str(self.root)],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        threading.Thread(target=self._reader, daemon=True).start()
+
+        end = time.monotonic() + 15
+        while time.monotonic() < end:
+            if "boot complete" in console.read_text(errors="replace"):
+                break
+            time.sleep(0.05)
+        self.assertIn("boot complete", console.read_text(errors="replace"))
+
+        pid = self.rcl2_pid()
+        fd_dir = Path(f"/proc/{pid}/fd")
+        pipe_fds = []
+        for entry in fd_dir.iterdir():
+            try:
+                target = os.readlink(entry)
+            except OSError:
+                continue
+            if target.startswith("pipe:"):
+                pipe_fds.append(int(entry.name))
+        self.assertEqual(len(pipe_fds), 2, f"expected 2 self-pipe fds, got {pipe_fds}")
+        self.assertTrue(all(fd >= 3 for fd in pipe_fds),
+                        f"self-pipe clobbered stdio fds: {pipe_fds}")
+
+        kids = self.child_pids()
+        self.assertEqual(len(kids), 1)
+        os.kill(pid, signal.SIGUSR1)
+        end = time.monotonic() + 12
+        while time.monotonic() < end:
+            if "shutting down: poweroff request" in console.read_text(errors="replace"):
+                break
+            time.sleep(0.05)
+        self.assertIn("shutting down: poweroff request",
+                      console.read_text(errors="replace"))
+        end = time.monotonic() + 10
+        while Path(f"/proc/{kids[0]}").exists() and time.monotonic() < end:
+            time.sleep(0.05)
+        self.assertFalse(Path(f"/proc/{kids[0]}").exists(),
+                         "child service survived SIGUSR1 shutdown")
+
+    def test_overlay_shutdown_script(self):
+        # M01: overlay/bin/shutdown signals PID 1 cleanly (poweroff->USR1,
+        # reboot->USR2, halt->QUIT) and falls back to direct rcl2 with -f.
+        script = REPO / "overlay" / "bin" / "shutdown"
+        r = subprocess.run(["sh", "-n", str(script)],
+                           capture_output=True, text=True, timeout=15)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+        with tempfile.TemporaryDirectory(prefix="rcl2-shut-") as td:
+            tdp = Path(td)
+            log = tdp / "calls.log"
+            for name, expected in (("poweroff", "-USR1 1"),
+                                   ("reboot", "-USR2 1"),
+                                   ("halt", "-QUIT 1")):
+                link = tdp / name
+                os.symlink(script, link)
+                # Override builtin `kill` via a wrapper function in sh with $0=link
+                r = subprocess.run(
+                    ["sh", "-c",
+                     f'kill() {{ printf "%s\\n" "$*" > "{log}"; return 0; }}; '
+                     f'eval "$(sed "1d" "{script}")"',
+                     str(link)],
+                    capture_output=True, text=True, timeout=15)
+                self.assertEqual(r.returncode, 0, f"{name}: {r.stderr}")
+                self.assertEqual(log.read_text().strip(), expected)
+
+        # Also verify SIGUSR2 and SIGQUIT against live PID 1
+        for sig, msg in ((signal.SIGUSR2, r"shutting down: reboot request"),
+                         (signal.SIGQUIT, r"shutting down: halt request")):
+            self._cleanup()
+            self.lines = []
+            self.start("hostname NS\nklog 0\n"
+                       "service r respawn /bin/helper sleep 60000\n")
+            self.wait_log(r"boot complete")
+            os.kill(self.rcl2_pid(), sig)
+            self.wait_log(msg)
+
 
 if __name__ == "__main__":
     unittest.main()
