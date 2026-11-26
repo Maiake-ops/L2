@@ -11,11 +11,11 @@
 .type _start, @function
 _start:
     xor   %ebp, %ebp            # no frame marker
-    and   $-16, %rsp            # ABI alignment
-    mov   %rsp, %rdi            # stack top -> argc/argv/envp for rcl_enter
+    mov   %rsp, %rdi            # true stack top -> argc/argv/envp before align
+    and   $-16, %rsp            # SysV ABI 16-byte alignment before call
     call  rcl_enter             # never returns for PID 1
-    mov   $1, %edi              # unreachable in practice: exit(1) if it did
-    mov   $60, %eax             # SYS_exit
+    mov   $1, %edi              # unreachable in practice: exit_group(1) if it did
+    mov   $231, %eax            # SYS_exit_group
     syscall
 1:  jmp   1b
 .size _start, .-_start

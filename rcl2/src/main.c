@@ -729,22 +729,16 @@ static int reap_children(void)
     }
 }
 
-/* blocking wait for a wait-mode service during boot */
+/* blocking wait for a wait-mode service during boot (ppoll + nonblocking reap) */
 static void svc_wait_boot(unsigned i)
 {
     long pid = g_pid[i];
     if (pid <= 0) return;
     for (;;) {
+        take_actions();
         int st = 0;
-        long w = r_sys4(SYS_wait4, pid, (long)&st, 0, 0);
-        if (w == -EINTR) {
-            /* shutdown must not be starved by a blocked wait-mode service;
-             * the reap sweep may collect our child too - check before looping */
-            take_actions();
-            reap_children();
-            if (g_pid[i] == 0) return;   /* swept away, already logged */
-            continue;
-        }
+        long w = r_sys4(SYS_wait4, pid, (long)&st, WNOHANG, 0);
+        if (w == -EINTR) continue;
         if (w == -ECHILD) {                /* child was collected elsewhere */
             g_pid[i] = 0;
             slog1(g_conf.svcs[i].name, ": collected earlier");
@@ -756,10 +750,24 @@ static void svc_wait_boot(unsigned i)
             g_len = 0;
             putstr("rcl2: "); putstr(s->name); putstr(" finished ("); putexit(st); putstr(")");
             line_out();
+            break;
         }
-        break;
+        /* collect any other zombies that piled up while waiting */
+        reap_children();
+        if (g_pid[i] == 0) return;         /* swept away, already logged */
+        struct pollfdx pf;
+        pf.fd = g_sig_rd;
+        pf.events = POLLIN;
+        pf.revents = 0;
+        struct kts tv;
+        tv.tv_sec = 0;
+        tv.tv_nsec = 200000000L;
+        long r = r_sys5(SYS_ppoll, (long)&pf, 1L,
+                        g_sig_rd < 0 ? (long)&tv : 0L, 0L, 0L);
+        if (r < 0 && r != -EINTR) sleep_ms(50);
+        if (pf.revents & POLLIN) pipe_drain();
     }
-    /* collect any zombies that piled up while we blocked */
+    /* collect any remaining zombies before continuing boot */
     reap_children();
 }
 
@@ -801,16 +809,31 @@ static void rescue_shell(void)
             r_sys1(SYS_exit, 127L);
         }
         if (pid < 0) { sleep_ms(1000); continue; }
-        for (;;) {
-            int st = 0;
-            long w = r_sys4(SYS_wait4, pid, (long)&st, 0, 0);
-            if (w == -EINTR) {
-                /* a poweroff issued in the recovery shell must still land */
-                take_actions();
-                continue;
+        int shell_alive = 1;
+        while (shell_alive) {
+            take_actions();
+            for (;;) {
+                int st = 0;
+                long w = r_sys4(SYS_wait4, -1L, (long)&st, WNOHANG, 0);
+                if (w == -EINTR) continue;
+                if (w == pid || w == -ECHILD) { shell_alive = 0; break; }
+                if (w <= 0) break;
+                g_len = 0;
+                putstr("rcl2: reap "); putnum(w); putstr(" "); putexit(st);
+                line_out();
             }
-            (void)st;
-            break;
+            if (!shell_alive) break;
+            struct pollfdx pf;
+            pf.fd = g_sig_rd;
+            pf.events = POLLIN;
+            pf.revents = 0;
+            struct kts tv;
+            tv.tv_sec = 0;
+            tv.tv_nsec = 200000000L;
+            long r = r_sys5(SYS_ppoll, (long)&pf, 1L,
+                            g_sig_rd < 0 ? (long)&tv : 0L, 0L, 0L);
+            if (r < 0 && r != -EINTR) sleep_ms(50);
+            if (pf.revents & POLLIN) pipe_drain();
         }
         sleep_ms(1000);
     }
@@ -1026,16 +1049,38 @@ static void rss_report(void)
     putstr(" KiB (budget 150)"); line_out();
 }
 
-/* C-side sink for Rust panics: log on the console, then idle PID 1 forever.
- * Only raw syscall writes, so it is safe from any context. */
+static void write_all_stderr(const void *buf, unsigned long len)
+{
+    const char *p = (const char *)buf;
+    unsigned long n = 0;
+    while (n < len) {
+        long r = r_sys3(SYS_write, 2L, (long)(p + n), (long)(len - n));
+        if (r == -EINTR) continue;
+        if (r <= 0) break;
+        n += (unsigned long)r;
+    }
+}
+
+/* C-side sink for Rust panics: log on stderr; exit(1) if not PID 1, or idle
+ * and reap zombies forever if PID 1. Only raw syscalls, safe from any context. */
+__attribute__((noreturn))
 void rcl_c_panic(const void *msg, unsigned long len)
 {
     static const char head[] = "rcl2 PANIC: ";
-    static const char tail[] = "\nrcl2: pid1 will not exit, idling\n";
-    r_sys3(SYS_write, 2L, (long)head, (long)sizeof(head) - 1);
-    if (msg && len > 0) r_sys3(SYS_write, 2L, (long)msg, (long)len);
-    r_sys3(SYS_write, 2L, (long)tail, (long)sizeof(tail) - 1);
-    for (;;) sleep_ms(3600000L);
+    static const char tail_pid1[] = "\nrcl2: pid1 will not exit, idling\n";
+    static const char nl[] = "\n";
+    write_all_stderr(head, sizeof(head) - 1);
+    if (msg && len > 0) write_all_stderr(msg, len);
+    if (r_sys0(SYS_getpid) != 1) {
+        write_all_stderr(nl, sizeof(nl) - 1);
+        die_ex(1);
+    }
+    write_all_stderr(tail_pid1, sizeof(tail_pid1) - 1);
+    for (;;) {
+        int st = 0;
+        while (r_sys4(SYS_wait4, -1L, (long)&st, WNOHANG, 0) > 0) {}
+        sleep_ms(1000);
+    }
 }
 
 /* -------------------------------------------------------------- selftest */
@@ -1232,19 +1277,19 @@ void rcl_enter(unsigned long *sp)
     char **argv = (char **)(sp + 1);
     const char *a1 = (argc > 1) ? argv[1] : 0;
 
+    if (r_sys0(SYS_getpid) == 1) {
+        if (a1) slog1("ignoring kernel arg ", a1);
+        pid1_boot();
+    }
+
     if (a1 && streq(a1, "--selftest")) { selftest(argc, argv); die_ex(0); }
     if (a1 && (streq(a1, "poweroff") || streq(a1, "reboot") || streq(a1, "halt")))
         power_direct(a1);
     if (a1 && streq(a1, "console")) console_run(argc, argv);
 
-    long pid = r_sys0(SYS_getpid);
-    if (pid != 1) {
-        static const char usage[] =
-            "rcl2: not running as pid 1\n";
-        g_len = 0; putstr(usage); line_out();
-        die_ex(1);
-    }
-    if (a1) slog1("ignoring kernel arg ", a1);
-    pid1_boot();
+    static const char usage[] =
+        "rcl2: not running as pid 1\n";
+    g_len = 0; putstr(usage); line_out();
+    die_ex(1);
 }
 

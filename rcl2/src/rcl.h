@@ -66,6 +66,7 @@ unsigned long  rcl_rs_banner(char *out, unsigned long cap);
 const char    *rcl_rs_version(void);
 
 /* C-side panic sink for the Rust core (named in the #[panic_handler]) */
+__attribute__((noreturn))
 void rcl_c_panic(const void *msg, unsigned long len);
 
 #endif /* RCL2_RCL_H */

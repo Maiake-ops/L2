@@ -53,6 +53,12 @@ static int closed_fds[16];
 static int closed_n;
 static int dup2_targets[16];
 static int dup2_n;
+static int ppoll_n;
+static long ppoll_release_pid;
+static int ppoll_release_st;
+static long fake_pid = 1;
+static int panic_check_mode;   /* 1 = non-pid1 exit, 2 = pid1 idle+reap */
+static int rescue_check_mode;  /* 1 = rescue_shell reap + shutdown */
 static char log_buf[8192];
 static unsigned log_len;
 
@@ -117,6 +123,12 @@ static void reset(void)
     fake_pipe_fds[1] = 1;
     closed_n = 0;
     dup2_n = 0;
+    ppoll_n = 0;
+    ppoll_release_pid = 0;
+    ppoll_release_st = 0;
+    fake_pid = 1;
+    panic_check_mode = 0;
+    rescue_check_mode = 0;
     log_len = 0;
     clock_ms = 1000;
     g_closing = 0;
@@ -142,7 +154,19 @@ static long fake_syscall(long nr, long a, long b, long c, long d, long e, long f
         return 0;
     }
     case SYS_nanosleep: {
+        if (panic_check_mode == 2) {
+            CHECK(log_contains("rcl2 PANIC: boom1"));
+            CHECK(log_contains("pid1 will not exit, idling"));
+            CHECK(fork_count == 0);
+            finish(0);
+        }
         if (reboot_done) {
+            if (rescue_check_mode) {
+                CHECK(log_contains("reap 888 exit 0"));
+                CHECK(log_contains("shutting down: poweroff request"));
+                CHECK(ppoll_n >= 1);
+                finish(0);
+            }
             /* shutdown_run idles after reboot: final audit */
             CHECK(reboot_n == 2);
             CHECK(reboot_cmds[0] == RB_POWER_OFF);
@@ -177,9 +201,9 @@ static long fake_syscall(long nr, long a, long b, long c, long d, long e, long f
                 kill_wait_eintr--;
                 return -EINTR;
             }
-            if (exit_i < exit_n) {
+            if (exit_i < exit_n && (a == -1 || exit_queue[exit_i].pid == a)) {
                 long pid = pop_exit();
-                *(int *)b = exit_queue[exit_i - 1].st;
+                if (b) *(int *)b = exit_queue[exit_i - 1].st;
                 return pid;
             }
             return fork_count > 0 ? 0 : -ECHILD;
@@ -187,13 +211,38 @@ static long fake_syscall(long nr, long a, long b, long c, long d, long e, long f
         if (interrupt_wait) { interrupt_wait = 0; return -EINTR; }
         if (exit_i < exit_n && (a == -1 || exit_queue[exit_i].pid == a)) {
             long pid = pop_exit();
-            *(int *)b = exit_queue[exit_i - 1].st;
+            if (b) *(int *)b = exit_queue[exit_i - 1].st;
             return pid;
         }
         if (fork_count == 0) return -ECHILD;
         CHECK(--eintr_budget > 0);
         return -EINTR;
     }
+    case SYS_ppoll: {
+        struct pollfdx *pf = (struct pollfdx *)a;
+        ppoll_n++;
+        if (rescue_check_mode) {
+            __atomic_or_fetch(&g_flags, SIGBIT(SIGTERM), __ATOMIC_RELAXED);
+        }
+        if (ppoll_release_pid > 0) {
+            queue_exit(ppoll_release_pid, ppoll_release_st);
+            ppoll_release_pid = 0;
+        }
+        if (pf && pf->fd >= 0) pf->revents = POLLIN;
+        return 1;
+    }
+    case SYS_read:
+        return -EAGAIN;
+    case SYS_getpid:
+        return fake_pid;
+    case SYS_exit_group:
+        if (panic_check_mode == 1) {
+            CHECK(a == 1);
+            CHECK(log_contains("rcl2 PANIC: boom"));
+            CHECK(!log_contains("pid1 will not exit"));
+            finish(0);
+        }
+        finish((int)a);
     case SYS_kill:
         CHECK(kill_n < 32);
         kill_log[kill_n].pid = a;
@@ -311,14 +360,21 @@ static void test_once_wait(void)
     CHECK(g_pid[0] == 0 && g_next[0] == 0);
     CHECK(log_contains("w finished (exit 0)"));
 
-    /* EINTR during the blocking wait: the reap sweep collects the child */
+    /* ppoll + reap during wait: orphan zombie 998 is reaped while waiting,
+     * then ppoll wakes when wait child 203 exits */
+    g_sig_rd = 3;
     fork_queue[0] = 203; fork_i = 0;
     svc_spawn(0);
-    queue_exit(203, 5 << 8);
-    interrupt_wait = 1;
+    fake_child(998);
+    queue_exit(998, 0);
+    ppoll_release_pid = 203;
+    ppoll_release_st = 5 << 8;
     svc_wait_boot(0);
+    CHECK(ppoll_n >= 1);
     CHECK(g_pid[0] == 0 && g_next[0] == 0);
-    CHECK(log_contains("w done (exit 5)"));
+    CHECK(fork_count == 0);
+    CHECK(log_contains("reap 998 exit 0"));
+    CHECK(log_contains("w finished (exit 5)"));
 }
 
 /* self-pipe must be moved above FDs 0/1/2 so console_open() never clobbers it */
@@ -360,7 +416,34 @@ static void test_shutdown_escalation(void)
 
 void rcl_enter(unsigned long *sp)
 {
-    (void)sp;
+    unsigned long argc = sp ? sp[0] : 0;
+    char **argv = sp ? (char **)(sp + 1) : 0;
+    const char *a1 = (argc > 1 && argv) ? argv[1] : 0;
+
+    if (a1 && streq(a1, "--panic-nonpid1")) {
+        reset();
+        fake_pid = 42;
+        panic_check_mode = 1;
+        rcl_c_panic("boom", 4);
+    }
+    if (a1 && streq(a1, "--panic-pid1")) {
+        reset();
+        fake_pid = 1;
+        panic_check_mode = 2;
+        fake_child(777);
+        queue_exit(777, 0);
+        rcl_c_panic("boom1", 5);
+    }
+    if (a1 && streq(a1, "--rescue-reap")) {
+        reset();
+        g_sig_rd = 3;
+        rescue_check_mode = 1;
+        fork_queue[0] = 501; fork_n = 1;
+        fake_child(888);
+        queue_exit(888, 0);
+        rescue_shell();
+    }
+
     test_selfpipe_no_stdio_clobber();
     test_burst_reaping();
     test_once_wait();

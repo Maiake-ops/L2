@@ -536,6 +536,50 @@ class Pid1Lifecycle(unittest.TestCase):
             os.kill(self.rcl2_pid(), sig)
             self.wait_log(msg)
 
+    def test_pid1_ignores_subcommand_args(self):
+        # M02: getpid()==1 must be checked before CLI subcommands so kernel
+        # boot args like --selftest or poweroff never hijack PID 1.
+        for arg in ("--selftest", "poweroff"):
+            self._cleanup()
+            self.lines = []
+            (self.root / "etc" / "rcl2.conf").write_text(
+                "hostname NS\nklog 0\n"
+                "service r respawn /bin/helper sleep 60000\n"
+            )
+            self.proc = subprocess.Popen(
+                ["unshare", "--user", "--map-root-user", "--pid", "--mount",
+                 "--uts", "--fork", "chroot", str(self.root),
+                 "/bin/rcl2", arg],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            threading.Thread(target=self._reader, daemon=True).start()
+            self.wait_log(rf"ignoring kernel arg {re.escape(arg)}")
+            self.wait_log(r"boot complete: 1 service\(s\)")
+            self.assertIsNone(self.proc.poll(),
+                              f"PID 1 exited when passed {arg!r}")
+
+    def test_wait_mode_shutdown_no_lost_wakeup(self):
+        # M02: SIGTERM arriving while a wait-mode service is running must
+        # wake ppoll immediately and trigger shutdown.
+        self.start("hostname NS\nklog 0\n"
+                   "service w wait /bin/helper sleep 60000\n")
+        self.wait_log(r"start w pid")
+        os.kill(self.rcl2_pid(), signal.SIGTERM)
+        self.wait_log(r"shutting down: poweroff request")
+
+    def test_panic_and_rescue_reap_unit(self):
+        # M02: verify rcl_c_panic (non-PID1 exits 1, PID1 reaps+idles) and
+        # rescue_shell() ppoll+reap+shutdown via test-lifecycle harness.
+        tl = REPO / "rcl2" / "build" / "test-lifecycle"
+        if not tl.exists():
+            subprocess.run(["make", "-C", str(REPO / "rcl2"),
+                            "build/test-lifecycle"], check=True,
+                           capture_output=True, text=True, timeout=120)
+        for flag in ("--panic-nonpid1", "--panic-pid1", "--rescue-reap"):
+            r = subprocess.run([str(tl), flag], capture_output=True,
+                               text=True, timeout=15)
+            self.assertEqual(r.returncode, 0,
+                             f"test-lifecycle {flag} failed ({r.returncode})")
+
 
 if __name__ == "__main__":
     unittest.main()
