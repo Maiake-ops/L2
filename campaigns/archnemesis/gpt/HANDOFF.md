@@ -1,0 +1,9 @@
+# Second Front handoff
+
+The first five missions are integrated on `campaigns/archnemesis-sol`. The public-facing branch, original checkout and peer worktrees were outside the write scope. The baseline and integration commit IDs are recorded in [MISSION_BOARD.md](MISSION_BOARD.md).
+
+The full host suite passed. A clean build from the pinned Linux archive produced a low-RAM kernel, and both ISO variants were assembled twice with matching checksums. The core reused its existing hardware kernel and cached tools. A disposable 256 MiB BIOS VM installed the core image to a temporary disk, then booted from its ext4 root and powered off cleanly. The low-RAM BIOS floor was bracketed with an 8 MiB failure and a 9 MiB success. See [BENCHMARKS.md](BENCHMARKS.md) for tested images, firmware, RAM and hashes.
+
+The low-RAM variant is a serial VM profile. Use the core image for the tested ext4 install path. Physical machines, installed UEFI and full endurance requirements are outside the completed checks. The ext4 recovery run was a short release screen. Installer signals during resource acquisition and I/O failures during kernel patch publication remain open.
+
+Batch 2 is paused. The newly visible primary mission ledger assigns overlapping work for all five local fixes, and the patcher and stability harness have concurrent edits. Use [CONFLICTS.md](CONFLICTS.md) to reconcile ownership before integration. The board lists five proposed verification missions. Retain the same build epoch and guest settings when comparing RAM. The separate evidence directory contains the tested image copies, serial logs and command output. The tracked build artifacts on the campaign branch still correspond to the base checkout. Use the explicitly checksummed candidates identified in [BENCHMARKS.md](BENCHMARKS.md).
