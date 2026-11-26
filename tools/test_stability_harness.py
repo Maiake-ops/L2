@@ -4,6 +4,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -208,7 +209,7 @@ class FilesystemTests(unittest.TestCase):
                     FakeGuest.active = False
 
                 def send(self, script):
-                    pass
+                    events.append(("crash-script", script))
 
                 def wait(self, *args):
                     pass
@@ -246,6 +247,19 @@ class FilesystemTests(unittest.TestCase):
                         events.index(("repair", "crash-repair")))
         self.assertLess(events.index(("repair", "crash-repair")),
                         events.index(("start", "fs-recovery")))
+
+    def test_crash_readiness_requires_successful_scratch_write(self):
+        _, events = self.run_scenario()
+        script = next(value for action, value in events if action == "crash-script")
+        for cd_status, dd_status in ((1, 0), (0, 1), (0, 0)):
+            with self.subTest(cd_status=cd_status, dd_status=dd_status):
+                # Stub guest commands and end the overwrite loop after its first attempt.
+                setup = (f"cd() {{ return {cd_status}; }}; "
+                         f"dd() {{ [ -z \"${{wrote:-}}\" ] || return 1; wrote=1; return {dd_status}; }}; ")
+                proc = subprocess.run(["sh", "-c", setup + script], capture_output=True, timeout=2)
+                ready = cd_status == dd_status == 0
+                self.assertEqual(b"L2WRITE_ACTIVE\n" in proc.stdout, ready)
+                self.assertEqual(proc.returncode == 0, ready)
 
     def test_corruption_after_recovery_fails_and_closes_vm(self):
         report, events = self.run_scenario(corrupt=True)

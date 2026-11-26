@@ -440,8 +440,8 @@ def filesystem(args, report):
                         # Signal readiness only after at least one write. Loop
                         # repeatedly overwrites a bounded 8 MiB scratch file.
                         guest.buffer = b""
-                        guest.send("cd /mnt/l2-stability; dd if=/dev/zero of=inflight bs=4096 count=2048; "
-                                   "echo L2WRITE_''ACTIVE; while :; do "
+                        guest.send("cd /mnt/l2-stability && dd if=/dev/zero of=inflight bs=4096 count=2048 && "
+                                   "echo L2WRITE_''ACTIVE && while :; do "
                                    "dd if=/dev/zero of=inflight bs=4096 count=2048 2>/dev/null || break; done")
                         guest.wait(b"L2WRITE_ACTIVE\r\n", args.command_timeout)
                         guest.pause(0.2)
