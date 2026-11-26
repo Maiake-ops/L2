@@ -404,6 +404,69 @@ class L2pmSecurity(unittest.TestCase):
         arc = tar_archive([info_entry(), tar_entry("fifo", typeflag="6")])
         self.install(arc)
 
+    # ------------------------------------------------- M05 adversarial tar
+    def test_symlink_dotdot_after_component_rejected(self):
+        # a/sub -> .. is contained, so a/x -> sub/.. would escape root when
+        # resolved by the OS; link_inside must reject '..' after a component.
+        arc = tar_archive([
+            info_entry(),
+            tar_entry("a/", typeflag="5"),
+            tar_entry("a/sub", typeflag="2", linkname=".."),
+            tar_entry("a/x", typeflag="2", linkname="sub/.."),
+        ])
+        self.install(arc)
+
+    def test_hardlink_through_symlink_dir_rejected(self):
+        # Hardlink target traversing an intermediate symlink must be rejected.
+        arc = tar_archive([
+            info_entry(),
+            tar_entry("real/", typeflag="5"),
+            tar_entry("real/f", b"secret\n"),
+            tar_entry("symdir", typeflag="2", linkname="real"),
+            tar_entry("h", typeflag="1", linkname="symdir/f"),
+        ])
+        self.install(arc)
+
+    def test_setuid_and_setgid_rejected(self):
+        for bad_mode in (0o4755, 0o2755, 0o6755):
+            arc = tar_archive([
+                info_entry(),
+                tar_entry("bin/", typeflag="5", mode=0o755),
+                tar_entry("bin/suid", b"#!/bin/sh\n", mode=bad_mode),
+            ])
+            r = self.install(arc)
+            self.assertIn("setuid/setgid", r.stderr)
+
+    def test_dir_with_nonzero_size_rejected(self):
+        # Type '5' directory with size > 0 could smuggle a tar header in payload.
+        h = bytearray(tar_header("d/", 0, "5", mode=0o755))
+        put_octal(h, 124, 12, 512)
+        csum = sum(h[:148]) + sum(b"        ") + sum(h[156:])
+        h[148:155] = f"{csum:06o}\x00".encode()
+        arc = tar_archive([info_entry(), bytes(h) + b"\x00" * 512])
+        self.install(arc)
+
+    def test_nonzero_padding_rejected(self):
+        h = tar_header("f", 2, "0")
+        bad_pad = b"hi" + b"\x00" * 509 + b"\x01"
+        arc = tar_archive([info_entry(), h + bad_pad])
+        self.install(arc)
+
+    def test_truncated_padding_rejected(self):
+        h = tar_header("f", 2, "0")
+        arc = info_entry() + h + b"hi" + b"\x00" * 10
+        self.install(arc)
+
+    def test_trailing_garbage_after_eof_blocks_rejected(self):
+        arc = tar_archive([info_entry(), tar_entry("f", b"ok\n")], end_blocks=2)
+        arc += b"SMUGGLED" + b"\x00" * 504
+        self.install(arc)
+
+    def test_oversized_entry_cap_rejected(self):
+        # Exceeds 512 MiB per-entry cap without needing a 1 TiB header.
+        arc = tar_archive([info_entry(), tar_header("huge", 600 << 20, "0")])
+        self.install(arc)
+
     # ----------------------------------------------------------- metadata
     def test_oversized_info_rejected_without_oom(self):
         arc = tar_archive([tar_entry(".l2pm/info", b"x" * (2 * 1024 * 1024)),

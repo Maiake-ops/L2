@@ -654,29 +654,76 @@ static int safe_rel(const char *name)
 
 /* Lexically check that `link`, resolved relative to directory `dir`
  * ("" = archive root), stays inside the archive root.  Rejects absolute
- * targets and any ".." that would escape.  No filesystem access: this is
- * pure path arithmetic, so it cannot be fooled by existing symlinks. */
+ * targets, any ".." that would escape, and any ".." appearing after a
+ * regular path component (since that component could itself be a symlink
+ * pointing toward the root, turning "sym/.." into an escape). */
 static int link_inside(const char *dir, const char *link)
 {
     if (!link[0] || link[0] == '/') return 0;
     int depth = 0;
-    const char *parts[2] = { dir, link };
-    for (int k = 0; k < 2; k++) {
-        const char *p = parts[k];
-        while (*p) {
-            while (*p == '/') p++;
-            const char *e = p;
-            while (*e && *e != '/') e++;
-            size_t n = (size_t)(e - p);
-            if (n == 0) break;
-            if (n == 1 && p[0] == '.') { /* "." stays */ }
-            else if (n == 2 && p[0] == '.' && p[1] == '.') {
-                if (--depth < 0) return 0;
-            } else depth++;
-            p = e;
+    const char *p = dir;
+    while (*p) {
+        while (*p == '/') p++;
+        const char *e = p;
+        while (*e && *e != '/') e++;
+        size_t n = (size_t)(e - p);
+        if (n == 0) break;
+        if (n == 1 && p[0] == '.') { /* ignore */ }
+        else if (n == 2 && p[0] == '.' && p[1] == '.') return 0;
+        else depth++;
+        p = e;
+    }
+    int seen_name = 0;
+    p = link;
+    while (*p) {
+        while (*p == '/') p++;
+        const char *e = p;
+        while (*e && *e != '/') e++;
+        size_t n = (size_t)(e - p);
+        if (n == 0) break;
+        if (n == 1 && p[0] == '.') { /* "." stays */ }
+        else if (n == 2 && p[0] == '.' && p[1] == '.') {
+            if (seen_name || --depth < 0) return 0;
+        } else {
+            seen_name = 1;
+            depth++;
         }
+        p = e;
     }
     return 1;
+}
+
+/* Verify that `rel` below `dest` traverses only real directories (never
+ * symlinks) and resolves to an existing regular file. */
+static int hardlink_target_ok(const char *dest, const char *rel)
+{
+    if (!safe_rel(rel)) return 0;
+    char *cur = xstrdup(dest);
+    const char *p = rel;
+    int ok = 0;
+    while (*p) {
+        while (*p == '/') p++;
+        const char *e = p;
+        while (*e && *e != '/') e++;
+        size_t n = (size_t)(e - p);
+        if (n == 0) break;
+        const char *rest = e;
+        while (*rest == '/') rest++;
+        int is_last = (*rest == 0);
+        char *next = fmt("%s/%.*s", cur, (int)n, p);
+        free(cur);
+        cur = next;
+        struct stat st;
+        if (lstat(cur, &st) != 0) { ok = 0; break; }
+        if (is_last) {
+            ok = S_ISREG(st.st_mode);
+            break;
+        }
+        if (!S_ISDIR(st.st_mode)) { ok = 0; break; }
+        p = rest;
+    }
+    free(cur);
+    return ok;
 }
 
 /* Strict tar numeric field: octal with optional leading spaces and
@@ -755,6 +802,10 @@ static int ensure_parents(const char *dest, const char *out)
  * read-only directory entry cannot block writing its children. */
 struct dirfix { char *path; mode_t mode; long long mt; };
 
+#define TAR_MAX_ENTRIES    65536
+#define TAR_MAX_FILE_SIZE  (512LL << 20)   /* 512 MiB per entry */
+#define TAR_MAX_TOTAL_SIZE (1LL << 30)     /* 1 GiB total extracted */
+
 static int tar_extract(const char *tar, const char *dest)
 {
     FILE *f = fopen(tar, "rb");
@@ -762,6 +813,8 @@ static int tar_extract(const char *tar, const char *dest)
     if (mkdir_p(dest, 0755) != 0) { fclose(f); return -1; }
     struct dirfix *df = NULL;
     size_t dfn = 0, dfc = 0;
+    size_t nentries = 0;
+    long long total_bytes = 0;
     int rc = 0;
     for (;;) {
         unsigned char hdr[512];
@@ -772,17 +825,41 @@ static int tar_extract(const char *tar, const char *dest)
         int zero = 1;
         for (int i = 0; i < 512; i++) if (hdr[i]) { zero = 0; break; }
         if (zero) {
-            /* End of archive: expect a second zero block (or clean EOF). */
+            /* End of archive: allow trailing all-zero 512B blocks (POSIX 2x512
+             * or 10 KiB blocking), reject any non-zero byte or partial block. */
             unsigned char z2[512];
-            size_t r = fread(z2, 1, 512, f);
-            if (r == 512) {
-                for (int i = 0; i < 512; i++)
-                    if (z2[i]) { fprintf(stderr, "l2pm: corrupt end-of-archive in %s\n", tar); rc = -1; break; }
-            } else if (r != 0) {
-                fprintf(stderr, "l2pm: truncated end-of-archive in %s\n", tar);
-                rc = -1;
+            size_t zblocks = 1;
+            for (;;) {
+                size_t r = fread(z2, 1, 512, f);
+                if (r == 0) {
+                    if (ferror(f)) rc = -1;
+                    break;
+                }
+                if (r != 512) {
+                    fprintf(stderr, "l2pm: truncated end-of-archive in %s\n", tar);
+                    rc = -1;
+                    break;
+                }
+                for (int i = 0; i < 512; i++) {
+                    if (z2[i]) {
+                        fprintf(stderr, "l2pm: corrupt end-of-archive in %s\n", tar);
+                        rc = -1;
+                        break;
+                    }
+                }
+                if (rc != 0) break;
+                if (++zblocks > 256) {
+                    fprintf(stderr, "l2pm: excessive zero trailer in %s\n", tar);
+                    rc = -1;
+                    break;
+                }
             }
             break;
+        }
+        if (++nentries > TAR_MAX_ENTRIES) {
+            fprintf(stderr, "l2pm: tar entry count exceeds limit (%d) in %s\n",
+                    TAR_MAX_ENTRIES, tar);
+            rc = -1; break;
         }
         if (!tar_hdr_checksum_ok(hdr)) {
             fprintf(stderr, "l2pm: bad tar header checksum in %s\n", tar);
@@ -796,15 +873,21 @@ static int tar_extract(const char *tar, const char *dest)
         long long size, mt, m;
         if (parse_tar_num(hdr + 124, 12, &size) != 0 ||
             parse_tar_num(hdr + 136, 12, &mt) != 0 ||
-            parse_tar_num(hdr + 100, 8, &m) != 0) {
+            parse_tar_num(hdr + 100, 8, &m) != 0 || m < 0) {
             fprintf(stderr, "l2pm: bad numeric field in tar header (%s)\n", tar);
             rc = -1; break;
         }
-        if (size < 0 || size > (1LL << 40)) {
+        if (size < 0 || size > TAR_MAX_FILE_SIZE ||
+            total_bytes > TAR_MAX_TOTAL_SIZE - size) {
             fprintf(stderr, "l2pm: tar entry size out of range (%s)\n", tar);
             rc = -1; break;
         }
-        mode_t mode = (mode_t)m & 07777;
+        total_bytes += size;
+        if ((m & (S_ISUID | S_ISGID)) != 0) {
+            fprintf(stderr, "l2pm: setuid/setgid mode not permitted in archive (%s)\n", tar);
+            rc = -1; break;
+        }
+        mode_t mode = (mode_t)m & 01777;
         char type = (char)hdr[156];
 
         /* Extended metadata (PAX 'x'/'g', GNU longname 'L'/'K'): consume
@@ -841,23 +924,28 @@ static int tar_extract(const char *tar, const char *dest)
         if (ensure_parents(dest, out) != 0) { free(out); rc = -1; break; }
 
         if (type == '5') {
-            struct stat st;
-            if (lstat(out, &st) == 0) {
-                if (!S_ISDIR(st.st_mode)) {
-                    if (unlink(out) != 0 || mkdir(out, 0755) != 0) rc = -1;
+            if (size != 0) {
+                fprintf(stderr, "l2pm: directory entry with non-zero size: %s\n", rel);
+                rc = -1;
+            } else {
+                struct stat st;
+                if (lstat(out, &st) == 0) {
+                    if (!S_ISDIR(st.st_mode)) {
+                        if (unlink(out) != 0 || mkdir(out, 0755) != 0) rc = -1;
+                    }
+                } else if (errno == ENOENT) {
+                    if (mkdir(out, 0755) != 0) rc = -1;
+                } else rc = -1;
+                if (rc == 0) {
+                    if (dfn == dfc) {
+                        dfc = dfc ? dfc * 2 : 64;
+                        df = xrealloc(df, dfc * sizeof(*df));
+                    }
+                    df[dfn].path = xstrdup(out);
+                    df[dfn].mode = mode ? mode : 0755;
+                    df[dfn].mt = mt;
+                    dfn++;
                 }
-            } else if (errno == ENOENT) {
-                if (mkdir(out, 0755) != 0) rc = -1;
-            } else rc = -1;
-            if (rc == 0) {
-                if (dfn == dfc) {
-                    dfc = dfc ? dfc * 2 : 64;
-                    df = xrealloc(df, dfc * sizeof(*df));
-                }
-                df[dfn].path = xstrdup(out);
-                df[dfn].mode = mode ? mode : 0755;
-                df[dfn].mt = mt;
-                dfn++;
             }
         } else if (type == '2') {
             /* Symlink: the target must stay inside the package root. */
@@ -874,12 +962,12 @@ static int tar_extract(const char *tar, const char *dest)
                 if (symlink(linkname, out) != 0) rc = -1;
             }
         } else if (type == '1') {
-            /* Hardlink: target is archive-root-relative, must already exist
-             * as a regular file inside dest (tar order guarantees this). */
-            char *target = fmt("%s/%s", dest, linkname);
-            struct stat st;
-            if (size != 0 || !link_inside("", linkname) ||
-                lstat(target, &st) != 0 || !S_ISREG(st.st_mode)) {
+            /* Hardlink: target is archive-root-relative, must traverse only
+             * real directories inside dest and end at an existing regular file. */
+            const char *lrel = linkname;
+            while (lrel[0] == '.' && lrel[1] == '/') lrel += 2;
+            char *target = fmt("%s/%s", dest, lrel);
+            if (size != 0 || !hardlink_target_ok(dest, lrel)) {
                 fprintf(stderr, "l2pm: unsafe or missing hardlink target: %s -> %s\n", rel, linkname);
                 rc = -1;
             } else {
@@ -929,7 +1017,20 @@ static int tar_extract(const char *tar, const char *dest)
         if (rc != 0) break;
 
         size_t pad = (size_t)((512 - (size % 512)) % 512);
-        if (pad && fseeko(f, (off_t)pad, SEEK_CUR) != 0) { rc = -1; break; }
+        if (pad) {
+            unsigned char pbuf[512];
+            if (fread(pbuf, 1, pad, f) != pad) {
+                fprintf(stderr, "l2pm: truncated tar padding in %s\n", tar);
+                rc = -1; break;
+            }
+            for (size_t pi = 0; pi < pad; pi++) {
+                if (pbuf[pi]) {
+                    fprintf(stderr, "l2pm: non-zero tar padding in %s\n", tar);
+                    rc = -1; break;
+                }
+            }
+            if (rc != 0) break;
+        }
     }
     fclose(f);
     if (rc == 0) {
