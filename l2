@@ -52,12 +52,22 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # --------------------------------------------------------------- distro
 detect_distro() {
     [ -n "$DISTRO" ] && return 0
-    local id="" like=""
+    local id="" like="" line k v
     if [ -r /etc/os-release ]; then
-        # shellcheck disable=SC1091
-        . /etc/os-release
-        id=${ID:-}
-        like=${ID_LIKE:-}
+        while IFS= read -r line || [ -n "$line" ]; do
+            case "$line" in
+                ID=*|ID_LIKE=*)
+                    k=${line%%=*}
+                    v=${line#*=}
+                    v=${v#\"}; v=${v%\"}
+                    v=${v#\'}; v=${v%\'}
+                    case "$k" in
+                        ID)      id=$v ;;
+                        ID_LIKE) like=$v ;;
+                    esac
+                    ;;
+            esac
+        done < /etc/os-release
     fi
     case " $id $like " in
         *" nixos "*)  DISTRO=nixos ;;
@@ -258,25 +268,50 @@ verify_sha() {
 }
 
 download() {
-    local url=$1 dest=$2 want=$3 title=${4:-download}
+    local url=$1 dest=$2 want=$3 title=${4:-download} part
+    if [ "${L2_ALLOW_INSECURE_URL:-0}" != 1 ]; then
+        case "$url" in
+            https://*) ;;
+            *) die "refusing non-HTTPS download URL: $url" ;;
+        esac
+    fi
     mkdir -p "$(dirname "$dest")"
     if [ -f "$dest" ] && { [ -z "$want" ] || [ "$(sha256_of "$dest")" = "$want" ]; }; then
         say "$title: cached"
         return 0
     fi
     step "$title"
-    rm -f "$dest.part"
+    part=$(mktemp "$dest.part.XXXXXX")
     if have curl; then
-        ui_spin "$title" curl -fL --retry 3 --connect-timeout 20 -o "$dest.part" "$url"
+        local curl_proto=()
+        [ "${L2_ALLOW_INSECURE_URL:-0}" = 1 ] || curl_proto=(--proto '=https' --tlsv1.2)
+        if ! ui_spin "$title" curl -fL "${curl_proto[@]}" --retry 3 --connect-timeout 20 -o "$part" "$url"; then
+            rm -f "$part"
+            die "download failed: $url"
+        fi
     elif have wget; then
-        ui_spin "$title" wget -O "$dest.part" "$url"
+        if ! ui_spin "$title" wget -O "$part" "$url"; then
+            rm -f "$part"
+            die "download failed: $url"
+        fi
     else
+        rm -f "$part"
         die "curl or wget is required"
     fi
-    mv "$dest.part" "$dest"
-    if [ -n "$want" ]; then verify_sha "$dest" "$want"; else
+    if [ -n "$want" ]; then
+        local got
+        got=$(sha256_of "$part")
+        if [ "$got" != "$want" ]; then
+            rm -f "$part"
+            die "sha256 mismatch for $dest
+  expected $want
+  got      $got"
+        fi
+    else
         warn "no pinned sha256 for $dest"
     fi
+    chmod 0644 "$part" 2>/dev/null || true
+    mv -f "$part" "$dest"
 }
 
 latest_kernel() {
@@ -291,7 +326,7 @@ latest_musl() {
 }
 
 latest_dash() {
-    curl -fsSL --max-time 30 http://gondor.apana.org.au/~herbert/dash/files/ \
+    curl -fsSL --max-time 30 https://gondor.apana.org.au/~herbert/dash/files/ \
         | grep -o 'dash-[0-9][0-9.]*\.tar\.gz' | sort -V | tail -1 \
         | sed 's/^dash-//; s/\.tar\.gz$//'
 }
@@ -325,7 +360,7 @@ update_sources() {
     download "https://musl.libc.org/releases/musl-$m.tar.gz" "$mfile" "" "musl $m"
     local msum; msum=$(sha256_of "$mfile")
     local dfile=$CACHE/dash-$d.tar.gz
-    download "http://gondor.apana.org.au/~herbert/dash/files/dash-$d.tar.gz" "$dfile" "" "dash $d"
+    download "https://gondor.apana.org.au/~herbert/dash/files/dash-$d.tar.gz" "$dfile" "" "dash $d"
     local dsum; dsum=$(sha256_of "$dfile")
     local lmfile=$CACHE/limine-$lm.tar.gz
     download "https://codeberg.org/Limine/Limine/releases/download/v$lm/limine-$lm.tar.gz" \
@@ -440,10 +475,34 @@ with_musl() {
 KLOCAL=$L2_ROOT/config/kernel.local
 
 klocal_set() {   # CONFIG_FOO=value
-    local sym=${1%%=*}
-    [ -f "$KLOCAL" ] || printf '# L2 local kernel overrides (managed by `l2 kernel`)\n' > "$KLOCAL"
-    sed -i "/^${sym}=/d;/^# ${sym} is not set/d" "$KLOCAL"
-    printf '%s\n' "$1" >> "$KLOCAL"
+    local entry=$1 sym val tmp
+    case "$entry" in
+        *=*) sym=${entry%%=*}; val=${entry#*=} ;;
+        *)   die "invalid kernel config entry: $entry" ;;
+    esac
+    if ! [[ "$sym" =~ ^CONFIG_[A-Za-z0-9_]+$ ]]; then
+        die "invalid kernel config symbol: $sym"
+    fi
+    if [[ "$val" == *$'\n'* || "$val" == *$'\r'* ]]; then
+        die "invalid kernel config value for $sym"
+    fi
+    if ! [[ "$val" =~ ^([ymn]|-?[0-9]+|0x[0-9a-fA-F]+|\"[^\"[:cntrl:]\\]*\")$ ]]; then
+        die "invalid kernel config value for $sym: $val"
+    fi
+    mkdir -p "$(dirname "$KLOCAL")"
+    tmp=$(mktemp "$KLOCAL.XXXXXX")
+    if [ -f "$KLOCAL" ]; then
+        awk -v sym="$sym" '
+            index($0, sym "=") == 1 { next }
+            $0 == ("# " sym " is not set") { next }
+            { print }
+        ' "$KLOCAL" > "$tmp"
+    else
+        printf '# L2 local kernel overrides (managed by `l2 kernel`)\n' > "$tmp"
+    fi
+    printf '%s=%s\n' "$sym" "$val" >> "$tmp"
+    chmod 0644 "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$KLOCAL"
 }
 
 kfam_syms() {
@@ -627,13 +686,13 @@ build_kernel() {
     done
     job_begin "Configuring linux $ver (tinyconfig + L2 fragment)" "$log"
     if ! (
-        cd "$dir"
-        export KBUILD_BUILD_TIMESTAMP="$stamp" KBUILD_BUILD_USER=l2 KBUILD_BUILD_HOST=l2 KBUILD_BUILD_VERSION=1
-        make tinyconfig
-        scripts/kconfig/merge_config.sh -m .config "${norm_frags[@]}" >/dev/null 2>&1 \
-            || cat "${norm_frags[@]}" >> .config
-        make olddefconfig
-        scripts/config --set-str LOCALVERSION "-l2" 2>/dev/null || true
+        cd "$dir" &&
+        export KBUILD_BUILD_TIMESTAMP="$stamp" KBUILD_BUILD_USER=l2 KBUILD_BUILD_HOST=l2 KBUILD_BUILD_VERSION=1 &&
+        make tinyconfig &&
+        { scripts/kconfig/merge_config.sh -m .config "${norm_frags[@]}" >/dev/null 2>&1 \
+            || cat "${norm_frags[@]}" >> .config; } &&
+        make olddefconfig &&
+        { [ ! -x scripts/config ] || scripts/config --set-str LOCALVERSION "-l2"; }
     ) >"$log" 2>&1; then rm -f "${norm_frags[@]}"; job_end 1; ui_logtail "$log" 60; die "kernel configure failed (log: $log)"; fi
     rm -f "${norm_frags[@]}"
     job_end 0
@@ -646,10 +705,10 @@ build_kernel() {
     fi
     job_begin "Building linux $ver (-j$JOBS -l$LOAD bzImage + modules)" "$log"
     if ! (
-        cd "$dir"
-        export KBUILD_BUILD_TIMESTAMP="$stamp" KBUILD_BUILD_USER=l2 KBUILD_BUILD_HOST=l2 KBUILD_BUILD_VERSION=1
-        make -j"$JOBS" -l"$LOAD" bzImage
-        make -j"$JOBS" -l"$LOAD" modules
+        cd "$dir" &&
+        export KBUILD_BUILD_TIMESTAMP="$stamp" KBUILD_BUILD_USER=l2 KBUILD_BUILD_HOST=l2 KBUILD_BUILD_VERSION=1 &&
+        make -j"$JOBS" -l"$LOAD" bzImage &&
+        make -j"$JOBS" -l"$LOAD" modules &&
         make -s headers_install INSTALL_HDR_PATH="$SYSROOT"
     ) >>"$log" 2>&1; then job_end 1; ui_logtail "$log" 80; die "kernel build failed (log: $log)"; fi
     [ -f "$dir/arch/x86/boot/bzImage" ] || { job_end 1; die "kernel image missing after build"; }
@@ -681,7 +740,7 @@ build_dash() {
     [ -n "$ver" ] || ver=$(latest_dash)
     sha=$(lock_get dash_sha256 || true)
     tarball=$CACHE/dash-$ver.tar.gz
-    download "http://gondor.apana.org.au/~herbert/dash/files/dash-$ver.tar.gz" \
+    download "https://gondor.apana.org.au/~herbert/dash/files/dash-$ver.tar.gz" \
         "$tarball" "$sha" "dash $ver source"
     dir=$SRC/dash-$ver
     rm -rf "$dir"
@@ -1038,6 +1097,7 @@ $p-method"
         else warn "L2_SSL_CA: $ca not readable; shipping no CA bundle"; fi
     fi
     find "$w" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
+    write_pack_manifest "$w"
     job_end 0 "$(ui_size "$(stat -c%s "$OUT/openssl")")"
     say "ssl pack: $(du -sk "$w" | awk '{print $1}') KiB on the medium, 0 KiB resident (run from l2/ssl)"
 }
@@ -1121,6 +1181,7 @@ build_wifipack() {
         [ -x "$OUT/$b" ] && install -m 0755 "$OUT/$b" "$w/bin/$b" || warn "$b missing (l2 build wpa)"
     done
     find "$w" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
+    write_pack_manifest "$w"
     say "wifi pack: $(du -sk "$w" | awk '{print $1}') KiB  (modules + firmware + wpa)"
 }
 
@@ -1189,6 +1250,7 @@ build_hwpack() {
         done
     fi
     find "$w" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
+    write_pack_manifest "$w"
     say "hw pack: $(du -sk "$w" | awk '{print $1}') KiB  (on-demand hardware drivers)"
 }
 
@@ -1287,9 +1349,9 @@ build_installpack() {
     rm -rf "$w"; mkdir -p "$w/bin" "$w/etc"
     install -m 0755 "$OUT/l2gpt" "$w/bin/sgdisk"
     install -m 0755 "$OUT/mke2fs" "$w/bin/mke2fs"
-    ln -s mke2fs "$w/bin/mkfs.ext4"
+    ln "$w/bin/mke2fs" "$w/bin/mkfs.ext4"
     install -m 0755 "$OUT/mkfs.fat" "$w/bin/mkfs.fat"
-    ln -s mkfs.fat "$w/bin/mkfs.vfat"
+    ln "$w/bin/mkfs.fat" "$w/bin/mkfs.vfat"
     # static musl build of the limine host tool (the regular one is a host
     # binary and cannot run inside the live system); bin/limine.c is the
     # version-substituted, epoch-seeded source generated by build_limine.
@@ -1300,6 +1362,7 @@ build_installpack() {
     install -m 0644 "$L2_ROOT/config/cmdline" "$w/etc/cmdline"
     install -m 0644 "$L2_ROOT/config/limine-installed.conf" "$w/etc/limine-installed.conf"
     find "$w" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
+    write_pack_manifest "$w"
     say "install pack: $(du -sk "$w" | awk '{print $1}') KiB on the medium, 0 KiB resident (sgdisk mke2fs mkfs.fat limine)"
 }
 
@@ -1469,18 +1532,63 @@ build_limine() {
 # --------------------------------------------------------------- ISO
 cmdline_base() { tr -d '\n' < "$L2_ROOT/config/cmdline" 2>/dev/null || printf 'loglevel=4'; }
 
+# Phase-2 pack integrity (docs/armageddon/p2-pack-pin-contract.md):
+# Every pack directory carries a deterministic `pack-manifest` listing
+# `sha256  relpath` for every regular file (LC_ALL=C sorted, no symlinks/specials).
+write_pack_manifest() {
+    local dir=$1 tmp
+    [ -d "$dir" ] || die "write_pack_manifest: missing directory $dir"
+    rm -f "$dir/pack-manifest"
+    if [ -n "$(find "$dir" ! -type d ! -type f -print -quit 2>/dev/null)" ]; then
+        die "pack $dir contains non-regular file(s); refusing to generate pack-manifest"
+    fi
+    tmp=$(mktemp "$dir/pack-manifest.XXXXXX")
+    (
+        cd "$dir"
+        find . -type f ! -name 'pack-manifest' ! -name 'pack-manifest.*' -print \
+            | sed 's|^\./||' \
+            | LC_ALL=C sort \
+            | while IFS= read -r rel; do
+                printf '%s  %s\n' "$(sha256_of "$rel")" "$rel"
+            done
+    ) > "$tmp"
+    chmod 0644 "$tmp"
+    touch -h -d "@$EPOCH" "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$dir/pack-manifest"
+}
+
+# Compute `/etc/l2/pack-hash` (`sha256(pack-manifest)  packname`, sorted) for
+# the packs staged under `$isod/l2/<pack>`.
+write_pack_pin() {
+    local isod=$1 pin_out=$2 tmp p mf
+    mkdir -p "$(dirname "$pin_out")"
+    tmp=$(mktemp "$pin_out.XXXXXX")
+    : > "$tmp"
+    for p in hw install ssl wifi; do
+        [ -d "$isod/l2/$p" ] || continue
+        mf="$isod/l2/$p/pack-manifest"
+        if [ ! -f "$mf" ]; then
+            write_pack_manifest "$isod/l2/$p"
+        fi
+        printf '%s  %s\n' "$(sha256_of "$mf")" "$p" >> "$tmp"
+    done
+    chmod 0644 "$tmp"
+    touch -h -d "@$EPOCH" "$tmp" 2>/dev/null || true
+    mv -f "$tmp" "$pin_out"
+}
+
 # _make_iso OUT LIMIT_MB LABEL WITH_WIFI [INITRAMFS]
 _make_iso() {
-    local out=$1 limit_mb=$2 label=$3 wifi=$4 initrd=${5:-$OUT/initramfs-l2}
+    local out=$1 limit_mb=$2 label=$3 wifi=$4 custom_initrd=${5:-}
+    local initrd=${custom_initrd:-$OUT/initramfs-l2}
     [ -f "$OUT/vmlinuz-l2" ] || die "kernel missing; run: l2 build kernel"
-    [ -f "$initrd" ] || die "$initrd missing; run: l2 build initramfs"
+    [ -f "$initrd" ] || [ -d "$ROOTFS/bin" ] || die "$initrd missing; run: l2 build initramfs"
     [ -x "$OUT/limine/bin/limine" ] || die "limine missing; run: l2 build limine"
     have xorriso || die "xorriso is required"
     local lim=$OUT/limine/share/limine isod=$ISO_DIR.$label log=$LOGS/iso.log
     [ "$label" != desktop ] || log=$LOGS/iso-desktop.log
     rm -rf "$isod"; mkdir -p "$isod/boot/limine" "$isod/EFI/BOOT" "$isod/l2"
     install -m 0644 "$OUT/vmlinuz-l2" "$isod/boot/vmlinuz"
-    install -m 0644 "$initrd" "$isod/boot/initramfs"
     install -m 0644 "$lim/limine-bios.sys" "$isod/boot/limine/limine-bios.sys"
     install -m 0644 "$lim/limine-bios-cd.bin" "$isod/boot/limine/limine-bios-cd.bin"
     install -m 0644 "$lim/BOOTX64.EFI" "$isod/EFI/BOOT/BOOTX64.EFI"
@@ -1521,27 +1629,44 @@ _make_iso() {
         esac
     fi
     if [ "$want_ssl" = 1 ]; then mkdir -p "$isod/l2/ssl"; cp -a "$BUILD/ssl/." "$isod/l2/ssl/"; fi
+    # Phase-2 pack pinning: embed /etc/l2/pack-hash for the exact packs on this
+    # ISO and rebuild the initramfs so live/rescue boots verify every pack.
+    if [ -z "$custom_initrd" ] && [ -d "$ROOTFS/bin" ]; then
+        write_pack_pin "$isod" "$ROOTFS/etc/l2/pack-hash"
+        build_initramfs "$isod/boot/initramfs"
+        if [ "$label" = core ]; then
+            install -m 0644 "$isod/boot/initramfs" "$OUT/initramfs-l2"
+        fi
+    else
+        install -m 0644 "$initrd" "$isod/boot/initramfs"
+    fi
     find "$isod" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
     mkdir -p "$(dirname "$out")"
+    local tmp_iso mod_date
+    tmp_iso=$(mktemp "$out.XXXXXX")
+    mod_date=$(date -u -d "@$EPOCH" '+%Y%m%d%H%M%S00' 2>/dev/null || printf '2026010100000000')
     local args=(-as mkisofs -iso-level 3 -full-iso9660-filenames -R -r -J -volid L2
         -publisher "L2" -preparer "L2 reproducible build" -A "L2 $APP_VERSION"
+        --modification-date="$mod_date"
         -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table
         --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image
-        --protective-msdos-label -o "$out")
+        --protective-msdos-label -o "$tmp_iso")
     job_begin "Creating $(basename "$out")" "$log"
-    if ! xorriso "${args[@]}" "$isod" >"$log" 2>&1; then job_end 1; ui_logtail "$log"; die "ISO build failed"; fi
-    if ! "$OUT/limine/bin/limine" bios-install "$out" >>"$log" 2>&1; then
-        job_end 1; ui_logtail "$log"; die "limine bios-install failed on $out"
+    if ! xorriso "${args[@]}" "$isod" >"$log" 2>&1; then rm -f "$tmp_iso"; job_end 1; ui_logtail "$log"; die "ISO build failed"; fi
+    if ! "$OUT/limine/bin/limine" bios-install "$tmp_iso" >>"$log" 2>&1; then
+        rm -f "$tmp_iso"; job_end 1; ui_logtail "$log"; die "limine bios-install failed on $out"
     fi
-    printf '\114\062\000\001' | dd of="$out" bs=1 seek=440 conv=notrunc 2>/dev/null
-    local size limit; size=$(stat -c%s "$out"); limit=$((limit_mb * 1024 * 1024))
+    printf '\114\062\000\001' | dd of="$tmp_iso" bs=1 seek=440 conv=notrunc 2>/dev/null
+    local size limit; size=$(stat -c%s "$tmp_iso"); limit=$((limit_mb * 1024 * 1024))
     job_end 0 "$(ui_size "$size") of $limit_mb MiB"
     printf '  '; ui_bar "$size" "$limit" 28; printf '  %s / %s MiB\n' "$(ui_size "$size")" "$limit_mb"
     if [ "$size" -gt "$limit" ]; then
         if [ "$L2_ALLOW_BIG_ISO" = 1 ]; then warn "over the ${limit_mb} MiB budget (allowed by L2_ALLOW_BIG_ISO=1)"
-        elif [ "$label" = desktop ]; then die "Desktop ISO exceeds L2_DESKTOP_ISO_LIMIT_MB=$limit_mb"
-        else die "ISO is over the ${limit_mb} MiB budget; trim the kernel, set L2_SSL=wifi (openssl only on l2-wifi.iso) or L2_SSL=off, or L2_ALLOW_BIG_ISO=1"; fi
+        elif [ "$label" = desktop ]; then rm -f "$tmp_iso"; die "Desktop ISO exceeds L2_DESKTOP_ISO_LIMIT_MB=$limit_mb"
+        else rm -f "$tmp_iso"; die "ISO is over the ${limit_mb} MiB budget; trim the kernel, set L2_SSL=wifi (openssl only on l2-wifi.iso) or L2_SSL=off, or L2_ALLOW_BIG_ISO=1"; fi
     fi
+    chmod 0644 "$tmp_iso" 2>/dev/null || true
+    mv -f "$tmp_iso" "$out"
 }
 
 build_iso() {

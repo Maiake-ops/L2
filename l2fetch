@@ -28,11 +28,12 @@ EOF
 done
 
 if [ "$USE_COLOR" = 1 ]; then
-    C1='\033[38;5;117m'   # L2 blue
-    C2='\033[38;5;212m'   # accent
-    C3='\033[38;5;245m'   # label
-    C0='\033[0m'
-    B='\033[1m'
+    ESC=$(printf '\033')
+    C1="${ESC}[38;5;117m"   # L2 blue
+    C2="${ESC}[38;5;212m"   # accent
+    C3="${ESC}[38;5;245m"   # label
+    C0="${ESC}[0m"
+    B="${ESC}[1m"
 else
     C1= C2= C3= C0= B=
 fi
@@ -46,10 +47,28 @@ count_lines() {
 # ---------------------------------------------------------------- identity
 os_name="Linux"
 os_ver=""
-[ -r /etc/os-release ] && . /etc/os-release
-[ -n "${PRETTY_NAME:-}" ] && os_name=$PRETTY_NAME
-[ -z "${PRETTY_NAME:-}" ] && [ -n "${NAME:-}" ] && os_name=$NAME
-[ -n "${VERSION_ID:-}" ] && os_ver=$VERSION_ID
+os_release_file=${L2FETCH_OS_RELEASE:-/etc/os-release}
+if [ -r "$os_release_file" ]; then
+    _pretty=""
+    _name=""
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        case "$_line" in
+            PRETTY_NAME=*|NAME=*|VERSION_ID=*)
+                _k=${_line%%=*}
+                _v=${_line#*=}
+                _v=${_v#\"}; _v=${_v%\"}
+                _v=${_v#\'}; _v=${_v%\'}
+                case "$_k" in
+                    PRETTY_NAME) _pretty=$_v ;;
+                    NAME)        _name=$_v ;;
+                    VERSION_ID)  os_ver=$_v ;;
+                esac
+                ;;
+        esac
+    done < "$os_release_file"
+    [ -n "$_pretty" ] && os_name=$_pretty
+    [ -z "$_pretty" ] && [ -n "$_name" ] && os_name=$_name
+fi
 
 kernel=$(cat /proc/sys/kernel/osrelease 2>/dev/null || uname -r 2>/dev/null || echo unknown)
 machine=$(uname -m 2>/dev/null || arch 2>/dev/null || echo unknown)
@@ -140,8 +159,8 @@ l2ver=""
 [ -r /etc/l2/version ] && l2ver=$(cat /etc/l2/version 2>/dev/null)
 
 trim() {
-    # shell-only leading/trailing space trim
-    s=$1
+    # shell-only leading/trailing space trim + strip control/ESC chars
+    s=$(printf '%s' "$1" | tr -d '\000-\037\177')
     s=${s#"${s%%[![:space:]]*}"}
     s=${s%"${s##*[![:space:]]}"}
     printf '%s' "$s"
@@ -151,7 +170,7 @@ print_row() {
     label=$1
     value=$2
     [ -n "$value" ] || return 0
-    printf "  ${C3}%-10s${C0} %s\n" "$label" "$(trim "$value")"
+    printf '  %s%-10s%s %s\n' "$C3" "$label" "$C0" "$(trim "$value")"
 }
 
 if [ "$USE_LOGO" = 1 ]; then
@@ -223,5 +242,5 @@ print_row "CPU"      "$cpu"
 print_row "Memory"   "$mem"
 print_row "Init"     "$init"
 print_row "L2"       "$l2ver${l2ver:+ }${store:+store: $store}"
-[ -n "$L2_ISO_BUDGET" ] && print_row "ISO" "$L2_ISO_BUDGET"
+[ -n "${L2_ISO_BUDGET:-}" ] && print_row "ISO" "$L2_ISO_BUDGET"
 printf '\n'
