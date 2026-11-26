@@ -39,7 +39,8 @@ check:
 	sh -n overlay/bin/shutdown
 	sh -n overlay/etc/l2/udhcpc.script
 	sh -n overlay/etc/l2/serial-getty
-	python3 -m py_compile tools/patch-kernel-ram.py tools/ramtest.py tools/lowram_matrix.py tools/test-live-install.py tools/test-stability.py tools/verify-lowram.py
+	python3 -m py_compile tools/patch-kernel-ram.py tools/ramtest.py tools/lowram_matrix.py tools/test-live-install.py tools/test-stability.py tools/verify-lowram.py tools/bench-repro.py tools/test_l2pm_adversarial.py
+	python3 tools/bench-repro.py --selftest
 	python3 tools/ramtest.py --selftest
 	python3 -m unittest discover -s tools -p 'test_ramtest.py'
 	python3 -m unittest discover -s tools -p 'test_lowram_matrix.py'
