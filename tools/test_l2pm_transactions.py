@@ -509,6 +509,48 @@ class GcSafety(L2pmTxnBase):
         self.assertEqual(len(list((self.root / "l2/store").iterdir())), 1)
         self.l2pm("rollback", ok=False)  # history intentionally gone
 
+    def test_gc_refuses_with_pending_rollback_intent(self):
+        self.write_recipe("ta")
+        self.l2pm("add", "ta")
+        store = next((self.root / "l2/store").iterdir())
+        (self.root / "l2/var/rollback-intent").write_text("profile=default\ngen=1\n")
+        r = self.l2pm("gc", "--prune-generations", ok=False)
+        self.assertIn("refusing", r.stderr)
+        self.assertTrue(store.exists())
+
+    def test_gc_refuses_on_corrupt_active_profile_link(self):
+        self.write_recipe("ta")
+        self.l2pm("add", "ta")
+        store = next((self.root / "l2/store").iterdir())
+        p = self.profiles_dir() / "default"
+        p.unlink()
+        os.symlink("bogus-target", p)
+        r = self.l2pm("gc", "--prune-generations", ok=False)
+        self.assertIn("refusing", r.stderr)
+        self.assertTrue(store.exists())
+
+    def test_concurrent_installs_serialized_by_flock(self):
+        # M06: parallel l2pm install invocations must serialize via flock on
+        # l2/var/.lock and leave DB and active profile completely consistent.
+        pkgs = []
+        for i in range(6):
+            name = f"conc{i}"
+            self.write_recipe(name)
+            self.l2pm("build", name)
+            pkgs.append(str(self.root / f"l2/cache/{name}-1.0.l2p"))
+        procs = [
+            subprocess.Popen([str(self.bin), "install", p], env=self.env,
+                             cwd=str(self.scratch), stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+            for p in pkgs
+        ]
+        for proc in procs:
+            out, err = proc.communicate(timeout=60)
+            self.assertEqual(proc.returncode, 0, f"concurrent install failed: {out}\n{err}")
+        self.assertEqual(self.db_names(), [f"conc{i}" for i in range(6)])
+        self.l2pm("verify")
+        self.assertTrue((self.root / "l2/var/.lock").exists())
+
 
 class Integrity(L2pmTxnBase):
     def test_reinstall_checks_cached_store_against_archive(self):

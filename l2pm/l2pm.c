@@ -52,6 +52,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -159,6 +160,51 @@ static int is_dir(const char *p)
 {
     struct stat st;
     return lstat(p, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+/* Global state lock on <root>/l2/var/.lock so concurrent l2pm invocations
+ * serialize DB, profile generation, rollback, repair, and GC mutations.
+ * O_CLOEXEC prevents child build/fetch processes from holding the lock. */
+static int l2pm_lock(int exclusive)
+{
+    char *vdir = l2path("var");
+    if (exclusive) {
+        if (mkdir_p(vdir, 0755) != 0) {
+            fprintf(stderr, "l2pm: cannot create %s: %s\n", vdir, strerror(errno));
+            free(vdir);
+            return -1;
+        }
+    }
+    free(vdir);
+    char *lpath = l2path("var/.lock");
+    int flags = exclusive ? (O_RDWR | O_CREAT | O_CLOEXEC) : (O_RDONLY | O_CLOEXEC);
+    int fd = open(lpath, flags, 0644);
+    if (fd < 0) {
+        if (!exclusive && (errno == ENOENT || errno == EACCES || errno == EROFS)) {
+            free(lpath);
+            return -2; /* read-only/uninitialized root: proceed unlocked */
+        }
+        fprintf(stderr, "l2pm: cannot open lock %s: %s\n", lpath, strerror(errno));
+        free(lpath);
+        return -1;
+    }
+    free(lpath);
+    int op = exclusive ? LOCK_EX : LOCK_SH;
+    while (flock(fd, op) != 0) {
+        if (errno == EINTR) continue;
+        fprintf(stderr, "l2pm: cannot acquire lock: %s\n", strerror(errno));
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void l2pm_unlock(int fd)
+{
+    if (fd >= 0) {
+        flock(fd, LOCK_UN);
+        close(fd);
+    }
 }
 
 static int rm_rf(const char *path)
@@ -2417,6 +2463,8 @@ static int cmd_install(int argc, char **argv)
     }
     if (!valid_name(profile)) die("install: bad profile name");
     if (!files.n) die("install: missing package");
+    int lfd = l2pm_lock(1);
+    if (lfd < 0) { pl_free(&files); return 1; }
     struct txn t;
     txn_begin(&t, profile);
     int rc = 0;
@@ -2425,6 +2473,7 @@ static int cmd_install(int argc, char **argv)
     }
     if (rc != 0) txn_abort(&t);
     else txn_commit(&t);
+    l2pm_unlock(lfd);
     pl_free(&files);
     return rc;
 }
@@ -2524,12 +2573,15 @@ static int cmd_add(int argc, char **argv)
     }
     if (!valid_name(profile)) die("add: bad profile name");
     if (!arg) die("add: missing recipe");
+    int lfd = l2pm_lock(1);
+    if (lfd < 0) return 1;
     struct pathlist stack = {0};
     struct txn t;
     txn_begin(&t, profile);
     int rc = add_recipe_rec(arg, NULL, profile, trust, no_deps, &stack, 0, &t);
     if (rc != 0) txn_abort(&t);
     else txn_commit(&t);
+    l2pm_unlock(lfd);
     pl_free(&stack);
     return rc;
 }
@@ -2548,6 +2600,8 @@ static int cmd_remove(int argc, char **argv)
     if (!names.n) die("remove: missing package");
     for (size_t i = 0; i < names.n; i++)
         if (!valid_name(names.v[i])) die("remove: bad package name");
+    int lfd = l2pm_lock(1);
+    if (lfd < 0) { pl_free(&names); return 1; }
     /* All existence and reverse-dependency checks run before any mutation.
      * Names removed together satisfy each other's dependencies. */
     for (size_t i = 0; i < names.n; i++) {
@@ -2556,6 +2610,7 @@ static int cmd_remove(int argc, char **argv)
         free(db);
         if (!there) {
             fprintf(stderr, "l2pm: %s is not installed\n", names.v[i]);
+            l2pm_unlock(lfd);
             pl_free(&names);
             return 1;
         }
@@ -2586,6 +2641,7 @@ static int cmd_remove(int argc, char **argv)
         for (size_t j = 0; j < n; j++) free(dbn[j]);
         free(dbn);
         if (blocked) {
+            l2pm_unlock(lfd);
             pl_free(&names);
             return 1;
         }
@@ -2609,6 +2665,7 @@ static int cmd_remove(int argc, char **argv)
         txn_commit(&t);
         for (size_t i = 0; i < names.n; i++) printf("removed %s\n", names.v[i]);
     }
+    l2pm_unlock(lfd);
     pl_free(&names);
     return rc;
 }
@@ -2851,6 +2908,8 @@ static int cmd_rollback(int argc, char **argv)
         else die("rollback: unexpected argument %s", argv[i]);
     }
     if (!valid_name(profile)) die("rollback: bad profile name");
+    int lfd = l2pm_lock(1);
+    if (lfd < 0) return 1;
 
     char *pdir = l2path("var/profiles");
     char cur_target[MAXPATH] = "";
@@ -2904,6 +2963,7 @@ static int cmd_rollback(int argc, char **argv)
                     pkgs[i].name, pkgs[i].store);
             free_gen_pkgs(pkgs, pn);
             free(target_dir); free(target_rel); free(pdir);
+            l2pm_unlock(lfd);
             return 1;
         }
     }
@@ -2942,6 +3002,7 @@ static int cmd_rollback(int argc, char **argv)
     char *intent_done = l2path("var/rollback-intent");
     unlink(intent_done);
     free(intent_done);
+    l2pm_unlock(lfd);
     printf("rolled back %s to generation %ld\n", profile, target_gen);
     return 0;
 }
@@ -2981,6 +3042,8 @@ static int cmd_verify(int argc, char **argv)
         if (!strcmp(argv[i], "--repair")) repair = 1;
         else die("verify: unexpected argument %s", argv[i]);
     }
+    int lfd = l2pm_lock(repair);
+    if (lfd == -1) return 1;
 
     char *pdir = l2path("var/profiles");
     struct pathlist profiles = {0};
@@ -3247,6 +3310,7 @@ static int cmd_verify(int argc, char **argv)
     }
     pl_free(&profiles);
     free(pdir);
+    l2pm_unlock(lfd);
     return bad ? 1 : 0;
 }
 
@@ -3287,6 +3351,35 @@ static int cmd_gc(int argc, char **argv)
     if (keep_gens && prune_gens)
         die("gc: --keep-generations and --prune-generations are mutually exclusive");
     long keep_last = prune_gens ? 0 : 2;
+    int lfd = l2pm_lock(1);
+    if (lfd < 0) return 1;
+
+    /* Fail-closed if an interrupted rollback is pending repair. */
+    {
+        char *intent = l2path("var/rollback-intent");
+        struct stat ist;
+        int has_intent = (lstat(intent, &ist) == 0);
+        free(intent);
+        if (has_intent) {
+            fprintf(stderr, "l2pm: gc: refusing: interrupted rollback pending (run verify --repair)\n");
+            l2pm_unlock(lfd);
+            return 1;
+        }
+    }
+
+    /* Fail-closed if the installed DB directory exists but cannot be opened. */
+    {
+        char *dbdir = l2path("var/db/installed");
+        DIR *dbd = opendir(dbdir);
+        if (!dbd && errno != ENOENT) {
+            fprintf(stderr, "l2pm: gc: refusing: cannot read %s: %s\n", dbdir, strerror(errno));
+            free(dbdir);
+            l2pm_unlock(lfd);
+            return 1;
+        }
+        if (dbd) closedir(dbd);
+        free(dbdir);
+    }
 
     char *pdir = l2path("var/profiles");
     struct pathlist live_stores = {0};
@@ -3310,6 +3403,7 @@ static int cmd_gc(int argc, char **argv)
     if (refuse) {
         pl_free(&live_stores);
         free(pdir);
+        l2pm_unlock(lfd);
         return 1;
     }
 
@@ -3317,6 +3411,13 @@ static int cmd_gc(int argc, char **argv)
     struct gc_gen *gens = NULL;
     size_t gn = 0, gcap = 0;
     DIR *pd = opendir(pdir);
+    if (!pd && errno != ENOENT) {
+        fprintf(stderr, "l2pm: gc: refusing: cannot read %s: %s\n", pdir, strerror(errno));
+        pl_free(&live_stores);
+        free(pdir);
+        l2pm_unlock(lfd);
+        return 1;
+    }
     if (pd) {
         struct dirent *e;
         while ((e = readdir(pd))) {
@@ -3357,6 +3458,7 @@ static int cmd_gc(int argc, char **argv)
         free(gens);
         pl_free(&live_stores);
         free(pdir);
+        l2pm_unlock(lfd);
         return 1;
     }
     if (gn) qsort(gens, gn, sizeof(*gens), cmp_gc_gen);
@@ -3365,19 +3467,42 @@ static int cmd_gc(int argc, char **argv)
         long ag = -1;
         int have_active = read_active_gen(pdir, gens[i].prof, active_rel,
                                           sizeof(active_rel), &ag) == 0;
+        if (!have_active) {
+            char *plink = fmt("%s/%s", pdir, gens[i].prof);
+            struct stat pst;
+            int link_exists = (lstat(plink, &pst) == 0);
+            free(plink);
+            if (link_exists) {
+                fprintf(stderr, "l2pm: gc: refusing: profile %s active link is corrupt "
+                                "(run verify --repair)\n", gens[i].prof);
+                refuse = 1;
+                break;
+            }
+        }
         int is_active = have_active && !strcmp(active_rel, gens[i].rel);
         long newer = 0; /* same-profile entries before i are newer (sorted) */
         for (size_t j = 0; j < i; j++)
             if (!strcmp(gens[j].prof, gens[i].prof)) newer++;
         gens[i].keep = is_active || keep_gens || newer < keep_last;
     }
+    if (refuse) {
+        for (size_t i = 0; i < gn; i++) {
+            free_gen_pkgs(gens[i].pkgs, gens[i].pn);
+            free(gens[i].prof); free(gens[i].dir); free(gens[i].rel);
+        }
+        free(gens);
+        pl_free(&live_stores);
+        free(pdir);
+        l2pm_unlock(lfd);
+        return 1;
+    }
     for (size_t i = 0; i < gn; i++) {
-        if (gens[i].keep) {
+        int keep = gens[i].keep;
+        if (!keep && rm_rf(gens[i].dir) != 0) keep = 1;
+        if (keep) {
             for (size_t j = 0; j < gens[i].pn; j++)
                 if (*gens[i].pkgs[j].store && !pl_has(&live_stores, gens[i].pkgs[j].store))
                     pl_add(&live_stores, gens[i].pkgs[j].store);
-        } else {
-            rm_rf(gens[i].dir);
         }
         free_gen_pkgs(gens[i].pkgs, gens[i].pn);
         free(gens[i].prof); free(gens[i].dir); free(gens[i].rel);
@@ -3387,7 +3512,7 @@ static int cmd_gc(int argc, char **argv)
 
     char *dir = l2path("store");
     DIR *d = opendir(dir);
-    if (!d) { pl_free(&live_stores); free(dir); return 0; }
+    if (!d) { pl_free(&live_stores); free(dir); l2pm_unlock(lfd); return 0; }
     struct pathlist entries = {0};
     struct dirent *e;
     while ((e = readdir(d))) {
@@ -3405,6 +3530,7 @@ static int cmd_gc(int argc, char **argv)
     pl_free(&entries);
     pl_free(&live_stores);
     free(dir);
+    l2pm_unlock(lfd);
     printf("gc: removed %d store path(s)\n", removed);
     return 0;
 }
