@@ -45,6 +45,9 @@ VERIFY=1
 # The template must end in XXXXXX for busybox mktemp on the live system.
 LOG=$(mktemp "${TMPDIR:-/tmp}/l2install.XXXXXX") || exit 1
 trap 'rm -f "$LOG" 2>/dev/null' EXIT
+# Exit through the active cleanup trap so an interruption cannot resume installation.
+trap 'exit 130' INT
+trap 'exit 143' TERM
 LOOPDEV=""
 
 # ---- shared UI; falls back to a minimal built-in one when the lib is absent
@@ -429,7 +432,7 @@ install_disk() {
     STEP_T=7; [ "$VERIFY" = 1 ] && STEP_T=8
     # Trap before setup_live: it stages a PAYLOAD temp tree that must be
     # cleaned up even when a later step dies.
-    : > "$LOG"; trap cleanup EXIT INT TERM
+    : > "$LOG"; trap cleanup EXIT
     setup_live || true
     preflight "$_dev"
     review_and_confirm "$_dev"
@@ -505,7 +508,7 @@ install_disk() {
         stage "verify"
         if [ "$DRY" = 1 ]; then note "(skipped in dry run)"; else verify_install "$MNT" "$_esp" "$_pu" || warn "verification found problems; see messages above"; fi
     fi
-    cleanup; trap - EXIT INT TERM
+    cleanup; trap - EXIT
     [ "$DRY" = 1 ] || rm -f "$LOG"
     {
         printf 'PART,SIZE,FS,ROLE\n'
@@ -540,7 +543,7 @@ install_image() {
         printf '    + truncate -s %s %s\n    + losetup -fP --show %s\n    (then the normal disk install on the loop device)\n' "$_size" "$_img" "$_img" >&2
         STEP_T=1; return 0
     fi
-    trap cleanup EXIT INT TERM
+    trap cleanup EXIT
     run truncate -s "$_size" -- "$_img"
     LOOPDEV=$(losetup -fP --show -- "$_img") || die "losetup failed"
     say "image $_img -> $LOOPDEV"

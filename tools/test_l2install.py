@@ -9,6 +9,7 @@ import gzip
 import os
 from pathlib import Path
 import shutil
+import signal
 import stat
 import subprocess
 import tempfile
@@ -391,10 +392,7 @@ class L2install(unittest.TestCase):
         empty.write_bytes(b"")
         self.run_installer("-n", "image", str(empty))
 
-    # ------------------------------------------- W6 P1: F5 cleanup scope
-    def test_f5_cleanup_only_umounts_what_we_mounted(self):
-        """With an $MNT env override, cleanup must not umount a mount the
-        installer never created (dry run mounts nothing at all)."""
+    def host_payload_env(self):
         rf = self.scratch / "rootfs"
         (rf / "bin").mkdir(parents=True)
         out = self.scratch / "out"
@@ -404,13 +402,52 @@ class L2install(unittest.TestCase):
         lim = out / "limine" / "bin" / "limine"
         lim.write_text("#!/bin/sh\nexit 0\n")
         lim.chmod(0o755)
-        env = self.record_shims()
-        env["L2_ROOTFS_DIR"] = str(rf)
-        env["L2_OUT_DIR"] = str(out)
+        return dict(self.record_shims(), L2_ROOTFS_DIR=str(rf), L2_OUT_DIR=str(out))
+
+    # ------------------------------------------- W6 P1: F5 cleanup scope
+    def test_f5_cleanup_only_umounts_what_we_mounted(self):
+        """With an $MNT env override, cleanup must not umount a mount the
+        installer never created (dry run mounts nothing at all)."""
+        env = self.host_payload_env()
         self.run_env(env, "-y", "-n", "disk", "/dev/l2-fake-disk")
         self.assertFalse([l for l in self.shim_lines(env)
                           if l.startswith("umount ")],
                          "dry run mounted nothing; cleanup must umount nothing")
+
+    def run_interrupted_install(self, env, sig, *args):
+        # Deliver the signal during preflight, after the cleanup trap is set.
+        self.add_shim("uname",
+                      f'kill -s {sig.name[3:]} "$L2TEST_INSTALLER_PID"\n'
+                      "printf 'x86_64\\n'\n")
+        r = subprocess.run(
+            ["/bin/sh", "-c", 'export L2TEST_INSTALLER_PID=$$; exec "$@"',
+             "sh", str(INSTALLER), *args], env=env, cwd=self.scratch,
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 128 + sig, r.stdout + r.stderr)
+        self.assertNotIn("sgdisk --zap-all", r.stderr)
+
+    def test_interrupted_disk_dry_run_stops_before_partitioning(self):
+        env = self.host_payload_env()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=sig):
+                self.run_interrupted_install(env, sig, "-y", "-n", "disk",
+                                             str(self.scratch / "fake-disk"))
+                self.assertFalse(self.shim_lines(env))
+
+    def test_interrupted_image_detaches_loop_once(self):
+        env = self.host_payload_env()
+        self.add_shim("id", "printf '0\\n'\n")
+        self.add_shim("truncate", "exit 0\n")
+        self.add_shim("losetup",
+                      'if [ "$1" = -d ]; then\n'
+                      '    printf "detach %s\\n" "$2" >> "$L2TEST_SHIMLOG"\n'
+                      'else\n'
+                      '    printf "%s/loop\\n" "$L2TEST_SANDBOX"\n'
+                      'fi\n')
+        image = self.scratch / "image.img"
+        self.run_interrupted_install(env, signal.SIGTERM, "image", str(image))
+        self.assertEqual(self.shim_lines(env), [f"detach {self.scratch / 'loop'}"])
+        self.assertFalse(image.exists())
 
     # ------------------------------------------- W6 P1: F7 picker protocol
     def test_f7_model_cannot_inject_picker_protocol(self):
