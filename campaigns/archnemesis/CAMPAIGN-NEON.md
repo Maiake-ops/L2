@@ -25,6 +25,7 @@
 - QEMU boot baseline (`tools/ramtest.py --iso build/out/l2.iso --ram 256M --settle 40 --budget 10240 --pid1-budget 50`, KVM, `-smp 2`):
   - **BIOS 256 MiB**: **PASS** — idle RAM **5,524 KiB** used / 250,516 KiB MemTotal, PID 1 RSS **40 KiB**, `7.3.3-l2`, clean poweroff (`evidence/baseline-boot-bios-256m.log`).
   - **UEFI 256 MiB**: **PASS** — idle RAM **5,700 KiB** used / 244,592 KiB MemTotal, PID 1 RSS **48 KiB**, `7.3.3-l2`, clean poweroff (`evidence/baseline-boot-uefi-256m.log`).
+  - **Core BIOS 10 MiB** (supervisor baseline finding): **FAIL** — `build/out/l2.iso` does not reach `L2#` prompt at 10 MiB guest RAM. The low-RAM profile (`l2-lowram`) is the 10 MiB boot path; Argon assigned to investigate core-vs-lowram at 8/9/10 MiB.
 
 ## Mission board (M01–M20)
 
