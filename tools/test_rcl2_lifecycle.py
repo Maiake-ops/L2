@@ -234,8 +234,7 @@ class Dispatch(FuzzBase):
         m = re.search(r"resident (\d+) KiB", out)
         self.assertTrue(m, out)
         rss = int(m.group(1))
-        self.assertLessEqual(rss, 60, f"selftest RSS {rss} KiB (target ~50)")
-        self.assertLessEqual(rss, 150)
+        self.assertLessEqual(rss, 50, f"selftest RSS {rss} KiB exceeds 50 KiB gate")
 
     def test_binary_size_budget(self):
         size = RCL2.stat().st_size
@@ -579,6 +578,40 @@ class Pid1Lifecycle(unittest.TestCase):
                                text=True, timeout=15)
             self.assertEqual(r.returncode, 0,
                              f"test-lifecycle {flag} failed ({r.returncode})")
+
+    def test_pid1_resident_rss_gate(self):
+        # M03: boot-resident PID 1 RSS must be <= 50 KiB (measured via host
+        # /proc/<pid>/statm after boot complete).
+        self.start("hostname NS\nklog 0\n"
+                   "service r respawn /bin/helper sleep 60000\n")
+        self.wait_log(r"boot complete")
+        pid = self.rcl2_pid()
+        statm = Path(f"/proc/{pid}/statm").read_text().split()
+        pages = int(statm[1])
+        rss_kib = pages * (os.sysconf("SC_PAGE_SIZE") // 1024)
+        self.assertLessEqual(rss_kib, 50,
+                             f"PID 1 resident RSS {rss_kib} KiB > 50 KiB gate")
+
+    def test_norespawn_exit_125_and_serial_getty(self):
+        # M03: exit 125 permanently disables respawn (0 KiB idle RAM on
+        # UART-less hosts), and overlay/etc/l2/serial-getty exits 125 when
+        # the tty UART is absent.
+        script = REPO / "overlay" / "etc" / "l2" / "serial-getty"
+        r = subprocess.run(["sh", "-n", str(script)],
+                           capture_output=True, text=True, timeout=15)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        r = subprocess.run(["sh", str(script), "ttyS999_nonexistent"],
+                           capture_output=True, text=True, timeout=15)
+        self.assertEqual(r.returncode, 125,
+                         f"serial-getty on absent UART exited {r.returncode}, expected 125")
+
+        self.start("hostname NS\nklog 0\n"
+                   "service ttyS0 respawn /bin/helper exit 125\n"
+                   "service keep respawn /bin/helper sleep 60000\n")
+        self.wait_log(r"ttyS0 disabled \(exit 125\)")
+        time.sleep(1.3)
+        self.assertEqual(self.count_log(r"start ttyS0 pid"), 1,
+                         "disabled exit-125 service must not respawn")
 
 
 if __name__ == "__main__":

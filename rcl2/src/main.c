@@ -71,13 +71,13 @@ struct ksysinfo {
 #define SB_CEIL_MS      30000        /* backoff ceiling           */
 #define GRACE_TERM_MS   5000         /* shutdown TERM grace       */
 #define GRACE_KILL_MS   3000         /* shutdown KILL grace       */
+#define RCL_EXIT_NORESPAWN 125       /* exit code: disable respawn */
 
 /* ------------------------------------------------------------------ data */
 
 static struct rcl_conf g_conf;                         /* ~8.5KB, static    */
 static char       *g_svc_argv[RCL_MAX_SVCS][RCL_MAX_ARGS + 2];
 static char       *g_svc_env[RCL_MAX_ENV + 6];
-static char        g_svc_envbuf[RCL_MAX_ENV][RCL_ENV_LEN];
 
 /* supervision state, indexed by service slot */
 static long           g_pid[RCL_MAX_SVCS];
@@ -90,16 +90,8 @@ static unsigned       g_flags;                         /* atomic per-signal */
 static volatile unsigned char g_closing;               /* shutdown underway */
 
 /* log line buffer: only touched from the main loop, never from handlers */
-static char     g_line[512];
+static char     g_line[256];
 static unsigned g_len;
-/* Shared scratch for one-shot reads (mounts scan, config, cmdline, statm,
- * selftest). Invariant: rcl2 is single-threaded and every consumer finishes
- * before the next one starts (boot order: mounts_setup -> conf_load ->
- * cmdline_flags -> rss_report; --selftest is a separate mode, its rss_report
- * runs after all printout). Nothing retains a pointer into it: the Rust
- * parser copies into g_conf, every other consumer returns a scalar. Pinned
- * by test-supervision.c::test_iobuf_aliasing. */
-static char     g_iobuf[CFG_RAW_CAP];
 
 extern void rcl_sigreturn(void);
 void rcl_enter(unsigned long *sp);
@@ -244,6 +236,7 @@ static int root_mounted_readonly(void)
 {
     int fd = (int)r_sys3(SYS_open, (long)"/proc/mounts", O_RDONLY | O_CLOEXEC, 0);
     if (fd < 0) return 0;
+    char iobuf[512];
     int ro = 0;
     int field = 0;                 /* 0 device, 1 mountpoint, 2 fstype, 3 options */
     int mp_len = 0;                /* mountpoint field length */
@@ -251,12 +244,12 @@ static int root_mounted_readonly(void)
     int opt_len = 0;               /* options field length */
     char opt_head[3] = {0, 0, 0};  /* its first bytes */
     for (;;) {
-        long r = r_sys3(SYS_read, fd, (long)g_iobuf, (long)sizeof(g_iobuf));
+        long r = r_sys3(SYS_read, fd, (long)iobuf, (long)sizeof(iobuf));
         if (r == -EINTR) continue;
         if (r < 0) { r_sys1(SYS_close, fd); return 0; }
         if (r == 0) break;
         for (long k = 0; k < r; k++) {
-            char ch = g_iobuf[k];
+            char ch = iobuf[k];
             if (ch == '\n') {
                 /* a "/" line: options must start with "ro" (last line wins) */
                 if (mp_len == 1 && mp_first == '/')
@@ -427,10 +420,8 @@ static void env_setup(void)
     for (unsigned i = 0; i < sizeof(defs) / sizeof(defs[0]); i++)
         g_svc_env[n++] = (char *)defs[i];
     for (int i = 0; i < RCL_MAX_ENV && i < g_conf.nenv; i++) {
-        g_svc_env[n++] = g_svc_envbuf[i];
-        for (unsigned k = 0; k + 1 < RCL_ENV_LEN && g_conf.env[i][k]; k++)
-            g_svc_envbuf[i][k] = g_conf.env[i][k];
-        g_svc_envbuf[i][RCL_ENV_LEN - 1] = 0;
+        g_conf.env[i][RCL_ENV_LEN - 1] = 0;
+        g_svc_env[n++] = g_conf.env[i];
     }
     g_svc_env[n] = 0;
 }
@@ -500,7 +491,7 @@ static void signals_setup(void)
 #define SIGTAKEN(s)   ((__atomic_load_n(&g_flags, __ATOMIC_RELAXED) & SIGBIT(s)) != 0)
 #define SIGCLEAR(s)   do { __atomic_and_fetch(&g_flags, ~SIGBIT(s), __ATOMIC_RELAXED); } while (0)
 
-__attribute__((noreturn))
+__attribute__((noreturn, cold))
 static void shutdown_run(const char *why, unsigned cmd);
 
 /* signals -> actions; returns only when nothing fatal is pending, never
@@ -532,11 +523,11 @@ static void take_actions(void)
     }
 }
 
-static char g_drain[64];
 static void pipe_drain(void)
 {
+    char drain[64];
     for (;;) {
-        long r = r_sys3(SYS_read, (long)g_sig_rd, (long)g_drain, (long)sizeof(g_drain));
+        long r = r_sys3(SYS_read, (long)g_sig_rd, (long)drain, (long)sizeof(drain));
         if (r == -EINTR) continue;
         if (r <= 0) break;    /* EAGAIN/EOF: nothing left */
     }
@@ -559,8 +550,9 @@ static void conf_default(void)
 
 static void conf_load(void)
 {
+    char iobuf[CFG_RAW_CAP];
     int more = -1;
-    int n = file_read(CONFIG_PATH, g_iobuf, CFG_RAW_CAP, &more);
+    int n = file_read(CONFIG_PATH, iobuf, CFG_RAW_CAP, &more);
     if (n == -EFBIG) {
         if (more == '\n') {
             /* cut landed exactly on a line boundary: every buffered line
@@ -580,7 +572,7 @@ static void conf_load(void)
         conf_default();
         return;
     }
-    long got = rcl_rs_parse(&g_conf, g_iobuf, (unsigned long)n);
+    long got = rcl_rs_parse(&g_conf, iobuf, (unsigned long)n);
     if (got < 0) {
         slog1("config parse failed: ", CONFIG_PATH);
         conf_default();
@@ -605,12 +597,13 @@ static int cmdline_ws(int c)
  * Unreadable -> normal boot. */
 static unsigned cmdline_flags(void)
 {
+    char iobuf[CMDLINE_CAP];
     int more = -1;
-    int n = file_read(CMDLINE_PATH, g_iobuf, (int)sizeof(g_iobuf), &more);
+    int n = file_read(CMDLINE_PATH, iobuf, (int)sizeof(iobuf), &more);
     if (n == -EFBIG) {
-        n = (int)sizeof(g_iobuf) - 1;
+        n = (int)sizeof(iobuf) - 1;
         if (!cmdline_ws(more)) {
-            while (n > 0 && !cmdline_ws((unsigned char)g_iobuf[n - 1]))
+            while (n > 0 && !cmdline_ws((unsigned char)iobuf[n - 1]))
                 n--;
             slog("cmdline over capacity - incomplete trailing token dropped");
         }
@@ -619,7 +612,7 @@ static unsigned cmdline_flags(void)
         slog("cmdline read failed, assuming normal boot");
         return 0;
     }
-    return (unsigned)rcl_rs_bootflags(g_iobuf, (unsigned long)n);
+    return (unsigned)rcl_rs_bootflags(iobuf, (unsigned long)n);
 }
 
 /* ------------------------------------------------- service state machine */
@@ -714,9 +707,16 @@ static int reap_children(void)
         if (hit < g_conf.nsvc) {
             g_pid[hit] = 0;
             struct rcl_svc *s = &g_conf.svcs[hit];
-            if (s->mode == RCL_MODE_RESPAWN && !g_closing)
-                svc_schedule_backoff(hit, st);
-            else {
+            if (s->mode == RCL_MODE_RESPAWN && !g_closing) {
+                if (w_exited(st) && w_exitcode(st) == RCL_EXIT_NORESPAWN) {
+                    g_next[hit] = 0;
+                    g_len = 0;
+                    putstr("rcl2: "); putstr(s->name); putstr(" disabled ("); putexit(st); putstr(")");
+                    line_out();
+                } else {
+                    svc_schedule_backoff(hit, st);
+                }
+            } else {
                 g_len = 0;
                 putstr("rcl2: "); putstr(s->name); putstr(" done ("); putexit(st); putstr(")");
                 line_out();
@@ -782,6 +782,7 @@ static void env_write(char *dst, unsigned cap, const char *head, const char *tai
     dst[k] = 0;
 }
 
+__attribute__((cold))
 static void rescue_shell(void)
 {
     char e_path[48], e_home[16], e_term[16], e_ps1[24];
@@ -841,6 +842,7 @@ static void rescue_shell(void)
 
 /* ------------------------------------------------------- console (getty) */
 
+__attribute__((cold))
 static const char *console_banner(void)
 {
     /* exactly L2's console wording */
@@ -849,6 +851,7 @@ static const char *console_banner(void)
     return "L2 live system ready\nCommands: l2fetch, l2net, l2wifi, l2install, poweroff. RAM-only session: changes are lost at shutdown.";
 }
 
+__attribute__((cold))
 static int console_has_ttys(const char *dev)
 {
     /* "ttyS" substring check without strstr, bounded by the string length:
@@ -863,7 +866,7 @@ static int console_has_ttys(const char *dev)
     return 0;
 }
 
-__attribute__((noreturn))
+__attribute__((noreturn, cold))
 static void console_run(int argc, char **argv)
 {
     const char *dev = (argc > 2) ? argv[2] : "/dev/tty1";
@@ -935,7 +938,7 @@ static void console_run(int argc, char **argv)
 
 /* -------------------------------------------------------- power-off mode */
 
-static void reboot_now(unsigned cmd) __attribute__((noreturn));
+static void reboot_now(unsigned cmd) __attribute__((noreturn, cold));
 
 static void reboot_now(unsigned cmd)
 {
@@ -957,7 +960,7 @@ static void reboot_now(unsigned cmd)
     for (;;) sleep_ms(3600000L);   /* if it ever returns, wait forever */
 }
 
-__attribute__((noreturn))
+__attribute__((noreturn, cold))
 static void power_direct(const char *cmd)
 {
     if (streq(cmd, "poweroff"))     reboot_now(RB_POWER_OFF);
@@ -968,6 +971,7 @@ static void power_direct(const char *cmd)
 
 /* ------------------------------------------------------------ shutdown */
 
+__attribute__((cold))
 static void umount_virtuals(void)
 {
     static const char *const dirs[] = {
@@ -980,7 +984,7 @@ static void umount_virtuals(void)
     }
 }
 
-__attribute__((noreturn))
+__attribute__((noreturn, cold))
 static void shutdown_run(const char *why, unsigned cmd)
 {
     g_closing = 1;
@@ -1038,17 +1042,17 @@ static void shutdown_run(const char *why, unsigned cmd)
 
 static void rss_report(void)
 {
-    /* g_iobuf reuse (auditor carry, -256 B bss): called after cmdline_flags
-     * in pid1_boot and after all printout in selftest - no live consumer */
-    int n = file_read(STATM_PATH, g_iobuf, (int)sizeof(g_iobuf), 0);
+    char statm[128];
+    int n = file_read(STATM_PATH, statm, (int)sizeof(statm), 0);
     if (n < 0) { slog("rss report unavailable"); return; }
-    unsigned long pages = rcl_rs_statm(g_iobuf, (unsigned long)n);
+    unsigned long pages = rcl_rs_statm(statm, (unsigned long)n);
     if (pages == 0) { slog("rss report parse failed"); return; }
     g_len = 0;
     putstr("rcl2: resident "); putnum((long)(pages * 4));
     putstr(" KiB (budget 150)"); line_out();
 }
 
+__attribute__((cold))
 static void write_all_stderr(const void *buf, unsigned long len)
 {
     const char *p = (const char *)buf;
@@ -1063,7 +1067,7 @@ static void write_all_stderr(const void *buf, unsigned long len)
 
 /* C-side sink for Rust panics: log on stderr; exit(1) if not PID 1, or idle
  * and reap zombies forever if PID 1. Only raw syscalls, safe from any context. */
-__attribute__((noreturn))
+__attribute__((noreturn, cold))
 void rcl_c_panic(const void *msg, unsigned long len)
 {
     static const char head[] = "rcl2 PANIC: ";
@@ -1114,9 +1118,11 @@ static const char *mode_str(unsigned char m)
     return "respawn";
 }
 
+__attribute__((cold))
 static void selftest(int argc, char **argv)
 {
     char banner[80];
+    char iobuf[CFG_RAW_CAP];
 
     rcl_rs_banner(banner, sizeof(banner));
     g_len = 0; putstr(banner); putstr(" (selftest)"); line_out();
@@ -1126,14 +1132,14 @@ static void selftest(int argc, char **argv)
     const char *label = "builtin";
     if (argc > 2) {
         int more = -1;
-        int n = file_read(argv[2], g_iobuf, (int)sizeof(g_iobuf), &more);
+        int n = file_read(argv[2], iobuf, (int)sizeof(iobuf), &more);
         if (n == -EFBIG) {
             /* mirror conf_load: a newline probe means complete lines */
-            if (more == '\n') n = (int)sizeof(g_iobuf) - 1;
+            if (more == '\n') n = (int)sizeof(iobuf) - 1;
             else { slog1("config too large: ", argv[2]); die_ex(1); }
         }
         if (n < 0) { slog1("cannot read ", argv[2]); die_ex(1); }
-        confdata = g_iobuf;
+        confdata = iobuf;
         /* parse the bytes actually read, exactly like conf_load at boot:
          * strlen would hide everything after an embedded NUL */
         conflen = (unsigned long)n;
