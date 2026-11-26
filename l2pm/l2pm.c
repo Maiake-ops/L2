@@ -340,10 +340,36 @@ static char *read_small(const char *path)
 
 static int valid_name(const char *s)
 {
-    if (!s || !*s || s[0] == '.') return 0;
-    for (; *s; s++)
-        if (!isalnum((unsigned char)*s) && !strchr("._+-", *s)) return 0;
+    if (!s || !*s || s[0] == '.' || s[0] == '-') return 0;
+    size_t len = 0;
+    for (const char *p = s; *p; p++, len++) {
+        if (!isalnum((unsigned char)*p) && !strchr("._+-", *p)) return 0;
+        if (len >= 127) return 0;
+    }
+    if (len >= 9 && !strcmp(s + len - 9, ".manifest")) return 0;
     return 1;
+}
+
+/* Safe heap-allocated readlink: grows the buffer until the full target fits
+ * (never trusts lstat st_size, avoiding 1-byte overflow or truncation). */
+static char *readlink_alloc(const char *path)
+{
+    size_t cap = 256;
+    for (;;) {
+        char *buf = xmalloc(cap);
+        ssize_t r = readlink(path, buf, cap);
+        if (r < 0) {
+            free(buf);
+            return NULL;
+        }
+        if ((size_t)r < cap) {
+            buf[r] = 0;
+            return buf;
+        }
+        free(buf);
+        if (cap >= 65536) return NULL;
+        cap *= 2;
+    }
 }
 
 static char *shq(const char *s)
@@ -584,10 +610,8 @@ static int tar_add_file(int fd, const char *base, const char *rel, long long epo
 
     char *link = NULL;
     if (S_ISLNK(st.st_mode)) {
-        link = xmalloc((size_t)st.st_size + 1);
-        ssize_t r = readlink(full, link, (size_t)st.st_size + 1);
-        if (r < 0) { free(link); free(full); return -1; }
-        link[r] = 0;
+        link = readlink_alloc(full);
+        if (!link) { free(full); return -1; }
         if (strlen(link) >= 100) {
             fprintf(stderr, "l2pm: symlink target too long: %s\n", full);
             free(link); free(full); return -1;
@@ -1223,10 +1247,34 @@ static int run_shell(const char *cmd, const char *cwd, int quiet)
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
 
-static int copy_tree(const char *src, const char *dst);
-
-static int copy_tree(const char *src, const char *dst)
+/* Non-recursive regular file copy so its 64 KiB I/O buffer is never kept on
+ * the stack across recursive directory levels. */
+static int copy_file(const char *src, const char *dst, mode_t mode)
 {
+    int in = open(src, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (in < 0) return -1;
+    unlink(dst);
+    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, mode & 07777);
+    if (out < 0) { close(in); return -1; }
+    char buf[65536];
+    int rc = 0;
+    for (;;) {
+        ssize_t r = read(in, buf, sizeof(buf));
+        if (r < 0) { if (errno == EINTR) continue; rc = -1; break; }
+        if (r == 0) break;
+        if (write_all(out, buf, (size_t)r) != 0) { rc = -1; break; }
+    }
+    close(in);
+    if (close(out) != 0 && rc == 0) rc = -1;
+    return rc;
+}
+
+static int copy_tree_depth(const char *src, const char *dst, int depth)
+{
+    if (depth > 64) {
+        fprintf(stderr, "l2pm: directory nesting limit exceeded at %s\n", src);
+        return -1;
+    }
     struct stat st;
     if (lstat(src, &st) != 0) return -1;
     if (S_ISDIR(st.st_mode)) {
@@ -1239,43 +1287,30 @@ static int copy_tree(const char *src, const char *dst)
             if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
             char *s = fmt("%s/%s", src, e->d_name);
             char *t = fmt("%s/%s", dst, e->d_name);
-            if (copy_tree(s, t) != 0) rc = -1;
+            if (copy_tree_depth(s, t, depth + 1) != 0) rc = -1;
             free(s); free(t);
         }
         closedir(d);
         return rc;
     }
     if (S_ISLNK(st.st_mode)) {
-        char *buf = xmalloc((size_t)st.st_size + 1);
-        ssize_t r = readlink(src, buf, (size_t)st.st_size + 1);
-        if (r < 0) { free(buf); return -1; }
-        buf[r] = 0;
+        char *buf = readlink_alloc(src);
+        if (!buf) return -1;
         unlink(dst);
         int rc = symlink(buf, dst);
         free(buf);
         return rc;
     }
-    int in = open(src, O_RDONLY | O_CLOEXEC);
-    if (in < 0) return -1;
-    int out = open(dst, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, st.st_mode & 07777);
-    if (out < 0) { close(in); return -1; }
-    char buf[65536];
-    int rc = 0;
-    for (;;) {
-        ssize_t r = read(in, buf, sizeof(buf));
-        if (r < 0) { if (errno == EINTR) continue; rc = -1; break; }
-        if (r == 0) break;
-        ssize_t off = 0;
-        while (off < r) {
-            ssize_t w = write(out, buf + off, (size_t)(r - off));
-            if (w < 0) { if (errno == EINTR) continue; rc = -1; break; }
-            off += w;
-        }
-        if (rc != 0) break;
+    if (!S_ISREG(st.st_mode)) {
+        fprintf(stderr, "l2pm: unsupported file type in copy_tree: %s\n", src);
+        return -1;
     }
-    close(in);
-    close(out);
-    return rc;
+    return copy_file(src, dst, st.st_mode);
+}
+
+static int copy_tree(const char *src, const char *dst)
+{
+    return copy_tree_depth(src, dst, 0);
 }
 
 static int verify_sha256(const char *file, const char *want)
@@ -1766,14 +1801,12 @@ static int manifest_collect(const char *store, struct pathlist *lines)
             pl_add(lines, ln);
             free(ln);
         } else if (S_ISLNK(st.st_mode)) {
-            char *tgt = xmalloc((size_t)st.st_size + 1);
-            ssize_t r = readlink(full, tgt, (size_t)st.st_size + 1);
-            if (r < 0) {
-                free(tgt); free(full);
+            char *tgt = readlink_alloc(full);
+            if (!tgt) {
+                free(full);
                 pl_free(&paths); pl_free(lines);
                 return -1;
             }
-            tgt[r] = 0;
             char *ln = fmt("L\t%s\t%s", rel, tgt);
             pl_add(lines, ln);
             free(ln);
@@ -2704,6 +2737,57 @@ static int add_recipe_rec(const char *arg, const char *from_dir, const char *pro
     return rc;
 }
 
+/* Pre-build dependency graph validation: detect missing recipes, invalid dep
+ * names, cycles, and depth > 32 before executing any build commands. */
+static int validate_dep_graph(const char *arg, const char *from_dir, int no_deps,
+                              struct pathlist *stack, struct pathlist *visited, int depth)
+{
+    if (depth > 32) {
+        fprintf(stderr, "l2pm: dependency depth limit exceeded at %s\n", arg);
+        return 1;
+    }
+    int remote = 0;
+    char *recipe_path = resolve_recipe_from(arg, from_dir, &remote, 0);
+    if (!recipe_path) {
+        fprintf(stderr, "l2pm: add: recipe not found: %s\n", arg);
+        return 1;
+    }
+    struct recipe r;
+    if (parse_recipe(recipe_path, &r) != 0) { free(recipe_path); return 1; }
+    free(recipe_path);
+    if (pl_has(stack, r.name)) {
+        fprintf(stderr, "l2pm: dependency cycle detected: %s\n", r.name);
+        return 1;
+    }
+    if (pl_has(visited, r.name)) return 0;
+    pl_add(stack, r.name);
+    int rc = 0;
+    if (!no_deps && r.deps[0]) {
+        struct pathlist deps = {0};
+        if (parse_deps_list(r.deps, &deps) != 0) {
+            rc = 1;
+        } else {
+            for (size_t i = 0; i < deps.n; i++) {
+                const char *dep = deps.v[i];
+                if (pl_has(stack, dep)) {
+                    fprintf(stderr, "l2pm: dependency cycle detected: %s\n", dep);
+                    rc = 1; break;
+                }
+                if (!is_installed(dep)) {
+                    if (validate_dep_graph(dep, remote ? NULL : r.base, no_deps,
+                                           stack, visited, depth + 1) != 0) {
+                        rc = 1; break;
+                    }
+                }
+            }
+        }
+        pl_free(&deps);
+    }
+    free(stack->v[--stack->n]);
+    if (rc == 0) pl_add(visited, r.name);
+    return rc;
+}
+
 static int cmd_add(int argc, char **argv)
 {
     const char *arg = NULL, *profile = "default";
@@ -2719,6 +2803,15 @@ static int cmd_add(int argc, char **argv)
     if (!arg) die("add: missing recipe");
     int lfd = l2pm_lock(1);
     if (lfd < 0) return 1;
+    struct pathlist vstack = {0}, visited = {0};
+    if (validate_dep_graph(arg, NULL, no_deps, &vstack, &visited, 0) != 0) {
+        pl_free(&vstack);
+        pl_free(&visited);
+        l2pm_unlock(lfd);
+        return 1;
+    }
+    pl_free(&vstack);
+    pl_free(&visited);
     struct pathlist stack = {0};
     struct txn t;
     txn_begin(&t, profile);

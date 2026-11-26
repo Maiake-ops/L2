@@ -554,14 +554,16 @@ class L2pmSecurity(unittest.TestCase):
         self.assertEqual(v.returncode, 0, v.stdout + v.stderr)
 
     def test_dot_and_dotdot_names_rejected(self):
-        for bad in (".", "..", ".hidden"):
+        for bad in (".", "..", ".hidden", "-leadingdash", "foo.manifest"):
             arc = tar_archive([info_entry(name=bad), tar_entry("f", b"x\n")])
             self.install(arc)
         arc = tar_archive([info_entry(), tar_entry("f", b"x\n")])
-        for bad in ("..", ".hidden"):
+        for bad in ("..", ".hidden", "-badprof", "prof.manifest"):
             self.install(arc, extra_args=["--profile", bad])
         for cmd in (["info", ".."], ["info", ".hidden"],
-                    ["remove", ".."], ["remove", ".hidden"]):
+                    ["info", "-dash"], ["info", "x.manifest"],
+                    ["remove", ".."], ["remove", ".hidden"],
+                    ["remove", "-dash"], ["remove", "x.manifest"]):
             r = subprocess.run([str(self.bin), *cmd], env=self.env,
                                capture_output=True, text=True)
             self.assertNotEqual(r.returncode, 0, f"{cmd} unexpectedly succeeded")
