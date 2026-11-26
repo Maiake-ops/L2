@@ -18,12 +18,10 @@
 #     base address is fixed.  See the security note in the report.
 #   * What is KEPT is exactly what a QEMU "pc" guest needs to reach the
 #     initramfs shell over serial and power off cleanly: PIIX3 IDE CD-ROM
-#     (ATA_PIIX + SCSI + SR + ISO9660/JOLIET), virtio blk/net, PCI/MSI,
-#     ACPI core + button (S5 poweroff works WITHOUT SUSPEND because X86
-#     selects ACPI_SYSTEM_POWER_STATES_SUPPORT whenever ACPI=y), RTC,
-#     VT + dummycon (so /dev/tty1 exists for rcl2's tty1 service), 8250
-#     serial console, ext4 (for a later disk install), and the TCP/IP +
-#     unix + packet sockets udhcpc/rcl2 need.
+#     (ATA_PIIX + SCSI + SR + ISO9660/JOLIET), virtio blk, PCI/MSI,
+#     ACPI core (S5 poweroff works WITHOUT SUSPEND because X86 selects
+#     ACPI_SYSTEM_POWER_STATES_SUPPORT whenever ACPI=y), RTC, 8250
+#     serial console (VT=n), and AF_UNIX/AF_PACKET local sockets.
 #
 # Every symbol is re-validated by `make olddefconfig`; symbols this kernel
 # renamed are dropped (tools/l2-lowram reports them) rather than failing.
@@ -366,7 +364,6 @@ CONFIG_INET=n
 CONFIG_UNIX=y
 CONFIG_PACKET=y
 CONFIG_IPV6=n
-CONFIG_INET_TABLE_PERTURB_ORDER=12
 CONFIG_PTP_1588_CLOCK=n
 CONFIG_INET_DIAG=n
 CONFIG_RPS=n

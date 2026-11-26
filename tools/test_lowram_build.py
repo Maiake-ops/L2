@@ -95,6 +95,9 @@ class LowramBuild(unittest.TestCase):
             config = (build / "iso.lowram/boot/limine/limine.conf").read_text()
             self.assertIn("timeout: 1\n", config)
             self.assertIn("l2.rescue=1", config)
+            self.assertIn("console=ttyS0,115200", config)
+            self.assertNotIn("console=tty0", config)
+            self.assertNotIn("mem=1G", config)
             self.assertEqual(config, (build / "iso.lowram/EFI/BOOT/limine.conf").read_text())
 
     def test_initramfs_is_independent_of_input_member_order(self):
@@ -129,3 +132,51 @@ class LowramBuild(unittest.TestCase):
                                         capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, 2)
                 self.assertIn(message, result.stderr)
+
+    def test_check_dropped_treats_absent_disabled_as_ok_and_reports_real_drops(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            cfg = base / ".config"
+            frag = base / "kernel.lowram"
+            logs = base / "logs"
+            cfg.write_text("CONFIG_KEEP=y\n# CONFIG_EXPLICIT_N is not set\n", encoding="utf-8")
+            frag.write_text(
+                "CONFIG_KEEP=y\n"
+                "CONFIG_EXPLICIT_N=n\n"
+                "CONFIG_ABSENT_N=n\n"
+                "CONFIG_DROPPED_Y=y\n",
+                encoding="utf-8",
+            )
+            script = (
+                f'FRAGMENT="{frag}"\n'
+                f'LOGS="{logs}"\n'
+                'warn() { printf "%s\\n" "$*" >&2; }\n'
+                + "\n".join(
+                    (ROOT / "tools/l2-lowram").read_text(encoding="utf-8").splitlines()[103:134]
+                )
+                + f'\ncheck_dropped "{cfg}"\n'
+            )
+            r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=10)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            dropped = (logs / "kernel-lowram-dropped.txt").read_text(encoding="utf-8")
+            self.assertIn("CONFIG_DROPPED_Y=y (got absent)", dropped)
+            self.assertNotIn("CONFIG_ABSENT_N", dropped)
+            self.assertNotIn("CONFIG_EXPLICIT_N", dropped)
+
+    def test_initramfs_atomic_failure_does_not_publish_partial_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            (base / "out").mkdir()
+            (base / "out/initramfs-l2").write_bytes(gzip.compress(b"not-a-valid-cpio", mtime=0))
+            fakebin = base / "bin"
+            fakebin.mkdir()
+            # Force gzip failure during repack so atomic publish must not leave output.
+            out_img = base / "out/initramfs-l2-lowram"
+            r = subprocess.run(
+                [ROOT / "tools/l2-lowram", "initramfs"],
+                env=dict(os.environ, L2_BUILD_DIR=str(base), L2_MAIN_BUILD_DIR=str(base)),
+                capture_output=True, text=True, timeout=10,
+            )
+            self.assertNotEqual(r.returncode, 0)
+            self.assertFalse(out_img.exists())
+            self.assertEqual(list((base / "out").glob("initramfs-l2-lowram.tmp.*")), [])

@@ -122,6 +122,7 @@ check_dropped() {
         END {
             for (i = 1; i <= n; i++) {
                 s = order[i]; v = want[s]; g = (s in got) ? got[s] : "absent"
+                if (v == "n" && g == "absent") continue
                 if (g != v) printf "%s=%s (got %s)\n", s, v, g
             }
         }
@@ -231,9 +232,15 @@ make_initramfs_variant() {
         say "variant initramfs: bin/rcl2 overridden from $L2_LOWRAM_RCL2"
     fi
     find "$work" -exec touch -h -d "@$EPOCH" {} + 2>/dev/null || true
-    ( cd "$work" && find . -print0 | LC_ALL=C sort -z \
+    local tmp_out="$out.tmp.$$"
+    rm -f "$tmp_out"
+    if ! ( cd "$work" && find . -print0 | LC_ALL=C sort -z \
         | cpio --null -o -H newc --owner=0:0 --reproducible --quiet \
-        | gzip -n -9 ) > "$out" || die "initramfs repack failed"
+        | gzip -n -9 ) > "$tmp_out"; then
+        rm -f "$tmp_out"
+        die "initramfs repack failed"
+    fi
+    mv -f "$tmp_out" "$out"
     say "variant initramfs: $out ($(stat -c%s "$out") B)"
 }
 
@@ -265,8 +272,24 @@ make_iso() {
     install -m 0644 "$lim/limine-uefi-cd.bin" "$isod/boot/limine/limine-uefi-cd.bin"
     local cmdline
     cmdline=$(tr -d '\n' < "$L2_ROOT/config/cmdline" 2>/dev/null || printf 'loglevel=4')
-    # Keep the recovery menu accessible on the serial VM while shortening autoboot.
-    sed -e 's/^timeout: 3$/timeout: 1/' -e "s|@CMDLINE@|$cmdline|g" "$L2_ROOT/config/limine.conf" > "$isod/boot/limine/limine.conf"
+    # Serial-only VM limine.conf (no console=tty0 since VT=n, no 1G/256M cap entries).
+    cat > "$isod/boot/limine/limine.conf" <<EOF
+timeout: 1
+default_entry: 1
+interface_branding: L2 lowram - serial VM
+
+/L2 lowram
+    protocol: linux
+    kernel_path: boot():/boot/vmlinuz
+    cmdline: rdinit=/init console=ttyS0,115200 $cmdline
+    module_path: boot():/boot/initramfs
+
+/L2 lowram - recovery shell
+    protocol: linux
+    kernel_path: boot():/boot/vmlinuz
+    cmdline: rdinit=/init l2.rescue=1 console=ttyS0,115200 $cmdline
+    module_path: boot():/boot/initramfs
+EOF
     cp "$isod/boot/limine/limine.conf" "$isod/EFI/BOOT/limine.conf"
     # L2-LIVE marker: l2net find_pack stops immediately (no hw/wifi pack here).
     printf 'L2 live medium lowram\n' > "$isod/l2/L2-LIVE"
