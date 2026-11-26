@@ -9,7 +9,7 @@ PREFIX ?= /usr/local
 ifeq ($(origin CC),default)
 CC := $(if $(wildcard ../build/bin/musl-gcc),../build/bin/musl-gcc,cc)
 endif
-CFLAGS ?= -std=c11 -Os -Wall -Wextra -ffile-prefix-map=$(CURDIR)=.
+CFLAGS ?= -std=c11 -Os -Wall -Wextra -ffile-prefix-map=$(CURDIR)=. -fdebug-prefix-map=$(CURDIR)=.
 LDFLAGS ?= -static
 BIN := l2pm
 LIMIT := 10485760
@@ -18,7 +18,7 @@ all: $(BIN)
 
 $(BIN): l2pm.c
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ $<
-	@strip $@ 2>/dev/null || true
+	@strip -s $@ 2>/dev/null || true
 	@echo "== l2pm =="
 	@ls -l $@
 	@size $@ 2>/dev/null || true

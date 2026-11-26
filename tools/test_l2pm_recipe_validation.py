@@ -68,6 +68,31 @@ class RecipeValidation(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('NUL', result.stderr)
 
+    def test_invalid_epoch_sha256_srcdir_rejected(self):
+        for bad_line, needle in (
+            ('epoch=notanumber', 'invalid epoch'),
+            ('epoch=-5', 'invalid epoch'),
+            ('sha256=deadbeef', 'invalid sha256'),
+            ('srcdir=../escape', 'unsafe srcdir'),
+        ):
+            with self.subTest(bad_line=bad_line):
+                r = self.run_recipe(f'name=test\nversion=1\n{bad_line}\nbuild=true\n')
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn(needle, r.stderr)
+
+    def test_build_check_catches_pwd_leak(self):
+        # M10: build --check uses two distinct buildroot paths so a recipe
+        # leaking $PWD into its output fails reproducibility check.
+        self.recipe.write_text(
+            'name=pwdleak\nversion=1\nepoch=315532800\n'
+            'build=mkdir -p "$DESTDIR/usr/share" && pwd > "$DESTDIR/usr/share/where"\n'
+        )
+        r = subprocess.run([str(REPO / 'l2pm/l2pm'), 'build', str(self.recipe), '--check'],
+                           env=self.env, cwd=self.root, capture_output=True,
+                           text=True, timeout=30)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn('NOT REPRODUCIBLE', r.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

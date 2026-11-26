@@ -683,8 +683,24 @@ static int tar_dir(const char *dir, const char *out, long long epoch)
     struct pathlist l = {0};
     walk(dir, "", &l);
     qsort(l.v, l.n, sizeof(*l.v), cmpstr);
-    int fd = open(out, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    if (fd < 0) { fprintf(stderr, "l2pm: cannot create %s: %s\n", out, strerror(errno)); return -1; }
+    const char *sl = strrchr(out, '/');
+    char *tmp, *pdir;
+    if (!sl) {
+        tmp = fmt(".%s.tmp-%ld", out, (long)getpid());
+        pdir = xstrdup(".");
+    } else if (sl == out) {
+        tmp = fmt("/.%s.tmp-%ld", sl + 1, (long)getpid());
+        pdir = xstrdup("/");
+    } else {
+        tmp = fmt("%.*s/.%s.tmp-%ld", (int)(sl - out), out, sl + 1, (long)getpid());
+        pdir = fmt("%.*s", (int)(sl - out), out);
+    }
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) {
+        fprintf(stderr, "l2pm: cannot create %s: %s\n", out, strerror(errno));
+        pl_free(&l); free(tmp); free(pdir);
+        return -1;
+    }
     int rc = 0;
     for (size_t i = 0; i < l.n; i++) {
         if (tar_add_file(fd, dir, l.v[i], epoch) != 0) { rc = -1; break; }
@@ -694,10 +710,13 @@ static int tar_dir(const char *dir, const char *out, long long epoch)
         memset(zero, 0, sizeof(zero));
         if (write_all(fd, zero, sizeof(zero)) != 0) rc = -1;
     }
+    if (rc == 0 && fsync(fd) != 0) rc = -1;
     if (close(fd) != 0 && rc == 0) rc = -1;
-    for (size_t i = 0; i < l.n; i++) free(l.v[i]);
-    free(l.v);
-    if (rc != 0) unlink(out);
+    pl_free(&l);
+    if (rc == 0 && (rename(tmp, out) != 0 || fsync_dir(pdir) != 0)) rc = -1;
+    if (rc != 0) unlink(tmp);
+    free(tmp);
+    free(pdir);
     return rc;
 }
 
@@ -1140,6 +1159,29 @@ struct recipe {
     char install[16384];
 };
 
+static int parse_epoch(const char *s, long long *out)
+{
+    if (!s || !*s) return -1;
+    for (const char *p = s; *p; p++)
+        if (!isdigit((unsigned char)*p)) return -1;
+    errno = 0;
+    char *end = NULL;
+    long long v = strtoll(s, &end, 10);
+    if (errno == ERANGE || !end || *end != 0 || v < 0 || v > 077777777777LL)
+        return -1;
+    *out = v;
+    return 0;
+}
+
+static int valid_sha256_str(const char *s)
+{
+    if (!s || !*s || !strcmp(s, "-")) return 1;
+    if (strlen(s) != 64) return 0;
+    for (int i = 0; i < 64; i++)
+        if (!isxdigit((unsigned char)s[i])) return 0;
+    return 1;
+}
+
 static int parse_recipe(const char *path, struct recipe *r)
 {
     memset(r, 0, sizeof(*r));
@@ -1149,7 +1191,10 @@ static int parse_recipe(const char *path, struct recipe *r)
     else snprintf(r->base, sizeof(r->base), ".");
     r->epoch = DEFAULT_EPOCH;
     const char *e = getenv("SOURCE_DATE_EPOCH");
-    if (e && *e) r->epoch = strtoll(e, NULL, 10);
+    if (e && *e && parse_epoch(e, &r->epoch) != 0) {
+        fprintf(stderr, "l2pm: invalid SOURCE_DATE_EPOCH: %s\n", e);
+        return -1;
+    }
     FILE *f = fopen(path, "r");
     if (!f) { fprintf(stderr, "l2pm: cannot read recipe %s: %s\n", path, strerror(errno)); return -1; }
     char *line = NULL;
@@ -1181,7 +1226,15 @@ static int parse_recipe(const char *path, struct recipe *r)
         else if (!strcmp(k, "source_dir") || !strcmp(k, "srcdir")) { dst = r->srcdir; size = sizeof(r->srcdir); }
         else if (!strcmp(k, "build")) { dst = r->build; size = sizeof(r->build); }
         else if (!strcmp(k, "deps")) { dst = r->deps; size = sizeof(r->deps); }
-        else if (!strcmp(k, "epoch")) r->epoch = strtoll(v, NULL, 10);
+        else if (!strcmp(k, "epoch")) {
+            if (parse_epoch(v, &r->epoch) != 0) {
+                fprintf(stderr, "l2pm: recipe %s:%zu: invalid epoch '%s'\n",
+                        path, line_number, v);
+                free(line);
+                fclose(f);
+                return -1;
+            }
+        }
         else if (!strcmp(k, "repo")) { dst = r->repo; size = sizeof(r->repo); }
         else if (!strcmp(k, "ref")) { dst = r->ref; size = sizeof(r->ref); }
         else if (!strcmp(k, "compile")) { dst = r->compile; size = sizeof(r->compile); }
@@ -1202,6 +1255,14 @@ static int parse_recipe(const char *path, struct recipe *r)
     fclose(f);
     if (!valid_name(r->name) || !valid_name(r->version)) {
         fprintf(stderr, "l2pm: recipe %s needs valid name/version\n", path);
+        return -1;
+    }
+    if (!valid_sha256_str(r->sha256)) {
+        fprintf(stderr, "l2pm: recipe %s: invalid sha256 '%s'\n", path, r->sha256);
+        return -1;
+    }
+    if (r->srcdir[0] && !safe_rel(r->srcdir)) {
+        fprintf(stderr, "l2pm: recipe %s: unsafe srcdir '%s'\n", path, r->srcdir);
         return -1;
     }
     if (r->repo[0] && r->source[0]) {
@@ -1566,9 +1627,9 @@ static int fetch_repo(const struct recipe *r, const char *cache, const char *src
     return 0;
 }
 
-static int build_once(const struct recipe *r, const char *outtar)
+static int build_once_tagged(const struct recipe *r, const char *outtar, const char *tag)
 {
-    char *buildroot = l2path("build/%s-%s-%ld", r->name, r->version, (long)getpid());
+    char *buildroot = l2path("build/%s-%s-%ld-%s", r->name, r->version, (long)getpid(), tag);
     char *stage = fmt("%s/stage", buildroot);
     char *src = fmt("%s/src", buildroot);
     char *cache = l2path("cache");
@@ -1654,6 +1715,11 @@ static int build_once(const struct recipe *r, const char *outtar)
     if (!getenv("L2PM_KEEP")) rm_rf(buildroot);
     free(buildroot); free(stage); free(src); free(cache); free(srcroot);
     return rc;
+}
+
+static int build_once(const struct recipe *r, const char *outtar)
+{
+    return build_once_tagged(r, outtar, "a");
 }
 
 /* --------------------------------------------------------------- store */
@@ -2525,12 +2591,12 @@ static int cmd_build(int argc, char **argv)
         tar1 = fmt("%s/%s-%s.l2p", cache, r.name, r.version);
         free(cache);
     }
-    if (build_once(&r, tar1) != 0) { free(tar1); return 1; }
+    if (build_once_tagged(&r, tar1, "a") != 0) { free(tar1); return 1; }
     char h1[65];
     if (hash_file(tar1, h1) != 0) { free(tar1); return 1; }
     if (check) {
         char *tar2 = fmt("%s.check.%ld", tar1, (long)getpid());
-        if (build_once(&r, tar2) != 0) { unlink(tar2); free(tar2); free(tar1); return 1; }
+        if (build_once_tagged(&r, tar2, "b-repro-check") != 0) { unlink(tar2); free(tar2); free(tar1); return 1; }
         char h2[65];
         if (hash_file(tar2, h2) != 0) { unlink(tar2); free(tar2); free(tar1); return 1; }
         unlink(tar2);
@@ -3968,7 +4034,9 @@ int main(int argc, char **argv)
     if (!strcmp(cmd, "tar")) {
         if (argc < 2) die("tar: usage: l2pm tar <dir> <out> [--epoch N]");
         long long ep = DEFAULT_EPOCH;
-        if (argc >= 4 && !strcmp(argv[2], "--epoch")) ep = strtoll(argv[3], NULL, 10);
+        if (argc >= 4 && !strcmp(argv[2], "--epoch")) {
+            if (parse_epoch(argv[3], &ep) != 0) die("tar: invalid epoch '%s'", argv[3]);
+        }
         if (tar_dir(argv[0], argv[1], ep) != 0) return 1;
         return 0;
     }
