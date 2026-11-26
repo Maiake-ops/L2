@@ -55,9 +55,11 @@ static uint64_t last_use;               /* last usable LBA */
 static int have_gpt;                    /* entries[] holds a valid table */
 static int dirty;                       /* something changed -> write */
 static int rdonly;                      /* device could only be opened O_RDONLY */
+static int is_blk;                      /* target is a block device */
 static const char *dev;
 static int fd = -1;
 
+static int entry_used(const uint8_t *e);
 static int part_used(int n);
 
 /* ------------------------------------------------------------------ util */
@@ -123,9 +125,18 @@ static void guid_parse(const char *s, uint8_t *g) {
 }
 static void guid_random(uint8_t *g) {
     int r = open("/dev/urandom", O_RDONLY);
-    if (r < 0 || read(r, g, GUID_LEN) != GUID_LEN) die("cannot read /dev/urandom");
+    if (r < 0) die("cannot open /dev/urandom: %s", strerror(errno));
+    size_t got = 0;
+    while (got < GUID_LEN) {
+        ssize_t n = read(r, g + got, GUID_LEN - got);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) { close(r); die("cannot read /dev/urandom"); }
+        got += (size_t)n;
+    }
     close(r);
-    g[6] = (uint8_t)((g[6] & 0x0F) | 0x40);     /* UUID version 4 */
+    /* Mixed-endian GPT GUID: time_hi_and_version is LE at g[6..7], so the
+     * RFC 4122 version 4 nibble lives in the high nibble of g[7]. */
+    g[7] = (uint8_t)((g[7] & 0x0F) | 0x40);     /* UUID version 4 */
     g[8] = (uint8_t)((g[8] & 0x3F) | 0x80);     /* RFC 4122 variant */
 }
 
@@ -152,11 +163,13 @@ static void open_disk(void) {
     if (fstat(fd, &st) < 0) die("fstat %s: %s", dev, strerror(errno));
     uint64_t bytes;
     if (S_ISBLK(st.st_mode)) {
+        is_blk = 1;
         int ssz = 0;
         if (ioctl(fd, BLKSSZGET, &ssz) == 0 && ssz != SECT)
             die("%s has %d-byte sectors; l2gpt supports 512-byte sectors only", dev, ssz);
         if (ioctl(fd, BLKGETSIZE64, &bytes) < 0) die("cannot size %s: %s", dev, strerror(errno));
     } else if (S_ISREG(st.st_mode)) {
+        is_blk = 0;
         bytes = (uint64_t)st.st_size;
     } else {
         die("%s is not a disk or image file", dev);
@@ -185,41 +198,70 @@ static int hdr_valid(const uint8_t *h, uint64_t expect_lba) {
 
 /* The entry array must fit on the disk and not overlap the headers. */
 static int entries_lba_ok(uint64_t elba) {
-    return elba >= 2 && elba <= total_sectors - NPARTS * ENTRY_SZ / SECT;
+    uint64_t nsect = NPARTS * ENTRY_SZ / SECT;
+    return elba >= 2 && elba <= total_sectors - 1 - nsect;
 }
 
-static void load_gpt(void) {
-    uint8_t h[SECT], bh[SECT];
-    read_sect(1, h);
-    read_sect(total_sectors - 1, bh);
-    const uint8_t *use = NULL;
-    uint64_t elba = 0;
-    if (hdr_valid(h, 1)) { use = h; elba = rd64(h + 72); }
-    else if (hdr_valid(bh, total_sectors - 1)) { use = bh; elba = rd64(bh + 72); }
-    if (!use) { have_gpt = 0; return; }
-    uint32_t n = rd32(use + 80), esz = rd32(use + 84);
-    if (n != NPARTS || esz != ENTRY_SZ)
-        die("%s: GPT with %u entries of %u bytes not supported", dev, n, esz);
-    if (!entries_lba_ok(elba))
-        die("%s: GPT entry array LBA %llu out of range", dev, (unsigned long long)elba);
+/* Attempt to load and validate one GPT copy (primary or backup).
+ * Returns 1 on success, 0 if the header is absent/invalid, -1 if the header
+ * passed hdr_valid() but its entry table is unsupported or corrupt (detail in err). */
+static int try_load_gpt(const uint8_t *h, uint64_t expect_lba, char *err, size_t errsz) {
+    if (!hdr_valid(h, expect_lba)) return 0;
+    uint32_t n = rd32(h + 80), esz = rd32(h + 84);
+    if (n != NPARTS || esz != ENTRY_SZ) {
+        snprintf(err, errsz, "%s: GPT with %u entries of %u bytes not supported", dev, n, esz);
+        return -1;
+    }
+    uint64_t elba = rd64(h + 72);
+    if (!entries_lba_ok(elba)) {
+        snprintf(err, errsz, "%s: GPT entry array LBA %llu out of range",
+                 dev, (unsigned long long)elba);
+        return -1;
+    }
     uint8_t buf[NPARTS * ENTRY_SZ];
     for (uint32_t i = 0; i < NPARTS * ENTRY_SZ / SECT; i++)
         read_sect(elba + i, buf + i * SECT);
-    if (crc32(buf, sizeof buf) != rd32(use + 88))
-        die("%s: GPT entry array CRC mismatch", dev);
-    memcpy(entries, buf, sizeof buf);
-    memcpy(disk_guid, use + 56, GUID_LEN);
+    if (crc32(buf, sizeof buf) != rd32(h + 88)) {
+        snprintf(err, errsz, "%s: GPT entry array CRC mismatch", dev);
+        return -1;
+    }
     /* A crafted table with a valid CRC can still carry nonsense LBAs;
      * reject them before any sector arithmetic (first_free, overlap
      * checks, print) can overflow on them. */
     for (int i = 0; i < NPARTS; i++) {
-        if (!part_used(i)) continue;
-        uint64_t s = rd64(entries[i] + 32), e = rd64(entries[i] + 40);
-        if (s < FIRST_USE || e > last_use || s > e)
-            die("%s: GPT partition %d has invalid LBA range %llu..%llu",
-                dev, i + 1, (unsigned long long)s, (unsigned long long)e);
+        const uint8_t *e = buf + (size_t)i * ENTRY_SZ;
+        if (!entry_used(e)) continue;
+        uint64_t s = rd64(e + 32), en = rd64(e + 40);
+        if (s < FIRST_USE || en > last_use || s > en) {
+            snprintf(err, errsz, "%s: GPT partition %d has invalid LBA range %llu..%llu",
+                     dev, i + 1, (unsigned long long)s, (unsigned long long)en);
+            return -1;
+        }
     }
+    memcpy(entries, buf, sizeof buf);
+    memcpy(disk_guid, h + 56, GUID_LEN);
     have_gpt = 1;
+    return 1;
+}
+
+static void load_gpt(void) {
+    uint8_t h[SECT], bh[SECT];
+    char perr[256] = "", berr[256] = "";
+    read_sect(1, h);
+    read_sect(total_sectors - 1, bh);
+    int pr = try_load_gpt(h, 1, perr, sizeof perr);
+    if (pr == 1) return;
+    int br = try_load_gpt(bh, total_sectors - 1, berr, sizeof berr);
+    if (br == 1) {
+        if (pr < 0)
+            fprintf(stderr, "l2gpt: warning: %s; falling back to backup GPT\n", perr);
+        else if (memcmp(h, "EFI PART", 8) == 0)
+            fprintf(stderr, "l2gpt: warning: %s: primary GPT header invalid; falling back to backup GPT\n", dev);
+        return;
+    }
+    if (pr < 0) die("%s", perr);
+    if (br < 0) die("%s", berr);
+    have_gpt = 0;
 }
 
 static void new_gpt(void) {
@@ -239,10 +281,52 @@ static void chs(uint64_t lba, uint8_t out[3]) {
     out[2] = (uint8_t)c;
 }
 
+static void reread_parts(void) {
+    if (!is_blk) return;
+    if (ioctl(fd, BLKRRPART) < 0)
+        fprintf(stderr, "l2gpt: warning: BLKRRPART on %s failed: %s\n", dev, strerror(errno));
+}
+
+static void build_hdr(uint8_t sect[SECT], int is_backup, uint64_t backup, uint32_t ecrc) {
+    uint8_t h[HDR_SZ];
+    memset(h, 0, sizeof h);
+    memcpy(h, "EFI PART", 8);
+    wr32(h + 8, 0x00010000);
+    wr32(h + 12, HDR_SZ);
+    wr64(h + 24, is_backup ? backup : 1);
+    wr64(h + 32, is_backup ? 1 : backup);
+    wr64(h + 40, FIRST_USE);
+    wr64(h + 48, last_use);
+    memcpy(h + 56, disk_guid, GUID_LEN);
+    wr64(h + 72, is_backup ? backup - 32 : 2);
+    wr32(h + 80, NPARTS);
+    wr32(h + 84, ENTRY_SZ);
+    wr32(h + 88, ecrc);
+    wr32(h + 16, crc32(h, HDR_SZ));
+    memset(sect, 0, SECT);
+    memcpy(sect, h, HDR_SZ);
+}
+
 static void write_gpt(void) {
     if (rdonly) die("%s is read-only; cannot write a GPT", dev);
     uint8_t sect[SECT];
     uint64_t backup = total_sectors - 1;
+    uint32_t ecrc = crc32((const uint8_t *)entries, sizeof entries);
+
+    /* Crash-safe order: commit the complete backup GPT (entries + header)
+     * and fsync before touching the primary GPT or protective MBR, so a
+     * power loss at any point leaves at least one valid GPT intact. */
+    for (int i = 0; i < NPARTS * ENTRY_SZ / SECT; i++)
+        write_sect(backup - 32 + i, (const uint8_t *)entries + i * SECT);
+    build_hdr(sect, 1, backup, ecrc);
+    write_sect(backup, sect);
+    if (fsync(fd) < 0) die("fsync %s: %s", dev, strerror(errno));
+
+    /* primary entry array + primary header */
+    for (int i = 0; i < NPARTS * ENTRY_SZ / SECT; i++)
+        write_sect(2 + i, (const uint8_t *)entries + i * SECT);
+    build_hdr(sect, 0, backup, ecrc);
+    write_sect(1, sect);
 
     /* protective MBR */
     memset(sect, 0, SECT);
@@ -256,36 +340,8 @@ static void write_gpt(void) {
     sect[510] = 0x55; sect[511] = 0xAA;
     write_sect(0, sect);
 
-    /* entry array (same bytes for primary and backup) */
-    uint32_t ecrc = crc32((const uint8_t *)entries, sizeof entries);
-    for (int i = 0; i < NPARTS * ENTRY_SZ / SECT; i++) {
-        write_sect(2 + i, (const uint8_t *)entries + i * SECT);
-        write_sect(backup - 32 + i, (const uint8_t *)entries + i * SECT);
-    }
-
-    /* headers: primary at LBA 1, backup at the last LBA */
-    for (int copy = 0; copy < 2; copy++) {
-        uint8_t h[HDR_SZ];
-        memset(h, 0, sizeof h);
-        memcpy(h, "EFI PART", 8);
-        wr32(h + 8, 0x00010000);
-        wr32(h + 12, HDR_SZ);
-        wr64(h + 24, copy ? backup : 1);
-        wr64(h + 32, copy ? 1 : backup);
-        wr64(h + 40, FIRST_USE);
-        wr64(h + 48, last_use);
-        memcpy(h + 56, disk_guid, GUID_LEN);
-        wr64(h + 72, copy ? backup - 32 : 2);
-        wr32(h + 80, NPARTS);
-        wr32(h + 84, ENTRY_SZ);
-        wr32(h + 88, ecrc);
-        wr32(h + 16, crc32(h, HDR_SZ));
-        memset(sect, 0, SECT);
-        memcpy(sect, h, HDR_SZ);
-        write_sect(copy ? backup : 1, sect);
-    }
     if (fsync(fd) < 0) die("fsync %s: %s", dev, strerror(errno));
-    ioctl(fd, BLKRRPART);               /* re-read partitions; fails on files */
+    reread_parts();
 }
 
 static void zap_all(void) {
@@ -295,18 +351,22 @@ static void zap_all(void) {
     for (uint64_t i = 0; i < 34; i++) write_sect(i, z);
     for (uint64_t i = total_sectors - 33; i < total_sectors; i++) write_sect(i, z);
     if (fsync(fd) < 0) die("fsync %s: %s", dev, strerror(errno));
-    ioctl(fd, BLKRRPART);
+    reread_parts();
     memset(entries, 0, sizeof entries);
     have_gpt = 0;
     dirty = 0;
 }
 
 /* ---------------------------------------------------------- operations */
-static int part_used(int n) {
+static int entry_used(const uint8_t *e) {
     /* in use if either GUID is set: -n assigns the unique GUID first,
      * the type GUID only follows with -t (same invocation or a later one) */
     static const uint8_t zero[2 * GUID_LEN];
-    return memcmp(entries[n], zero, 2 * GUID_LEN) != 0;
+    return memcmp(e, zero, 2 * GUID_LEN) != 0;
+}
+
+static int part_used(int n) {
+    return entry_used(entries[n]);
 }
 
 /* First aligned free sector with room for `need` sectors: walk existing
@@ -602,9 +662,8 @@ int main(int argc, char **argv) {
     }
     if (!dev) die("no device given (try --help)");
     open_disk();
-    load_gpt();
-
     if (do_zap) zap_all();
+    else load_gpt();
     /* second pass: mutating options, in command-line order (like sgdisk) */
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];

@@ -6,6 +6,7 @@ Offline and fast; wired into `make check`.
 """
 import os
 from pathlib import Path
+import re
 import shutil
 import struct
 import subprocess
@@ -141,11 +142,24 @@ class L2gpt(unittest.TestCase):
         r = self.run_gpt("-p")  # loads via backup
         self.assertIn("L2-BIOS", r.stdout)
 
+    def test_corrupt_primary_entries_falls_back_to_backup(self):
+        self.make_l2_layout()
+        e = bytearray(self.read_sect(2))
+        e[60] ^= 0xFF
+        self.write_sect(2, bytes(e))
+        r = self.run_gpt("-v", ok=False)
+        self.assertIn("primary entry array CRC mismatch", r.stderr)
+        r = self.run_gpt("-p")
+        self.assertIn("L2-BIOS", r.stdout)
+        self.assertIn("falling back to backup GPT", r.stderr)
+
     def test_corrupt_entry_crc_rejected(self):
         self.make_l2_layout()
         e = bytearray(self.read_sect(2))
         e[60] ^= 0xFF
         self.write_sect(2, bytes(e))
+        # Invalidate backup header so fallback cannot rescue the corrupt primary.
+        self.write_sect(IMG_SECTORS - 1, b"\x00" * SECT)
         r = self.run_gpt("-p", ok=False)
         self.assertIn("CRC mismatch", r.stderr)
 
@@ -155,6 +169,7 @@ class L2gpt(unittest.TestCase):
             data = bytearray(f.read())
             struct.pack_into("<Q", data, SECT + 72, IMG_SECTORS + 1000)  # elba past EOF
             fix_hdr_crc(data, 1)
+            data[(IMG_SECTORS - 1) * SECT:IMG_SECTORS * SECT] = b"\x00" * SECT
             f.seek(0)
             f.write(data)
         r = self.run_gpt("-p", ok=False)
@@ -167,6 +182,7 @@ class L2gpt(unittest.TestCase):
             # entry 0 end LBA -> absurd value, CRCs kept consistent
             struct.pack_into("<Q", data, 2 * SECT + 40, 1 << 63)
             fix_entries_crc(data, 1, 2)
+            data[(IMG_SECTORS - 1) * SECT:IMG_SECTORS * SECT] = b"\x00" * SECT
             f.seek(0)
             f.write(data)
         r = self.run_gpt("-p", ok=False)
@@ -178,10 +194,80 @@ class L2gpt(unittest.TestCase):
             data = bytearray(f.read())
             struct.pack_into("<I", data, SECT + 84, 256)  # esz
             fix_hdr_crc(data, 1)
+            data[(IMG_SECTORS - 1) * SECT:IMG_SECTORS * SECT] = b"\x00" * SECT
             f.seek(0)
             f.write(data)
         r = self.run_gpt("-p", ok=False)
         self.assertIn("not supported", r.stderr)
+
+    def test_zap_all_succeeds_on_corrupt_and_hybrid_gpt(self):
+        # 1) Corrupt entry array CRC + invalid backup
+        self.make_l2_layout()
+        e = bytearray(self.read_sect(2))
+        e[60] ^= 0xFF
+        self.write_sect(2, bytes(e))
+        self.write_sect(IMG_SECTORS - 1, b"\x00" * SECT)
+        self.run_gpt("--zap-all")
+        self.assertEqual(self.read_sect(1), b"\x00" * SECT)
+
+        # 2) Hybrid MBR + unsupported entry size + invalid backup, zap + recreate in one call
+        self.make_l2_layout()
+        with open(self.img, "r+b") as f:
+            data = bytearray(f.read())
+            # Add a second MBR entry (hybrid MBR)
+            data[0x1BE + 16 + 4] = 0x83
+            struct.pack_into("<I", data, SECT + 84, 256)
+            fix_hdr_crc(data, 1)
+            data[(IMG_SECTORS - 1) * SECT:IMG_SECTORS * SECT] = b"\x00" * SECT
+            f.seek(0)
+            f.write(data)
+        self.run_gpt("--zap-all", "-n", "1:2048:+1M", "-t", "1:ef02", "-c", "1:L2-BIOS")
+        r = self.run_gpt("-v")
+        self.assertIn("No problems found", r.stdout)
+
+    def test_random_guids_are_uuidv4(self):
+        uuidv4_re = re.compile(
+            r"^[0-9A-F]{8}-[0-9A-F]{4}-4[0-9A-F]{3}-[89AB][0-9A-F]{3}-[0-9A-F]{12}$"
+        )
+        self.make_l2_layout()
+        r = self.run_gpt("-p")
+        m = re.search(r"Disk identifier \(GUID\): ([0-9A-F-]+)", r.stdout)
+        self.assertIsNotNone(m, r.stdout)
+        self.assertRegex(m.group(1), uuidv4_re)
+        for part in ("1", "2", "3"):
+            ri = self.run_gpt("-i", part)
+            mp = re.search(r"Partition unique GUID: ([0-9A-F-]+)", ri.stdout)
+            self.assertIsNotNone(mp, ri.stdout)
+            self.assertRegex(mp.group(1), uuidv4_re)
+
+    def test_write_gpt_backup_before_primary_and_fsync(self):
+        if shutil.which("strace") is None:
+            self.skipTest("strace not available")
+        self.run_gpt("--zap-all")
+        r = subprocess.run(
+            ["strace", "-e", "trace=pwrite64,fsync",
+             str(self.bin), "-n", "1:2048:+1M", "-t", "1:ef02", str(self.img)],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        events = []
+        for line in r.stderr.splitlines():
+            m = re.match(r"pwrite64\(\d+, .*?, 512, (\d+)\)", line)
+            if m:
+                events.append(("pwrite", int(m.group(1)) // SECT))
+            elif line.startswith("fsync("):
+                events.append(("fsync", None))
+        fsync_idxs = [i for i, (k, _) in enumerate(events) if k == "fsync"]
+        self.assertGreaterEqual(len(fsync_idxs), 2, f"expected >=2 fsyncs, got {events}")
+        first_sync = fsync_idxs[0]
+        before_sync = [lba for k, lba in events[:first_sync] if k == "pwrite"]
+        after_sync = [lba for k, lba in events[first_sync + 1:fsync_idxs[-1]] if k == "pwrite"]
+        # Backup entries + backup header must precede first fsync; primary + MBR must follow it.
+        self.assertIn(IMG_SECTORS - 1, before_sync)
+        self.assertTrue(all(lba >= IMG_SECTORS - 33 for lba in before_sync), before_sync)
+        self.assertIn(0, after_sync)
+        self.assertIn(1, after_sync)
+        self.assertTrue(all(lba <= 33 for lba in after_sync), after_sync)
 
     def test_bad_header_version_rejected(self):
         self.make_l2_layout()
