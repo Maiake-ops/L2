@@ -108,6 +108,10 @@ class ParserFuzz(FuzzBase):
         # complete lines -> parse fully (was: refused as oversize in W1)
         self.check_case("cap2048_newline", good2047 + b"\n", nsvc=1)
         self.check_case("cap2049_newlines", good2047 + b"\n\n", nsvc=1)
+        # M04: trailing content after a newline at cap-1 must NOT be silently dropped
+        self.check_case("over2048_after_newline",
+                        good2047 + b"\nservice hidden once /bin/true\n",
+                        rc=1, contains=("config too large",))
         # genuine mid-token / mid-line cuts are still refused
         self.check_case("over2048_midtoken", good2047 + b"x", rc=1,
                         contains=("config too large",))

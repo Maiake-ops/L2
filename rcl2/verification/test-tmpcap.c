@@ -83,10 +83,13 @@ static void rec_mount(const char *dir, const char *fs, unsigned long flags,
 
 static void check_mount(const char *dir, const char *data)
 {
+    unsigned long expected = streq(dir, "/run")
+        ? (MS_NOSUID | MS_NODEV | MS_NOEXEC)
+        : (MS_NOSUID | MS_NODEV);
     for (unsigned i = 0; i < nmounts; i++)
         if (streq(mounts[i].dir, dir)) {
             CHECK(streq(mounts[i].fs, "tmpfs"));
-            CHECK(mounts[i].flags == MS_NOSUID);
+            CHECK(mounts[i].flags == expected);
             CHECK(streq(mounts[i].data, data));
             return;
         }
@@ -223,16 +226,16 @@ static void run_live(unsigned long totalram)
     unsigned long rcap = live_scratch_cap(totalram, 4, 1UL << 20, 8UL << 20);
     char opt[48];
     scratch_opt(opt, sizeof(opt), "mode=0755,size=", rcap);
-    rec_mount("/run", "tmpfs", MS_NOSUID, opt);
+    rec_mount("/run", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, opt);
     scratch_opt(opt, sizeof(opt), "mode=1777,size=", tcap);
-    rec_mount("/tmp", "tmpfs", MS_NOSUID, opt);
+    rec_mount("/tmp", "tmpfs", MS_NOSUID | MS_NODEV, opt);
 }
 
 static void run_installed(void)
 {
     nmounts = 0;
-    rec_mount("/run", "tmpfs", MS_NOSUID, "mode=0755");
-    rec_mount("/tmp", "tmpfs", MS_NOSUID, "mode=1777");
+    rec_mount("/run", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=0755");
+    rec_mount("/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777");
 }
 
 static void run_sysinfo_fail(void)
@@ -311,6 +314,39 @@ static void scenarios(void)
         CHECK(remounted);
     }
     fake_ro_root = 0;
+
+    /* M04: verify hardened MS_NODEV/MS_NOEXEC flags on virtual mounts */
+    {
+        int seen_proc = 0, seen_sys = 0, seen_shm = 0, seen_dev = 0, seen_pts = 0;
+        for (unsigned i = 0; i < nmounts; i++) {
+            if (streq(mounts[i].dir, "/proc")) { CHECK(mounts[i].flags == (MS_NOSUID | MS_NODEV | MS_NOEXEC)); seen_proc = 1; }
+            if (streq(mounts[i].dir, "/sys"))  { CHECK(mounts[i].flags == (MS_NOSUID | MS_NODEV | MS_NOEXEC)); seen_sys = 1; }
+            if (streq(mounts[i].dir, "/dev/shm")) { CHECK(mounts[i].flags == (MS_NOSUID | MS_NODEV | MS_NOEXEC)); seen_shm = 1; }
+            if (streq(mounts[i].dir, "/dev"))  { CHECK(mounts[i].flags == (MS_NOSUID | MS_NOEXEC)); seen_dev = 1; }
+            if (streq(mounts[i].dir, "/dev/pts")) { CHECK(mounts[i].flags == (MS_NOSUID | MS_NOEXEC)); seen_pts = 1; }
+        }
+        CHECK(seen_proc && seen_sys && seen_shm && seen_dev && seen_pts);
+    }
+
+    /* M04: verify env_setup() deduplicates PATH and repeated keys (last wins) */
+    {
+        memset(&g_conf, 0, sizeof(g_conf));
+        static const char *e0 = "PATH=/custom/bin";
+        static const char *e1 = "FOO=1";
+        static const char *e2 = "FOO=2";
+        memcpy(g_conf.env[0], e0, strlen(e0) + 1);
+        memcpy(g_conf.env[1], e1, strlen(e1) + 1);
+        memcpy(g_conf.env[2], e2, strlen(e2) + 1);
+        g_conf.nenv = 3;
+        env_setup();
+        int path_cnt = 0, foo_cnt = 0, path_ok = 0, foo_ok = 0;
+        for (unsigned i = 0; g_svc_env[i]; i++) {
+            if (env_same_key(g_svc_env[i], "PATH=")) { path_cnt++; path_ok = streq(g_svc_env[i], e0); }
+            if (env_same_key(g_svc_env[i], "FOO="))  { foo_cnt++;  foo_ok = streq(g_svc_env[i], e2); }
+        }
+        CHECK(path_cnt == 1 && path_ok);
+        CHECK(foo_cnt == 1 && foo_ok);
+    }
 #else
     run_sysinfo_fail();
     check_mount("/tmp", "mode=1777,size=2097152");

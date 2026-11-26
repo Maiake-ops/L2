@@ -22,13 +22,14 @@ CFLAGS  := -std=c11 -Oz -Wall -Wextra \
            -ffreestanding -fno-builtin -fno-stack-protector \
            -fno-asynchronous-unwind-tables -fomit-frame-pointer \
            -ffunction-sections -fdata-sections \
-           -fno-pic -fno-pie -fno-ident -fcf-protection=none
+           -fno-pic -fno-pie -fno-ident -fcf-protection=none \
+           -ffile-prefix-map=$(CURDIR)=.
 # -Wno-unused-command-line-argument: the Nix clang wrapper injects C-only
 # flags that are unused when assembling .s (noise on clean builds)
 ASFLAGS := -target x86_64-unknown-linux-gnu -Wno-unused-command-line-argument
 RFLAGS  := --edition 2021 --crate-type staticlib --crate-name rcl2rs \
            -C opt-level=z -C panic=abort -C codegen-units=1 \
-           -C force-unwind-tables=no
+           -C force-unwind-tables=no --remap-path-prefix=$(CURDIR)=.
 LDFLAGS := -static --build-id=none -z max-page-size=4096 -z noseparate-code \
            --no-rosegment -z norelro --gc-sections
 

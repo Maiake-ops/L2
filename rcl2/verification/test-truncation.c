@@ -442,5 +442,9 @@ void rcl_enter(unsigned long *sp)
     test_cmdline_maxlen_newline_probe();
     test_cmdline_cr_stop_set();
     test_mounts_streaming();
+    /* M04: overflow-safe rcl_rs_statm() rejects 20-digit values > u64::MAX */
+    CHECK(rcl_rs_statm("100 18446744073709551615 0", 26) == 18446744073709551615ULL);
+    CHECK(rcl_rs_statm("100 18446744073709551616 0", 26) == 0);
+    CHECK(rcl_rs_statm("100 99999999999999999999 0", 26) == 0);
     finish(0);
 }

@@ -188,7 +188,7 @@ static void sleep_ms(long ms)
 static int file_read(const char *path, char *buf, int cap, int *more)
 {
     if (more) *more = -1;
-    if (cap < 2) return -EINVAL;
+    if (!buf || cap < 2) return -EINVAL;
     int fd = (int)r_sys3(SYS_open, (long)path, O_RDONLY | O_CLOEXEC, 0);
     if (fd < 0) return fd;
     int got = 0;
@@ -200,17 +200,37 @@ static int file_read(const char *path, char *buf, int cap, int *more)
         got += (int)r;
     }
     if (got == cap - 1) {
-        /* one byte past the buffer proves the file did not fit */
+        /* one byte past the buffer proves the file did not fit; if that byte
+         * is '\n', scan ahead so trailing non-newline content is never
+         * mistaken for a clean line-boundary EOF */
         char probe;
         long r;
         do { r = r_sys3(SYS_read, fd, (long)&probe, 1); } while (r == -EINTR);
         if (r != 0) {
-            r_sys1(SYS_close, fd);
-            buf[got] = 0;
             if (r > 0) {
-                if (more) *more = (unsigned char)probe;
+                int first = (unsigned char)probe;
+                if (first == '\n') {
+                    char extra[64];
+                    for (;;) {
+                        long er = r_sys3(SYS_read, fd, (long)extra, (long)sizeof(extra));
+                        if (er == -EINTR) continue;
+                        if (er <= 0) break;
+                        for (long k = 0; k < er; k++) {
+                            if (extra[k] != '\n') {
+                                first = (unsigned char)extra[k];
+                                goto probe_done;
+                            }
+                        }
+                    }
+                }
+probe_done:
+                r_sys1(SYS_close, fd);
+                buf[got] = 0;
+                if (more) *more = first;
                 return -EFBIG;
             }
+            r_sys1(SYS_close, fd);
+            buf[got] = 0;
             return (int)r;
         }
     }
@@ -357,21 +377,21 @@ static void scratch_opt(char *dst, unsigned cap, const char *head, unsigned long
 
 static void mounts_setup(void)
 {
-    do_mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID, "mode=0755");
+    do_mount("devtmpfs", "/dev", "devtmpfs", MS_NOSUID | MS_NOEXEC, "mode=0755");
     console_open();
 
-    do_mount("proc", "/proc", "proc", MS_NOSUID, 0);
+    do_mount("proc", "/proc", "proc", MS_NOSUID | MS_NODEV | MS_NOEXEC, 0);
     symlink_try("/proc/self/fd",   "/dev/fd");
     symlink_try("/proc/self/fd/0", "/dev/stdin");
     symlink_try("/proc/self/fd/1", "/dev/stdout");
     symlink_try("/proc/self/fd/2", "/dev/stderr");
 
-    do_mount("sysfs", "/sys", "sysfs", MS_NOSUID, 0);
+    do_mount("sysfs", "/sys", "sysfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, 0);
 
     mkdir_try("/dev/pts", 0755);
     mkdir_try("/dev/shm", 0755);
-    do_mount("devpts", "/dev/pts", "devpts", MS_NOSUID, "mode=0620,ptmxmode=0666");
-    do_mount("tmpfs", "/dev/shm", "tmpfs", MS_NOSUID, "mode=1777");
+    do_mount("devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, "mode=0620,ptmxmode=0666");
+    do_mount("tmpfs", "/dev/shm", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=1777");
 
     /* /run and /tmp. Installed systems keep the historical mounts (tmpfs
      * default size = half of RAM). Live sessions run on an uncapped ramfs
@@ -385,8 +405,8 @@ static void mounts_setup(void)
          * path does the reverse with MS_REMOUNT|MS_RDONLY). */
         if (root_mounted_readonly() && do_mount(0, "/", 0, MS_REMOUNT, 0) == 0)
             slog("root was read-only; remounted r/w");
-        do_mount("tmpfs", "/run", "tmpfs", MS_NOSUID, "mode=0755");
-        do_mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID, "mode=1777");
+        do_mount("tmpfs", "/run", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=0755");
+        do_mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, "mode=1777");
     } else {
         struct ksysinfo si;
         unsigned long total = 0;
@@ -399,9 +419,9 @@ static void mounts_setup(void)
         mkdir_try("/run", 0755);
         mkdir_try("/tmp", 01777);
         scratch_opt(opt, sizeof(opt), "mode=0755,size=", rcap);
-        do_mount("tmpfs", "/run", "tmpfs", MS_NOSUID, opt);
+        do_mount("tmpfs", "/run", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, opt);
         scratch_opt(opt, sizeof(opt), "mode=1777,size=", tcap);
-        do_mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID, opt);
+        do_mount("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV, opt);
         g_len = 0;
         putstr("rcl2: live scratch caps: /tmp "); putnum((long)(tcap >> 10));
         putstr(" KiB, /run "); putnum((long)(rcap >> 10)); putstr(" KiB");
@@ -410,6 +430,15 @@ static void mounts_setup(void)
 }
 
 /* ------------------------------------------------------------------ env */
+
+static int env_same_key(const char *a, const char *b)
+{
+    while (*a && *b && *a == *b) {
+        if (*a == '=') return 1;
+        a++; b++;
+    }
+    return 0;
+}
 
 static void env_setup(void)
 {
@@ -425,7 +454,15 @@ static void env_setup(void)
         g_svc_env[n++] = (char *)defs[i];
     for (int i = 0; i < RCL_MAX_ENV && i < g_conf.nenv; i++) {
         g_conf.env[i][RCL_ENV_LEN - 1] = 0;
-        g_svc_env[n++] = g_conf.env[i];
+        unsigned slot = n;
+        for (unsigned j = 0; j < n; j++) {
+            if (env_same_key(g_svc_env[j], g_conf.env[i])) {
+                slot = j;
+                break;
+            }
+        }
+        g_svc_env[slot] = g_conf.env[i];
+        if (slot == n) n++;
     }
     g_svc_env[n] = 0;
 }
@@ -1052,7 +1089,7 @@ static void rss_report(void)
     int n = file_read(STATM_PATH, statm, (int)sizeof(statm), 0);
     if (n < 0) { slog("rss report unavailable"); return; }
     unsigned long pages = rcl_rs_statm(statm, (unsigned long)n);
-    if (pages == 0) { slog("rss report parse failed"); return; }
+    if (pages == 0 || pages > (~0UL >> 2)) { slog("rss report parse failed"); return; }
     g_len = 0;
     putstr("rcl2: resident "); putnum((long)(pages * 4));
     putstr(" KiB (budget 150)"); line_out();

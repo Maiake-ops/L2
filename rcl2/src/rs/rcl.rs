@@ -384,7 +384,10 @@ pub extern "C" fn rcl_rs_statm(buf: *const u8, len: usize) -> u64 {
         if !b.is_ascii_digit() {
             return 0;
         }
-        v = v * 10 + (b - b'0') as u64;
+        v = match v.checked_mul(10).and_then(|x| x.checked_add((b - b'0') as u64)) {
+            Some(next) => next,
+            None => return 0,
+        };
     }
     v
 }
