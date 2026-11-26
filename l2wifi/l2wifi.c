@@ -140,22 +140,27 @@ static int ctrl_open(void)
     struct timeval tv = {.tv_sec = 4};
     char dir[64];
     const char *rd = getenv("L2WIFI_CTRL_DIR");
+    mode_t old_um;
 
     snprintf(dir, sizeof dir, "%s", rd ? rd : CTRL_DIR);
     snprintf(a.sun_path, sizeof a.sun_path, "%s/%s", dir, iface);
     sock = socket(AF_UNIX, SOCK_DGRAM, 0);
     if (sock < 0)
         return -1;
-    snprintf(local_path, sizeof local_path, "%s/l2wifi.%d", rd ? dir : "/tmp", (int)getpid());
+    /* Bind client socket inside ctrl dir (never world-writable /tmp) with umask 0077. */
+    snprintf(local_path, sizeof local_path, "%s/l2wifi.%d", dir, (int)getpid());
     snprintf(b.sun_path, sizeof b.sun_path, "%s", local_path);
     unlink(local_path);
+    old_um = umask(0077);
     if (bind(sock, (struct sockaddr *)&b, sizeof b) < 0) {
+        umask(old_um);
         close(sock);
         sock = -1;
         unlink(local_path);
         local_path[0] = 0;
         return -1;
     }
+    umask(old_um);
     chmod(local_path, 0600);
     if (connect(sock, (struct sockaddr *)&a, sizeof a) < 0) {
         close(sock);
@@ -273,6 +278,18 @@ static void ssid_unescape(const char *in, char *out, size_t n)
     out[o] = 0;
 }
 
+/* Strip/replace control chars (incl. ESC 0x1b) before printing SSIDs to a terminal. */
+static void ssid_sanitize(const char *in, char *out, size_t n)
+{
+    size_t o = 0;
+
+    while (*in && o + 1 < n) {
+        unsigned char c = (unsigned char)*in++;
+        out[o++] = (c < 0x20 || c == 0x7f) ? '?' : (char)c;
+    }
+    out[o] = 0;
+}
+
 struct ap {
     char ssid[96];
     char flags[128];
@@ -304,14 +321,16 @@ static int cmp_ap(const void *a, const void *b)
     return ((const struct ap *)b)->sig - ((const struct ap *)a)->sig;
 }
 
-/* parse SCAN_RESULTS: bssid / frequency / signal level / flags / ssid */
+/* parse SCAN_RESULTS: bssid / frequency / signal level / flags / ssid
+ * Uses explicit tab scanning (not strtok_r) so empty flags (\t\t) or tabs in
+ * SSIDs do not shift columns. */
 static int get_scan(struct ap *aps, int max)
 {
     char *r = ctrl("SCAN_RESULTS"), *line, *save = NULL;
     int n = 0, first = 1;
 
     for (line = strtok_r(r, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
-        char *f[5], *p = line, *sv2 = NULL;
+        char *f[5], *p = line, *tab;
         int i, dup = 0;
         struct ap a;
 
@@ -319,11 +338,23 @@ static int get_scan(struct ap *aps, int max)
             first = 0;
             continue;
         }
-        for (i = 0; i < 5; i++) {
-            f[i] = strtok_r(i ? NULL : p, "\t", &sv2);
-            if (!f[i]) {
-                f[i] = (char *)"";
+        for (i = 0; i < 4; i++) {
+            f[i] = p;
+            tab = strchr(p, '\t');
+            if (!tab) {
+                f[4] = (char *)"";
+                break;
             }
+            *tab = 0;
+            p = tab + 1;
+        }
+        if (i < 4)
+            continue;
+        f[4] = p;
+        {
+            size_t slen = strlen(f[4]);
+            while (slen > 0 && f[4][slen - 1] == '\r')
+                f[4][--slen] = 0;
         }
         if (!f[4][0])
             continue;                    /* hidden network */
@@ -378,17 +409,18 @@ static void bars(int sig, char *o)
 static void print_aps(struct ap *aps, int n, int numbered)
 {
     int i;
-    char b[8];
+    char b[8], safe[96];
 
     printf("  %s%s%-34s %-8s %-6s %s%s\n", C(212), numbered ? "   " : "", "SSID", "SECURITY",
            "BAND", "SIGNAL", RST);
     for (i = 0; i < n; i++) {
         bars(aps[i].sig, b);
+        ssid_sanitize(aps[i].ssid, safe, sizeof safe);
         if (numbered)
             printf("  %s%2d%s ", C(212), i + 1, RST);
         else
             printf("  ");
-        printf("%-34.34s %-8s %-6s %s %d dBm\n", aps[i].ssid, aps[i].sec,
+        printf("%-34.34s %-8s %-6s %s %d dBm\n", safe, aps[i].sec,
                aps[i].freq > 5900 ? "6 GHz" : aps[i].freq > 4000 ? "5 GHz" : "2.4G", b, aps[i].sig);
     }
 }
@@ -444,9 +476,10 @@ static int cmd_status(void)
     printf("  %-10s %s\n", "interface", iface);
     printf("  %-10s %s\n", "state", kv(st, "wpa_state", v, sizeof v));
     if (kv(st, "ssid", v, sizeof v)[0]) {
-        char s[96];
+        char s[96], safe[96];
         ssid_unescape(v, s, sizeof s);
-        printf("  %-10s %s\n", "network", s);
+        ssid_sanitize(s, safe, sizeof safe);
+        printf("  %-10s %s\n", "network", safe);
     }
     kv(st, "freq", v, sizeof v);
     if (v[0])
@@ -629,13 +662,19 @@ static int cmd_connect(const char *ssid, const char *psk, int force_open, const 
         }
         if (strncmp(r, "OK", 2))
             die("rejected passphrase: %s", r);
-        if (known_sec && (!strcmp(known_sec, "WPA3") || !strcmp(known_sec, "WPA2/3"))) {
-            r = ctrlf("SET_NETWORK %s key_mgmt %s", id, !strcmp(known_sec, "WPA3") ? "SAE" : "WPA-PSK SAE");
+        if (known_sec && !strcmp(known_sec, "WPA3")) {
+            r = ctrlf("SET_NETWORK %s key_mgmt SAE", id);
             if (strncmp(r, "OK", 2))
                 die("SET_NETWORK key_mgmt failed: %s", r);
-        }
-        if (known_sec && !strcmp(known_sec, "WPA3")) {
             r = ctrlf("SET_NETWORK %s ieee80211w 2", id);
+            if (strncmp(r, "OK", 2))
+                die("SET_NETWORK ieee80211w failed: %s", r);
+        } else {
+            /* Default to WPA-PSK SAE + optional PMF so both WPA2 and WPA3 work. */
+            r = ctrlf("SET_NETWORK %s key_mgmt WPA-PSK SAE", id);
+            if (strncmp(r, "OK", 2))
+                die("SET_NETWORK key_mgmt failed: %s", r);
+            r = ctrlf("SET_NETWORK %s ieee80211w 1", id);
             if (strncmp(r, "OK", 2))
                 die("SET_NETWORK ieee80211w failed: %s", r);
         }
@@ -654,7 +693,11 @@ static int cmd_connect(const char *ssid, const char *psk, int force_open, const 
     r = ctrlf("SELECT_NETWORK %s", id);
     if (strncmp(r, "OK", 2))
         die("SELECT_NETWORK failed: %s", r);
-    printf("  %s*%s connecting to %s ...\n", C(117), RST, ssid);
+    {
+        char safe[96];
+        ssid_sanitize(ssid, safe, sizeof safe);
+        printf("  %s*%s connecting to %s ...\n", C(117), RST, safe);
+    }
     rc = wait_connected(20);
     if (rc < 0) {
         ctrlf("REMOVE_NETWORK %s", id);
@@ -691,9 +734,10 @@ static int cmd_list(void)
         t3 = strchr(t2 + 1, '\t');
         *t2 = 0;
         {
-            char un[96];
+            char un[96], safe[96];
             ssid_unescape(t1 + 1, un, sizeof un);
-            printf("  %-34.34s %s\n", un, t3 && strstr(t3, "CURRENT") ? "(connected)" : "");
+            ssid_sanitize(un, safe, sizeof safe);
+            printf("  %-34.34s %s\n", safe, t3 && strstr(t3, "CURRENT") ? "(connected)" : "");
         }
     }
     return 0;
@@ -728,7 +772,11 @@ static int cmd_forget(const char *ssid)
     if (!hit)
         die("no saved network named '%s'", ssid);
     ctrl("SAVE_CONFIG");
-    printf("  forgot %s\n", ssid);
+    {
+        char safe[96];
+        ssid_sanitize(ssid, safe, sizeof safe);
+        printf("  forgot %s\n", safe);
+    }
     return 0;
 }
 

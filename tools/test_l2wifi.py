@@ -42,6 +42,8 @@ class MockSupplicant:
                 reply = (
                     "bssid / frequency / signal level / flags / ssid\n"
                     "00:11:22:33:44:55\t5180\t-45\t[WPA2-PSK-CCMP][ESS]\tHome\\x20Net\n"
+                    "11:22:33:44:55:66\t2437\t-50\t\tEmptyFlagsOpen\n"
+                    "22:33:44:55:66:77\t5220\t-55\t[WPA2-PSK-CCMP][ESS]\tEvil\\x1b[31mAP\n"
                     "aa:bb:cc:dd:ee:ff\t2412\t-60\t[ESS]\tCafe\n"
                 )
             elif cmd == "LIST_NETWORKS":
@@ -117,8 +119,35 @@ class L2wifiTests(unittest.TestCase):
             any(c == 'SET_NETWORK 1 psk "pa\\"ss\\\\word1"' for c in self.server.commands),
             self.server.commands,
         )
+        self.assertIn("SET_NETWORK 1 key_mgmt WPA-PSK SAE", self.server.commands)
+        self.assertIn("SET_NETWORK 1 ieee80211w 1", self.server.commands)
         r = self.run_wifi("connect", "TestNet", "bad\npass123", ok=False)
         self.assertIn("control characters", r.stderr)
+
+    def test_scan_tab_parser_and_esc_sanitization(self):
+        r = self.run_wifi("scan")
+        self.assertIn("EmptyFlagsOpen", r.stdout)
+        self.assertIn("open", r.stdout)
+        self.assertNotIn("\x1b", r.stdout, "raw ESC leaked from AP SSID")
+        self.assertIn("Evil?[31mAP", r.stdout)
+
+    def test_ctrl_dir_socket_and_umask(self):
+        src = (REPO / "l2wifi" / "l2wifi.c").read_text()
+        self.assertNotIn('rd ? dir : "/tmp"', src)
+        self.assertIn("umask(0077)", src)
+
+    def test_openssl_cnf_and_xserverrc_hardening(self):
+        cnf = (REPO / "config" / "openssl.cnf").read_text()
+        self.assertIn("MinProtocol = TLSv1.2", cnf)
+        self.assertIn("DEFAULT:@SECLEVEL=2", cnf)
+        self.assertIn("default_md = sha256", cnf)
+        self.assertIn("providers = provider_sect", cnf)
+        xrc = REPO / "desktop" / "rootfs" / "etc" / "X11" / "xinit" / "xserverrc"
+        r = subprocess.run(["sh", "-n", str(xrc)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        xrc_text = xrc.read_text()
+        self.assertIn("umask 077", xrc_text)
+        self.assertIn("-nolisten tcp", xrc_text)
 
     def test_country_validation_and_uppercase(self):
         r = self.run_wifi("country", "th")

@@ -3,7 +3,14 @@
 openssl_conf = l2_init
 
 [l2_init]
+providers = provider_sect
 ssl_conf = l2_ssl
+
+[provider_sect]
+default = default_sect
+
+[default_sect]
+activate = 1
 
 [l2_ssl]
 system_default = l2_tls
@@ -11,8 +18,12 @@ system_default = l2_tls
 [l2_tls]
 MinProtocol = TLSv1.2
 CipherString = DEFAULT:@SECLEVEL=2
+Ciphersuites = TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256
+Curves = X25519:P-256:P-384
 
 [req]
+default_bits = 2048
+default_md = sha256
 distinguished_name = req_dn
 x509_extensions = v3_ca
 prompt = no
@@ -22,4 +33,5 @@ CN = L2
 
 [v3_ca]
 basicConstraints = critical,CA:true
+keyUsage = critical, digitalSignature, cRLSign, keyCertSign
 subjectKeyIdentifier = hash

@@ -23,10 +23,14 @@ if [ -n "$krel" ] && [ -r "/lib/modules/$krel/modules.alias" ]; then
 fi
 
 session=/run/l2-x11
+[ ! -L "$session" ] || exit 1
 mkdir -p "$session"
+chmod 0700 "$session"
 conf=$session/xorg.conf
+rm -f "$conf"
 cp /etc/X11/xorg.conf "$conf"
 layout=$session/layout
+rm -f "$layout"
 printf 'Section "ServerLayout"\n Identifier "Desktop"\n Screen "Screen"\n' > "$layout"
 keyboard= pointer=
 has_syn=0
@@ -47,15 +51,23 @@ key_w6() {
 }
 
 for event in /sys/class/input/event*; do
-    [ -r "$event/device/capabilities/ev" ] || continue
-    read -r bits < "$event/device/capabilities/ev"
-    read -r full_keys < "$event/device/capabilities/key"
+    name=${event##*/}
+    case "$name" in
+        event[0-9]*) ;;
+        *) continue ;;
+    esac
+    [ -r "$event/device/capabilities/ev" ] && [ -r "$event/device/capabilities/key" ] || continue
+    read -r bits < "$event/device/capabilities/ev" || continue
+    read -r full_keys < "$event/device/capabilities/key" || continue
+    case "$bits" in ''|*[!0-9a-fA-F]*) continue ;; esac
     low_key=${full_keys##* }
     while [ "${#low_key}" -gt 8 ]; do low_key=${low_key#?}; done
+    case "$low_key" in ''|*[!0-9a-fA-F]*) low_key=0 ;; esac
     role=SendCoreEvents
     is_tp=0
     props=0
-    [ -r "$event/device/properties" ] && read -r props < "$event/device/properties"
+    [ -r "$event/device/properties" ] && read -r props < "$event/device/properties" || props=0
+    case "$props" in ''|*[!0-9a-fA-F]*) props=0 ;; esac
 
     if [ "$((0x$low_key & 0x40000000))" -ne 0 ]; then
         if [ -z "$keyboard" ]; then role=CoreKeyboard; keyboard=1; fi

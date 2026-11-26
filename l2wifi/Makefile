@@ -4,13 +4,15 @@
 ifeq ($(origin CC),default)
 CC := $(if $(wildcard ../build/bin/musl-gcc),../build/bin/musl-gcc,cc)
 endif
-CFLAGS  ?= -std=c11 -Os -Wall -Wextra -Wno-format-truncation
+CFLAGS  ?= -std=c11 -Os -ffunction-sections -fdata-sections -Wall -Wextra -Wno-format-truncation \
+           -ffile-prefix-map=$(CURDIR)=/l2/src/l2wifi -fdebug-prefix-map=$(CURDIR)=/l2/src/l2wifi
+LDFLAGS ?= -static -Wl,--gc-sections
 VERSION  = 0.1.0
 
 all: l2wifi
 
 l2wifi: l2wifi.c
-	$(CC) $(CFLAGS) -static -o $@ l2wifi.c
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ l2wifi.c
 	-strip -s $@
 
 # reproducible source tarball: sorted, fixed owner and mtime, xz
