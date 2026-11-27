@@ -19,3 +19,18 @@ notes/
 *.ko
 *.tar.xz
 note/
+
+# AI tools, agents, and campaign/audit docs
+.claude/
+.agents/
+.gemini/
+.cursor/
+.aider*
+CLAUDE.md
+GEMINI.md
+campaigns/
+docs/armageddon/
+docs/armageddon-progress.md
+docs/armageddon-ii-progress.md
+docs/astra-armageddon-progress.md
+*.pdf
